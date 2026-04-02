@@ -1,33 +1,40 @@
 #define VOLK_IMPLEMENTATION
 #include "volk.h"
-
-// CRITICAL FIX: The officially supported way to use VMA + Volk. 
-// By keeping Static ON, VMA's code gets replaced by Volk's safe macros during compilation!
-#define VMA_STATIC_VULKAN_FUNCTIONS 1
-#define VMA_DYNAMIC_VULKAN_FUNCTIONS 0
-#define VMA_VULKAN_VERSION 1002000
-#define VMA_IMPLEMENTATION
-#include "vk_mem_alloc.h"
-
 #include <iostream>
 #include <vector>
 
+// --- RAW VULKAN MEMORY HELPER ---
+// This asks the GPU (SwiftShader) exactly which memory block is safe to use
+uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+    VkPhysicalDeviceMemoryProperties memProperties;
+    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
+    
+    for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+        if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+            return i;
+        }
+    }
+    return 0; // Fallback
+}
+
 struct Texture {
     VkImage image = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE;
-    VmaAllocation allocation = VK_NULL_HANDLE;
 
-    void destroy(VkDevice device, VmaAllocator allocator) {
+    void destroy(VkDevice device) {
         if (view) vkDestroyImageView(device, view, nullptr);
-        if (image && allocation) vmaDestroyImage(allocator, image, allocation);
+        if (image) vkDestroyImage(device, image, nullptr);
+        if (memory) vkFreeMemory(device, memory, nullptr);
     }
 };
 
-Texture createTexture(VkDevice device, VmaAllocator allocator, uint32_t width, uint32_t height, 
+Texture createTexture(VkPhysicalDevice physicalDevice, VkDevice device, uint32_t width, uint32_t height, 
                       VkFormat format, VkImageUsageFlags usage, VkImageAspectFlags aspect, const std::string& name) {
     Texture tex;
-    std::cout << "  -> Creating Image Info for " << name << "..." << std::endl;
+    std::cout << "  -> Allocating " << name << "..." << std::flush;
 
+    // 1. Create Image Handle
     VkImageCreateInfo imageInfo = {};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageInfo.imageType = VK_IMAGE_TYPE_2D;
@@ -43,28 +50,30 @@ Texture createTexture(VkDevice device, VmaAllocator allocator, uint32_t width, u
     imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-    // DIAGNOSTIC TEST: Can SwiftShader natively create the Image Handle?
-    std::cout << "  -> [RAW VULKAN TEST] vkCreateImage... " << std::flush;
-    VkImage testImage;
-    if (vkCreateImage(device, &imageInfo, nullptr, &testImage) != VK_SUCCESS) {
-        std::cout << "FAILED! SwiftShader rejected the image format/usage." << std::endl;
+    if (vkCreateImage(device, &imageInfo, nullptr, &tex.image) != VK_SUCCESS) {
+        std::cout << " [FAILED at vkCreateImage!]" << std::endl;
         return tex;
     }
-    std::cout << "SUCCESS!" << std::endl;
-    vkDestroyImage(device, testImage, nullptr);
 
-    // If raw Vulkan succeeds, try VMA memory mapping
-    std::cout << "  -> [VMA TEST] vmaCreateImage... " << std::flush;
-    VmaAllocationCreateInfo allocInfo = {};
-    // Fall back to the absolute safest memory request for a CPU emulator
-    allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU; 
+    // 2. Ask Vulkan how much memory this image needs
+    VkMemoryRequirements memReqs;
+    vkGetImageMemoryRequirements(device, tex.image, &memReqs);
 
-    if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &tex.image, &tex.allocation, nullptr) != VK_SUCCESS) {
-        std::cout << "FAILED! VMA crashed during memory allocation." << std::endl;
+    // 3. Allocate Raw Memory
+    VkMemoryAllocateInfo allocInfo = {};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memReqs.size;
+    allocInfo.memoryTypeIndex = findMemoryType(physicalDevice, memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+    if (vkAllocateMemory(device, &allocInfo, nullptr, &tex.memory) != VK_SUCCESS) {
+        std::cout << " [FAILED at vkAllocateMemory!]" << std::endl;
         return tex;
     }
-    std::cout << "SUCCESS!" << std::endl;
 
+    // 4. Bind the Memory to the Image
+    vkBindImageMemory(device, tex.image, tex.memory, 0);
+
+    // 5. Create the Image View
     VkImageViewCreateInfo viewInfo = {};
     viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     viewInfo.image = tex.image;
@@ -77,16 +86,16 @@ Texture createTexture(VkDevice device, VmaAllocator allocator, uint32_t width, u
     viewInfo.subresourceRange.layerCount = 1;
 
     if (vkCreateImageView(device, &viewInfo, nullptr, &tex.view) != VK_SUCCESS) {
-        std::cout << "  -> FAILED at vkCreateImageView!" << std::endl;
+        std::cout << " [FAILED at vkCreateImageView!]" << std::endl;
         return tex;
     }
 
-    std::cout << "  -> " << name << " Allocation Complete!" << std::endl;
+    std::cout << " [OK]" << std::endl;
     return tex;
 }
 
 int main() {
-    std::cout << "--- Vulkan Headless Testbed (Phase 2 - Diagnostic) ---" << std::endl;
+    std::cout << "--- Vulkan Headless Testbed (Phase 2 - Raw Vulkan) ---" << std::endl;
 
     if (volkInitialize() != VK_SUCCESS) return 1;
 
@@ -142,34 +151,30 @@ int main() {
     VkQueue queue;
     vkGetDeviceQueue(device, queueFamilyIndex, 0, &queue);
 
-    VmaAllocatorCreateInfo allocatorInfo = {};
-    allocatorInfo.physicalDevice = physicalDevice;
-    allocatorInfo.device = device;
-    allocatorInfo.instance = instance;
-    allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_2;
-
-    VmaAllocator allocator;
-    if (vmaCreateAllocator(&allocatorInfo, &allocator) != VK_SUCCESS) return 1;
     std::cout << "SUCCESS: Core Vulkan Initialized." << std::endl;
+
+    // =========================================================================
+    // PHASE 2: ALLOCATING THE FSR RESOURCES & COMMAND BUFFER
+    // =========================================================================
 
     uint32_t renderW = 320, renderH = 240;
     uint32_t displayW = 640, displayH = 480;
 
-    std::cout << "\nAllocating VRAM Textures..." << std::endl;
+    std::cout << "Allocating VRAM Textures..." << std::endl;
 
-    Texture colorTex = createTexture(device, allocator, renderW, renderH, VK_FORMAT_R8G8B8A8_UNORM, 
+    Texture colorTex = createTexture(physicalDevice, device, renderW, renderH, VK_FORMAT_R8G8B8A8_UNORM, 
                                      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT, "Color Input");
 
-    Texture depthTex = createTexture(device, allocator, renderW, renderH, VK_FORMAT_D32_SFLOAT, 
+    Texture depthTex = createTexture(physicalDevice, device, renderW, renderH, VK_FORMAT_D32_SFLOAT, 
                                      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT, "Depth Buffer");
 
-    Texture motionTex = createTexture(device, allocator, renderW, renderH, VK_FORMAT_R16G16_SFLOAT, 
+    Texture motionTex = createTexture(physicalDevice, device, renderW, renderH, VK_FORMAT_R16G16_SFLOAT, 
                                       VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT, "Motion Vectors");
 
-    Texture outputTex = createTexture(device, allocator, displayW, displayH, VK_FORMAT_R8G8B8A8_UNORM, 
-                                      VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT, "Output Color");
+    Texture outputTex = createTexture(physicalDevice, device, displayW, displayH, VK_FORMAT_R8G8B8A8_UNORM, 
+                                      VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT, "Output Color");
 
-    std::cout << "\nSUCCESS: 4x FSR Textures Allocated in VRAM." << std::endl;
+    std::cout << "SUCCESS: 4x FSR Textures Allocated in VRAM." << std::endl;
 
     VkCommandPoolCreateInfo poolInfo = {};
     poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -188,13 +193,17 @@ int main() {
     VkCommandBuffer commandBuffer;
     if (vkAllocateCommandBuffers(device, &allocCmdInfo, &commandBuffer) != VK_SUCCESS) return 1;
 
-    colorTex.destroy(device, allocator);
-    depthTex.destroy(device, allocator);
-    motionTex.destroy(device, allocator);
-    outputTex.destroy(device, allocator);
+    std::cout << "SUCCESS: Command Buffer established. We are ready to inject the AMD FSR SDK!" << std::endl;
+
+    // =========================================================================
+    // CLEANUP
+    // =========================================================================
+    colorTex.destroy(device);
+    depthTex.destroy(device);
+    motionTex.destroy(device);
+    outputTex.destroy(device);
 
     vkDestroyCommandPool(device, commandPool, nullptr);
-    vmaDestroyAllocator(allocator);
     vkDestroyDevice(device, nullptr);
     vkDestroyInstance(instance, nullptr);
     
