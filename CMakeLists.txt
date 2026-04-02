@@ -32,6 +32,11 @@ FetchContent_MakeAvailable(ffx_sdk)
 
 add_executable(vk-upscale-testbed src/main.cpp)
 
+# --- CRITICAL FIX: Explicitly tell the compiler where the AMD SDK headers live! ---
+target_include_directories(vk-upscale-testbed PRIVATE 
+    ${ffx_sdk_SOURCE_DIR}/sdk/include
+)
+
 # Link Vulkan, Volk, and the AMD FidelityFX FSR2 Backend!
 target_link_libraries(vk-upscale-testbed PRIVATE 
     volk::volk_headers 
