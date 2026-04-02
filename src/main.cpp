@@ -1,7 +1,7 @@
 #define VOLK_IMPLEMENTATION
 #include "volk.h"
 
-// --- NEW: INCLUDE AMD FIDELITYFX FSR 2 HEADERS ---
+// --- RESTORED: FSR 2.2 HEADERS FOR SDK v1.1.4 ---
 #include <FidelityFX/host/ffx_fsr2.h>
 #include <FidelityFX/host/backends/vk/ffx_vk.h>
 
@@ -75,7 +75,7 @@ Texture createTexture(VkPhysicalDevice physicalDevice, VkDevice device, uint32_t
 }
 
 int main() {
-    std::cout << "--- Vulkan Headless Testbed (Phase 3 - AMD SDK) ---" << std::endl;
+    std::cout << "--- Vulkan Headless Testbed (Phase 3 - AMD SDK v1.1.4) ---" << std::endl;
 
     if (volkInitialize() != VK_SUCCESS) return 1;
 
@@ -112,14 +112,14 @@ int main() {
         }
     }
 
-    // --- CRITICAL FIX: ENABLE VULKAN 1.2 HARDWARE FEATURES FOR FSR ---
+    // ENABLE VULKAN 1.2 HARDWARE FEATURES FOR FSR
     VkPhysicalDeviceVulkan12Features features12 = {};
     features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
 
     VkPhysicalDeviceFeatures2 features2 = {};
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     features2.pNext = &features12;
-    vkGetPhysicalDeviceFeatures2(physicalDevice, &features2); // Ask SwiftShader what it supports!
+    vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
 
     float queuePriority = 1.0f;
     VkDeviceQueueCreateInfo queueCreateInfo = {};
@@ -132,7 +132,7 @@ int main() {
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     deviceInfo.queueCreateInfoCount = 1;
     deviceInfo.pQueueCreateInfos = &queueCreateInfo;
-    deviceInfo.pNext = &features2; // Pass the Vulkan 1.2 Feature Chain into the Logical Device!
+    deviceInfo.pNext = &features2;
 
     VkDevice device;
     if (vkCreateDevice(physicalDevice, &deviceInfo, nullptr, &device) != VK_SUCCESS) return 1;
@@ -169,7 +169,7 @@ int main() {
         return 1;
     }
 
-    // 3. Create the FSR 2 Context (This validates all the hardware features!)
+    // 3. Create the FSR 2 Context (Validates all hardware features)
     FfxFsr2ContextDescription fsr2Desc = {};
     fsr2Desc.flags = FFX_FSR2_ENABLE_AUTO_EXPOSURE; 
     fsr2Desc.maxRenderSize.width = renderW;
@@ -177,7 +177,7 @@ int main() {
     fsr2Desc.displaySize.width = displayW;
     fsr2Desc.displaySize.height = displayH;
     fsr2Desc.callbacks = ffxInterface;
-    fsr2Desc.device = ffxGetDeviceVK(device); // Convert Vulkan Device to AMD Device Handle
+    fsr2Desc.device = ffxGetDeviceVK(device);
 
     FfxFsr2Context fsr2Context;
     err = ffxFsr2ContextCreate(&fsr2Context, &fsr2Desc);
@@ -189,7 +189,6 @@ int main() {
         std::cout << "SUCCESS: AMD FSR 2.2 TEMPORAL UPSCALER IS ALIVE ON CPU!!!" << std::endl;
         std::cout << "=========================================================" << std::endl;
         
-        // Safely destroy the context now that we proved it works
         ffxFsr2ContextDestroy(&fsr2Context);
     }
 
