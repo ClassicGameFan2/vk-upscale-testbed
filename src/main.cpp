@@ -1,9 +1,10 @@
 #define VOLK_IMPLEMENTATION
 #include "volk.h"
 
-// CRITICAL FIX: Revert to Dynamic Fetching. We give VMA the 2 Master Keys and let it find its own safe pointers!
-#define VMA_STATIC_VULKAN_FUNCTIONS 0
-#define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
+// CRITICAL FIX: The officially supported way to use VMA + Volk. 
+// By keeping Static ON, VMA's code gets replaced by Volk's safe macros during compilation!
+#define VMA_STATIC_VULKAN_FUNCTIONS 1
+#define VMA_DYNAMIC_VULKAN_FUNCTIONS 0
 #define VMA_VULKAN_VERSION 1002000
 #define VMA_IMPLEMENTATION
 #include "vk_mem_alloc.h"
@@ -25,7 +26,7 @@ struct Texture {
 Texture createTexture(VkDevice device, VmaAllocator allocator, uint32_t width, uint32_t height, 
                       VkFormat format, VkImageUsageFlags usage, VkImageAspectFlags aspect, const std::string& name) {
     Texture tex;
-    std::cout << "  -> Allocating memory for " << name << "..." << std::flush;
+    std::cout << "  -> Creating Image Info for " << name << "..." << std::endl;
 
     VkImageCreateInfo imageInfo = {};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -42,13 +43,27 @@ Texture createTexture(VkDevice device, VmaAllocator allocator, uint32_t width, u
     imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-    VmaAllocationCreateInfo allocInfo = {};
-    allocInfo.usage = VMA_MEMORY_USAGE_AUTO; // VMA 3.0 Standard!
-
-    if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &tex.image, &tex.allocation, nullptr) != VK_SUCCESS) {
-        std::cout << " [FAILED at vmaCreateImage!]" << std::endl;
+    // DIAGNOSTIC TEST: Can SwiftShader natively create the Image Handle?
+    std::cout << "  -> [RAW VULKAN TEST] vkCreateImage... " << std::flush;
+    VkImage testImage;
+    if (vkCreateImage(device, &imageInfo, nullptr, &testImage) != VK_SUCCESS) {
+        std::cout << "FAILED! SwiftShader rejected the image format/usage." << std::endl;
         return tex;
     }
+    std::cout << "SUCCESS!" << std::endl;
+    vkDestroyImage(device, testImage, nullptr);
+
+    // If raw Vulkan succeeds, try VMA memory mapping
+    std::cout << "  -> [VMA TEST] vmaCreateImage... " << std::flush;
+    VmaAllocationCreateInfo allocInfo = {};
+    // Fall back to the absolute safest memory request for a CPU emulator
+    allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU; 
+
+    if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &tex.image, &tex.allocation, nullptr) != VK_SUCCESS) {
+        std::cout << "FAILED! VMA crashed during memory allocation." << std::endl;
+        return tex;
+    }
+    std::cout << "SUCCESS!" << std::endl;
 
     VkImageViewCreateInfo viewInfo = {};
     viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -62,16 +77,16 @@ Texture createTexture(VkDevice device, VmaAllocator allocator, uint32_t width, u
     viewInfo.subresourceRange.layerCount = 1;
 
     if (vkCreateImageView(device, &viewInfo, nullptr, &tex.view) != VK_SUCCESS) {
-        std::cout << " [FAILED at vkCreateImageView!]" << std::endl;
+        std::cout << "  -> FAILED at vkCreateImageView!" << std::endl;
         return tex;
     }
 
-    std::cout << " [OK]" << std::endl;
+    std::cout << "  -> " << name << " Allocation Complete!" << std::endl;
     return tex;
 }
 
 int main() {
-    std::cout << "--- Vulkan Headless Testbed (Phase 2) ---" << std::endl;
+    std::cout << "--- Vulkan Headless Testbed (Phase 2 - Diagnostic) ---" << std::endl;
 
     if (volkInitialize() != VK_SUCCESS) return 1;
 
@@ -127,30 +142,20 @@ int main() {
     VkQueue queue;
     vkGetDeviceQueue(device, queueFamilyIndex, 0, &queue);
 
-    // --- CRITICAL FIX: The 2 Master Keys ---
-    VmaVulkanFunctions vulkanFunctions = {};
-    vulkanFunctions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
-    vulkanFunctions.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
-
     VmaAllocatorCreateInfo allocatorInfo = {};
     allocatorInfo.physicalDevice = physicalDevice;
     allocatorInfo.device = device;
     allocatorInfo.instance = instance;
     allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_2;
-    allocatorInfo.pVulkanFunctions = &vulkanFunctions;
 
     VmaAllocator allocator;
     if (vmaCreateAllocator(&allocatorInfo, &allocator) != VK_SUCCESS) return 1;
     std::cout << "SUCCESS: Core Vulkan Initialized." << std::endl;
 
-    // =========================================================================
-    // PHASE 2: ALLOCATING THE FSR RESOURCES & COMMAND BUFFER
-    // =========================================================================
-
     uint32_t renderW = 320, renderH = 240;
     uint32_t displayW = 640, displayH = 480;
 
-    std::cout << "Allocating VRAM Textures..." << std::endl;
+    std::cout << "\nAllocating VRAM Textures..." << std::endl;
 
     Texture colorTex = createTexture(device, allocator, renderW, renderH, VK_FORMAT_R8G8B8A8_UNORM, 
                                      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT, "Color Input");
@@ -164,7 +169,7 @@ int main() {
     Texture outputTex = createTexture(device, allocator, displayW, displayH, VK_FORMAT_R8G8B8A8_UNORM, 
                                       VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT, "Output Color");
 
-    std::cout << "SUCCESS: 4x FSR Textures Allocated in VRAM." << std::endl;
+    std::cout << "\nSUCCESS: 4x FSR Textures Allocated in VRAM." << std::endl;
 
     VkCommandPoolCreateInfo poolInfo = {};
     poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -183,11 +188,6 @@ int main() {
     VkCommandBuffer commandBuffer;
     if (vkAllocateCommandBuffers(device, &allocCmdInfo, &commandBuffer) != VK_SUCCESS) return 1;
 
-    std::cout << "SUCCESS: Command Buffer established. We are ready to inject the AMD FSR 2 SDK!" << std::endl;
-
-    // =========================================================================
-    // CLEANUP
-    // =========================================================================
     colorTex.destroy(device, allocator);
     depthTex.destroy(device, allocator);
     motionTex.destroy(device, allocator);
