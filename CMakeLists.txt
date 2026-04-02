@@ -20,15 +20,7 @@ FetchContent_Declare(volk
 )
 FetchContent_MakeAvailable(volk)
 
-# 3. Auto-Download AMD Vulkan Memory Allocator (VMA)
-FetchContent_Declare(vma
-    GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
-    GIT_TAG        master
-)
-FetchContent_MakeAvailable(vma)
-
-# 4. Auto-Download AMD FidelityFX Unified SDK!
-# Turn off extra features to make the cloud compile faster
+# 3. Auto-Download AMD FidelityFX Unified SDK!
 set(FFX_API_DX12 OFF CACHE BOOL "" FORCE)
 set(FFX_API_VULKAN ON CACHE BOOL "" FORCE)
 set(FFX_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -38,17 +30,11 @@ FetchContent_Declare(ffx_sdk
 )
 FetchContent_MakeAvailable(ffx_sdk)
 
-# Build our executable
 add_executable(vk-upscale-testbed src/main.cpp)
 
-# Link Vulkan, Volk, and VMA together
-target_link_libraries(vk-upscale-testbed PRIVATE 
-    volk::volk_headers 
-    volk::volk
-    VulkanMemoryAllocator
-)
+# Link Vulkan and Volk (VMA is gone!)
+target_link_libraries(vk-upscale-testbed PRIVATE volk::volk_headers volk::volk)
 
-# Ensure it runs on Windows 7
 if(MSVC)
     set_property(TARGET vk-upscale-testbed PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
 endif()
