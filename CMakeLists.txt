@@ -18,18 +18,19 @@ FetchContent_Declare(volk
 )
 FetchContent_MakeAvailable(volk)
 
+# --- CRITICAL FIX: Pin to v1.1.4 to guarantee Vulkan Backend Support! ---
 set(FFX_API_DX12 OFF CACHE BOOL "" FORCE)
 set(FFX_API_VULKAN ON CACHE BOOL "" FORCE)
 set(FFX_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(ffx_sdk
     GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git
-    GIT_TAG        main
+    GIT_TAG        v1.1.4 
 )
 FetchContent_MakeAvailable(ffx_sdk)
 
 add_executable(vk-upscale-testbed src/main.cpp)
 
-# Link Vulkan, Volk, and the AMD FidelityFX FSR2 Backend!
+# Link Vulkan, Volk, and the AMD FidelityFX FSR2 Backend
 target_link_libraries(vk-upscale-testbed PRIVATE 
     volk::volk_headers 
     volk::volk 
