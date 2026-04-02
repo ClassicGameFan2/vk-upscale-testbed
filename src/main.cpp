@@ -1,8 +1,9 @@
 #define VOLK_IMPLEMENTATION
 #include "volk.h"
 
+// CRITICAL FIX: Turn off all auto-fetching in VMA. We will manually hand it the Volk pointers!
 #define VMA_STATIC_VULKAN_FUNCTIONS 0
-#define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
+#define VMA_DYNAMIC_VULKAN_FUNCTIONS 0
 #define VMA_VULKAN_VERSION 1002000
 #define VMA_IMPLEMENTATION
 #include "vk_mem_alloc.h"
@@ -10,7 +11,6 @@
 #include <iostream>
 #include <vector>
 
-// --- NEW: HELPER STRUCT TO MANAGE VULKAN TEXTURES ---
 struct Texture {
     VkImage image = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE;
@@ -22,12 +22,11 @@ struct Texture {
     }
 };
 
-// --- NEW: FUNCTION TO ALLOCATE TEXTURES ---
 Texture createTexture(VkDevice device, VmaAllocator allocator, uint32_t width, uint32_t height, 
-                      VkFormat format, VkImageUsageFlags usage, VkImageAspectFlags aspect) {
+                      VkFormat format, VkImageUsageFlags usage, VkImageAspectFlags aspect, const std::string& name) {
     Texture tex;
+    std::cout << "  -> Allocating memory for " << name << "..." << std::flush;
 
-    // 1. Define the Image
     VkImageCreateInfo imageInfo = {};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageInfo.imageType = VK_IMAGE_TYPE_2D;
@@ -43,16 +42,14 @@ Texture createTexture(VkDevice device, VmaAllocator allocator, uint32_t width, u
     imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-    // 2. Allocate the Video Memory via VMA
     VmaAllocationCreateInfo allocInfo = {};
     allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
     if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &tex.image, &tex.allocation, nullptr) != VK_SUCCESS) {
-        std::cout << "ERROR: Failed to allocate texture memory!" << std::endl;
+        std::cout << " [FAILED at vmaCreateImage!]" << std::endl;
         return tex;
     }
 
-    // 3. Create the Image View (How the shader looks at the memory)
     VkImageViewCreateInfo viewInfo = {};
     viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     viewInfo.image = tex.image;
@@ -65,9 +62,11 @@ Texture createTexture(VkDevice device, VmaAllocator allocator, uint32_t width, u
     viewInfo.subresourceRange.layerCount = 1;
 
     if (vkCreateImageView(device, &viewInfo, nullptr, &tex.view) != VK_SUCCESS) {
-        std::cout << "ERROR: Failed to create texture image view!" << std::endl;
+        std::cout << " [FAILED at vkCreateImageView!]" << std::endl;
+        return tex;
     }
 
+    std::cout << " [OK]" << std::endl;
     return tex;
 }
 
@@ -128,16 +127,40 @@ int main() {
     VkQueue queue;
     vkGetDeviceQueue(device, queueFamilyIndex, 0, &queue);
 
+    // --- CRITICAL FIX: EXPLICITLY MAP EVERY VOLK FUNCTION TO VMA ---
     VmaVulkanFunctions vulkanFunctions = {};
     vulkanFunctions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
     vulkanFunctions.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
+    vulkanFunctions.vkGetPhysicalDeviceProperties = vkGetPhysicalDeviceProperties;
+    vulkanFunctions.vkGetPhysicalDeviceMemoryProperties = vkGetPhysicalDeviceMemoryProperties;
+    vulkanFunctions.vkAllocateMemory = vkAllocateMemory;
+    vulkanFunctions.vkFreeMemory = vkFreeMemory;
+    vulkanFunctions.vkMapMemory = vkMapMemory;
+    vulkanFunctions.vkUnmapMemory = vkUnmapMemory;
+    vulkanFunctions.vkFlushMappedMemoryRanges = vkFlushMappedMemoryRanges;
+    vulkanFunctions.vkInvalidateMappedMemoryRanges = vkInvalidateMappedMemoryRanges;
+    vulkanFunctions.vkBindBufferMemory = vkBindBufferMemory;
+    vulkanFunctions.vkBindImageMemory = vkBindImageMemory;
+    vulkanFunctions.vkGetBufferMemoryRequirements = vkGetBufferMemoryRequirements;
+    vulkanFunctions.vkGetImageMemoryRequirements = vkGetImageMemoryRequirements;
+    vulkanFunctions.vkCreateBuffer = vkCreateBuffer;
+    vulkanFunctions.vkDestroyBuffer = vkDestroyBuffer;
+    vulkanFunctions.vkCreateImage = vkCreateImage;
+    vulkanFunctions.vkDestroyImage = vkDestroyImage;
+    vulkanFunctions.vkCmdCopyBuffer = vkCmdCopyBuffer;
+    // Vulkan 1.1 core functions required by VMA for Vulkan 1.2
+    vulkanFunctions.vkGetBufferMemoryRequirements2KHR = vkGetBufferMemoryRequirements2;
+    vulkanFunctions.vkGetImageMemoryRequirements2KHR = vkGetImageMemoryRequirements2;
+    vulkanFunctions.vkBindBufferMemory2KHR = vkBindBufferMemory2;
+    vulkanFunctions.vkBindImageMemory2KHR = vkBindImageMemory2;
+    vulkanFunctions.vkGetPhysicalDeviceMemoryProperties2KHR = vkGetPhysicalDeviceMemoryProperties2;
 
     VmaAllocatorCreateInfo allocatorInfo = {};
     allocatorInfo.physicalDevice = physicalDevice;
     allocatorInfo.device = device;
     allocatorInfo.instance = instance;
     allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_2;
-    allocatorInfo.pVulkanFunctions = &vulkanFunctions;
+    allocatorInfo.pVulkanFunctions = &vulkanFunctions; // Pass the mapped functions
 
     VmaAllocator allocator;
     if (vmaCreateAllocator(&allocatorInfo, &allocator) != VK_SUCCESS) return 1;
@@ -152,25 +175,20 @@ int main() {
 
     std::cout << "Allocating VRAM Textures..." << std::endl;
 
-    // 1. Input Color Buffer (Sampled by FSR, Transfer Dest so we can load a PNG into it later)
     Texture colorTex = createTexture(device, allocator, renderW, renderH, VK_FORMAT_R8G8B8A8_UNORM, 
-                                     VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+                                     VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT, "Color Input");
 
-    // 2. Depth Buffer (Sampled by FSR)
     Texture depthTex = createTexture(device, allocator, renderW, renderH, VK_FORMAT_D32_SFLOAT, 
-                                     VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
+                                     VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT, "Depth Buffer");
 
-    // 3. Motion Vectors (Sampled by FSR - Must be 16-bit float for precision)
     Texture motionTex = createTexture(device, allocator, renderW, renderH, VK_FORMAT_R16G16_SFLOAT, 
-                                      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+                                      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT, "Motion Vectors");
 
-    // 4. Output Color Buffer (Storage Image so FSR's Compute Shader can write to it)
     Texture outputTex = createTexture(device, allocator, displayW, displayH, VK_FORMAT_R8G8B8A8_UNORM, 
-                                      VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+                                      VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT, "Output Color");
 
     std::cout << "SUCCESS: 4x FSR Textures Allocated in VRAM." << std::endl;
 
-    // 5. Create a Command Pool & Command Buffer to talk to the GPU
     VkCommandPoolCreateInfo poolInfo = {};
     poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     poolInfo.queueFamilyIndex = queueFamilyIndex;
@@ -193,7 +211,6 @@ int main() {
     // =========================================================================
     // CLEANUP
     // =========================================================================
-
     colorTex.destroy(device, allocator);
     depthTex.destroy(device, allocator);
     motionTex.destroy(device, allocator);
