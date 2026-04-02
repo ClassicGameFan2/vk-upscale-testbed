@@ -1,7 +1,6 @@
 #define VOLK_IMPLEMENTATION
 #include "volk.h"
 
-// CRITICAL FIX: Tell VMA to load functions dynamically, and disable static linking.
 #define VMA_STATIC_VULKAN_FUNCTIONS 0
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
 #define VMA_VULKAN_VERSION 1002000
@@ -11,13 +10,71 @@
 #include <iostream>
 #include <vector>
 
-int main() {
-    std::cout << "--- Vulkan Headless Testbed (Phase 1) ---" << std::endl;
+// --- NEW: HELPER STRUCT TO MANAGE VULKAN TEXTURES ---
+struct Texture {
+    VkImage image = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE;
+    VmaAllocation allocation = VK_NULL_HANDLE;
 
-    if (volkInitialize() != VK_SUCCESS) {
-        std::cout << "ERROR: Failed to load Vulkan driver!" << std::endl;
-        return 1;
+    void destroy(VkDevice device, VmaAllocator allocator) {
+        if (view) vkDestroyImageView(device, view, nullptr);
+        if (image && allocation) vmaDestroyImage(allocator, image, allocation);
     }
+};
+
+// --- NEW: FUNCTION TO ALLOCATE TEXTURES ---
+Texture createTexture(VkDevice device, VmaAllocator allocator, uint32_t width, uint32_t height, 
+                      VkFormat format, VkImageUsageFlags usage, VkImageAspectFlags aspect) {
+    Texture tex;
+
+    // 1. Define the Image
+    VkImageCreateInfo imageInfo = {};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.extent.width = width;
+    imageInfo.extent.height = height;
+    imageInfo.extent.depth = 1;
+    imageInfo.mipLevels = 1;
+    imageInfo.arrayLayers = 1;
+    imageInfo.format = format;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    imageInfo.usage = usage;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    // 2. Allocate the Video Memory via VMA
+    VmaAllocationCreateInfo allocInfo = {};
+    allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+    if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &tex.image, &tex.allocation, nullptr) != VK_SUCCESS) {
+        std::cout << "ERROR: Failed to allocate texture memory!" << std::endl;
+        return tex;
+    }
+
+    // 3. Create the Image View (How the shader looks at the memory)
+    VkImageViewCreateInfo viewInfo = {};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = tex.image;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = format;
+    viewInfo.subresourceRange.aspectMask = aspect;
+    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.levelCount = 1;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount = 1;
+
+    if (vkCreateImageView(device, &viewInfo, nullptr, &tex.view) != VK_SUCCESS) {
+        std::cout << "ERROR: Failed to create texture image view!" << std::endl;
+    }
+
+    return tex;
+}
+
+int main() {
+    std::cout << "--- Vulkan Headless Testbed (Phase 2) ---" << std::endl;
+
+    if (volkInitialize() != VK_SUCCESS) return 1;
 
     VkApplicationInfo appInfo = {};
     appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -29,12 +86,8 @@ int main() {
     instanceInfo.pApplicationInfo = &appInfo;
 
     VkInstance instance;
-    if (vkCreateInstance(&instanceInfo, nullptr, &instance) != VK_SUCCESS) {
-        std::cout << "ERROR: Failed to create Vulkan Instance!" << std::endl;
-        return 1;
-    }
+    if (vkCreateInstance(&instanceInfo, nullptr, &instance) != VK_SUCCESS) return 1;
     volkLoadInstance(instance);
-    std::cout << "SUCCESS: Vulkan Instance Created." << std::endl;
 
     uint32_t deviceCount = 0;
     vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
@@ -43,10 +96,6 @@ int main() {
 
     VkPhysicalDevice physicalDevice = physicalDevices[0]; 
     
-    VkPhysicalDeviceProperties deviceProps;
-    vkGetPhysicalDeviceProperties(physicalDevice, &deviceProps);
-    std::cout << "SUCCESS: Connected to GPU -> " << deviceProps.deviceName << std::endl;
-
     uint32_t queueFamilyCount = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
     std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
@@ -54,16 +103,10 @@ int main() {
 
     int queueFamilyIndex = -1;
     for (uint32_t i = 0; i < queueFamilyCount; i++) {
-        if ((queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && 
-            (queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT)) {
+        if ((queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && (queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT)) {
             queueFamilyIndex = i;
             break;
         }
-    }
-
-    if (queueFamilyIndex == -1) {
-        std::cout << "ERROR: Could not find a Graphics/Compute queue!" << std::endl;
-        return 1;
     }
 
     float queuePriority = 1.0f;
@@ -79,17 +122,12 @@ int main() {
     deviceInfo.pQueueCreateInfos = &queueCreateInfo;
 
     VkDevice device;
-    if (vkCreateDevice(physicalDevice, &deviceInfo, nullptr, &device) != VK_SUCCESS) {
-        std::cout << "ERROR: Failed to create Logical Device!" << std::endl;
-        return 1;
-    }
+    if (vkCreateDevice(physicalDevice, &deviceInfo, nullptr, &device) != VK_SUCCESS) return 1;
     volkLoadDevice(device);
-    std::cout << "SUCCESS: Logical Device Created." << std::endl;
 
     VkQueue queue;
     vkGetDeviceQueue(device, queueFamilyIndex, 0, &queue);
 
-    // --- CRITICAL FIX: Hand the Volk "Master Keys" to VMA ---
     VmaVulkanFunctions vulkanFunctions = {};
     vulkanFunctions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
     vulkanFunctions.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
@@ -99,21 +137,74 @@ int main() {
     allocatorInfo.device = device;
     allocatorInfo.instance = instance;
     allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_2;
-    allocatorInfo.pVulkanFunctions = &vulkanFunctions; // Pass the keys!
+    allocatorInfo.pVulkanFunctions = &vulkanFunctions;
 
     VmaAllocator allocator;
-    if (vmaCreateAllocator(&allocatorInfo, &allocator) != VK_SUCCESS) {
-        std::cout << "ERROR: Failed to initialize AMD VMA!" << std::endl;
-        return 1;
-    }
-    std::cout << "SUCCESS: AMD Vulkan Memory Allocator Initialized." << std::endl;
+    if (vmaCreateAllocator(&allocatorInfo, &allocator) != VK_SUCCESS) return 1;
+    std::cout << "SUCCESS: Core Vulkan Initialized." << std::endl;
 
-    // Clean up
+    // =========================================================================
+    // PHASE 2: ALLOCATING THE FSR RESOURCES & COMMAND BUFFER
+    // =========================================================================
+
+    uint32_t renderW = 320, renderH = 240;
+    uint32_t displayW = 640, displayH = 480;
+
+    std::cout << "Allocating VRAM Textures..." << std::endl;
+
+    // 1. Input Color Buffer (Sampled by FSR, Transfer Dest so we can load a PNG into it later)
+    Texture colorTex = createTexture(device, allocator, renderW, renderH, VK_FORMAT_R8G8B8A8_UNORM, 
+                                     VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+
+    // 2. Depth Buffer (Sampled by FSR)
+    Texture depthTex = createTexture(device, allocator, renderW, renderH, VK_FORMAT_D32_SFLOAT, 
+                                     VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
+
+    // 3. Motion Vectors (Sampled by FSR - Must be 16-bit float for precision)
+    Texture motionTex = createTexture(device, allocator, renderW, renderH, VK_FORMAT_R16G16_SFLOAT, 
+                                      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+
+    // 4. Output Color Buffer (Storage Image so FSR's Compute Shader can write to it)
+    Texture outputTex = createTexture(device, allocator, displayW, displayH, VK_FORMAT_R8G8B8A8_UNORM, 
+                                      VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+
+    std::cout << "SUCCESS: 4x FSR Textures Allocated in VRAM." << std::endl;
+
+    // 5. Create a Command Pool & Command Buffer to talk to the GPU
+    VkCommandPoolCreateInfo poolInfo = {};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.queueFamilyIndex = queueFamilyIndex;
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+
+    VkCommandPool commandPool;
+    if (vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool) != VK_SUCCESS) return 1;
+
+    VkCommandBufferAllocateInfo allocCmdInfo = {};
+    allocCmdInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocCmdInfo.commandPool = commandPool;
+    allocCmdInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocCmdInfo.commandBufferCount = 1;
+
+    VkCommandBuffer commandBuffer;
+    if (vkAllocateCommandBuffers(device, &allocCmdInfo, &commandBuffer) != VK_SUCCESS) return 1;
+
+    std::cout << "SUCCESS: Command Buffer established. We are ready to inject the AMD FSR 2 SDK!" << std::endl;
+
+    // =========================================================================
+    // CLEANUP
+    // =========================================================================
+
+    colorTex.destroy(device, allocator);
+    depthTex.destroy(device, allocator);
+    motionTex.destroy(device, allocator);
+    outputTex.destroy(device, allocator);
+
+    vkDestroyCommandPool(device, commandPool, nullptr);
     vmaDestroyAllocator(allocator);
     vkDestroyDevice(device, nullptr);
     vkDestroyInstance(instance, nullptr);
     
-    std::cout << "--- Testbed shut down cleanly. Ready for Phase 2! ---" << std::endl;
+    std::cout << "--- Phase 2 shut down cleanly. ---" << std::endl;
 
     return 0;
 }
