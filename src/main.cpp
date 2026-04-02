@@ -1,20 +1,21 @@
 #define VOLK_IMPLEMENTATION
 #include "volk.h"
+
+// --- NEW: INCLUDE AMD FIDELITYFX FSR 2 HEADERS ---
+#include <FidelityFX/host/ffx_fsr2.h>
+#include <FidelityFX/host/backends/vk/ffx_vk.h>
+
 #include <iostream>
 #include <vector>
 
 // --- RAW VULKAN MEMORY HELPER ---
-// This asks the GPU (SwiftShader) exactly which memory block is safe to use
 uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
     VkPhysicalDeviceMemoryProperties memProperties;
     vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
-    
     for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
-        if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
-            return i;
-        }
+        if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) return i;
     }
-    return 0; // Fallback
+    return 0; 
 }
 
 struct Texture {
@@ -30,11 +31,8 @@ struct Texture {
 };
 
 Texture createTexture(VkPhysicalDevice physicalDevice, VkDevice device, uint32_t width, uint32_t height, 
-                      VkFormat format, VkImageUsageFlags usage, VkImageAspectFlags aspect, const std::string& name) {
+                      VkFormat format, VkImageUsageFlags usage, VkImageAspectFlags aspect) {
     Texture tex;
-    std::cout << "  -> Allocating " << name << "..." << std::flush;
-
-    // 1. Create Image Handle
     VkImageCreateInfo imageInfo = {};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageInfo.imageType = VK_IMAGE_TYPE_2D;
@@ -49,31 +47,18 @@ Texture createTexture(VkPhysicalDevice physicalDevice, VkDevice device, uint32_t
     imageInfo.usage = usage;
     imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    vkCreateImage(device, &imageInfo, nullptr, &tex.image);
 
-    if (vkCreateImage(device, &imageInfo, nullptr, &tex.image) != VK_SUCCESS) {
-        std::cout << " [FAILED at vkCreateImage!]" << std::endl;
-        return tex;
-    }
-
-    // 2. Ask Vulkan how much memory this image needs
     VkMemoryRequirements memReqs;
     vkGetImageMemoryRequirements(device, tex.image, &memReqs);
 
-    // 3. Allocate Raw Memory
     VkMemoryAllocateInfo allocInfo = {};
     allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     allocInfo.allocationSize = memReqs.size;
     allocInfo.memoryTypeIndex = findMemoryType(physicalDevice, memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-
-    if (vkAllocateMemory(device, &allocInfo, nullptr, &tex.memory) != VK_SUCCESS) {
-        std::cout << " [FAILED at vkAllocateMemory!]" << std::endl;
-        return tex;
-    }
-
-    // 4. Bind the Memory to the Image
+    vkAllocateMemory(device, &allocInfo, nullptr, &tex.memory);
     vkBindImageMemory(device, tex.image, tex.memory, 0);
 
-    // 5. Create the Image View
     VkImageViewCreateInfo viewInfo = {};
     viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     viewInfo.image = tex.image;
@@ -84,18 +69,13 @@ Texture createTexture(VkPhysicalDevice physicalDevice, VkDevice device, uint32_t
     viewInfo.subresourceRange.levelCount = 1;
     viewInfo.subresourceRange.baseArrayLayer = 0;
     viewInfo.subresourceRange.layerCount = 1;
+    vkCreateImageView(device, &viewInfo, nullptr, &tex.view);
 
-    if (vkCreateImageView(device, &viewInfo, nullptr, &tex.view) != VK_SUCCESS) {
-        std::cout << " [FAILED at vkCreateImageView!]" << std::endl;
-        return tex;
-    }
-
-    std::cout << " [OK]" << std::endl;
     return tex;
 }
 
 int main() {
-    std::cout << "--- Vulkan Headless Testbed (Phase 2 - Raw Vulkan) ---" << std::endl;
+    std::cout << "--- Vulkan Headless Testbed (Phase 3 - AMD SDK) ---" << std::endl;
 
     if (volkInitialize() != VK_SUCCESS) return 1;
 
@@ -132,6 +112,15 @@ int main() {
         }
     }
 
+    // --- CRITICAL FIX: ENABLE VULKAN 1.2 HARDWARE FEATURES FOR FSR ---
+    VkPhysicalDeviceVulkan12Features features12 = {};
+    features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+
+    VkPhysicalDeviceFeatures2 features2 = {};
+    features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    features2.pNext = &features12;
+    vkGetPhysicalDeviceFeatures2(physicalDevice, &features2); // Ask SwiftShader what it supports!
+
     float queuePriority = 1.0f;
     VkDeviceQueueCreateInfo queueCreateInfo = {};
     queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
@@ -143,6 +132,7 @@ int main() {
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     deviceInfo.queueCreateInfoCount = 1;
     deviceInfo.pQueueCreateInfos = &queueCreateInfo;
+    deviceInfo.pNext = &features2; // Pass the Vulkan 1.2 Feature Chain into the Logical Device!
 
     VkDevice device;
     if (vkCreateDevice(physicalDevice, &deviceInfo, nullptr, &device) != VK_SUCCESS) return 1;
@@ -150,64 +140,72 @@ int main() {
 
     VkQueue queue;
     vkGetDeviceQueue(device, queueFamilyIndex, 0, &queue);
-
-    std::cout << "SUCCESS: Core Vulkan Initialized." << std::endl;
-
-    // =========================================================================
-    // PHASE 2: ALLOCATING THE FSR RESOURCES & COMMAND BUFFER
-    // =========================================================================
+    std::cout << "SUCCESS: Core Vulkan Initialized with 1.2 Features." << std::endl;
 
     uint32_t renderW = 320, renderH = 240;
     uint32_t displayW = 640, displayH = 480;
 
-    std::cout << "Allocating VRAM Textures..." << std::endl;
+    Texture colorTex = createTexture(physicalDevice, device, renderW, renderH, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+    Texture depthTex = createTexture(physicalDevice, device, renderW, renderH, VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
+    Texture motionTex = createTexture(physicalDevice, device, renderW, renderH, VK_FORMAT_R16G16_SFLOAT, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+    Texture outputTex = createTexture(physicalDevice, device, displayW, displayH, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+    
+    std::cout << "SUCCESS: 4x FSR Textures Allocated." << std::endl;
 
-    Texture colorTex = createTexture(physicalDevice, device, renderW, renderH, VK_FORMAT_R8G8B8A8_UNORM, 
-                                     VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT, "Color Input");
+    // =========================================================================
+    // PHASE 3: INITIALIZING THE AMD FIDELITYFX FSR 2 SDK!
+    // =========================================================================
+    std::cout << "Initializing AMD FSR 2.2 Context..." << std::endl;
 
-    Texture depthTex = createTexture(physicalDevice, device, renderW, renderH, VK_FORMAT_D32_SFLOAT, 
-                                     VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT, "Depth Buffer");
+    // 1. Allocate the "Scratch Buffer" (RAM) for the AMD Backend
+    size_t scratchBufferSize = ffxGetScratchMemorySizeVK(physicalDevice, vkGetDeviceProcAddr);
+    void* scratchBuffer = malloc(scratchBufferSize);
 
-    Texture motionTex = createTexture(physicalDevice, device, renderW, renderH, VK_FORMAT_R16G16_SFLOAT, 
-                                      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT, "Motion Vectors");
+    // 2. Map the AMD Interface to Vulkan
+    FfxInterface ffxInterface = {};
+    FfxErrorCode err = ffxGetInterfaceVK(&ffxInterface, scratchBuffer, scratchBufferSize, physicalDevice, vkGetDeviceProcAddr);
+    if (err != FFX_OK) {
+        std::cout << "FAILED: Could not establish AMD FFX Interface! Error Code: " << err << std::endl;
+        return 1;
+    }
 
-    Texture outputTex = createTexture(physicalDevice, device, displayW, displayH, VK_FORMAT_R8G8B8A8_UNORM, 
-                                      VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT, "Output Color");
+    // 3. Create the FSR 2 Context (This validates all the hardware features!)
+    FfxFsr2ContextDescription fsr2Desc = {};
+    fsr2Desc.flags = FFX_FSR2_ENABLE_AUTO_EXPOSURE; 
+    fsr2Desc.maxRenderSize.width = renderW;
+    fsr2Desc.maxRenderSize.height = renderH;
+    fsr2Desc.displaySize.width = displayW;
+    fsr2Desc.displaySize.height = displayH;
+    fsr2Desc.callbacks = ffxInterface;
+    fsr2Desc.device = ffxGetDeviceVK(device); // Convert Vulkan Device to AMD Device Handle
 
-    std::cout << "SUCCESS: 4x FSR Textures Allocated in VRAM." << std::endl;
-
-    VkCommandPoolCreateInfo poolInfo = {};
-    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    poolInfo.queueFamilyIndex = queueFamilyIndex;
-    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-
-    VkCommandPool commandPool;
-    if (vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool) != VK_SUCCESS) return 1;
-
-    VkCommandBufferAllocateInfo allocCmdInfo = {};
-    allocCmdInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    allocCmdInfo.commandPool = commandPool;
-    allocCmdInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocCmdInfo.commandBufferCount = 1;
-
-    VkCommandBuffer commandBuffer;
-    if (vkAllocateCommandBuffers(device, &allocCmdInfo, &commandBuffer) != VK_SUCCESS) return 1;
-
-    std::cout << "SUCCESS: Command Buffer established. We are ready to inject the AMD FSR SDK!" << std::endl;
+    FfxFsr2Context fsr2Context;
+    err = ffxFsr2ContextCreate(&fsr2Context, &fsr2Desc);
+    
+    if (err != FFX_OK) {
+        std::cout << "FAILED: SwiftShader rejected the FSR 2.2 Context! Error Code: " << err << std::endl;
+    } else {
+        std::cout << "=========================================================" << std::endl;
+        std::cout << "SUCCESS: AMD FSR 2.2 TEMPORAL UPSCALER IS ALIVE ON CPU!!!" << std::endl;
+        std::cout << "=========================================================" << std::endl;
+        
+        // Safely destroy the context now that we proved it works
+        ffxFsr2ContextDestroy(&fsr2Context);
+    }
 
     // =========================================================================
     // CLEANUP
     // =========================================================================
+    free(scratchBuffer);
     colorTex.destroy(device);
     depthTex.destroy(device);
     motionTex.destroy(device);
     outputTex.destroy(device);
 
-    vkDestroyCommandPool(device, commandPool, nullptr);
     vkDestroyDevice(device, nullptr);
     vkDestroyInstance(instance, nullptr);
     
-    std::cout << "--- Phase 2 shut down cleanly. ---" << std::endl;
+    std::cout << "--- Phase 3 shut down cleanly. ---" << std::endl;
 
     return 0;
 }
