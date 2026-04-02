@@ -27,8 +27,6 @@ FetchContent_Declare(ffx_sdk
     GIT_TAG        v1.1.4 
 )
 
-# --- CRITICAL FIX: Bypass the AMD Sample Framework entirely! ---
-# We manually extract the repository and ONLY compile the /sdk folder.
 FetchContent_GetProperties(ffx_sdk)
 if(NOT ffx_sdk_POPULATED)
     FetchContent_Populate(ffx_sdk)
@@ -36,6 +34,11 @@ if(NOT ffx_sdk_POPULATED)
 endif()
 
 add_executable(vk-upscale-testbed src/main.cpp)
+
+# --- CRITICAL FIX: Tell the compiler exactly where the AMD headers are! ---
+target_include_directories(vk-upscale-testbed PRIVATE 
+    ${ffx_sdk_SOURCE_DIR}/sdk/include
+)
 
 # Link Vulkan, Volk, and the AMD FidelityFX FSR2 Backend
 target_link_libraries(vk-upscale-testbed PRIVATE 
