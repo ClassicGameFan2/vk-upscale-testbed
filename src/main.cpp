@@ -1,9 +1,9 @@
 #define VOLK_IMPLEMENTATION
 #include "volk.h"
 
-// --- RESTORED: FSR 2.2 HEADERS FOR SDK v1.1.4 ---
-#include <FidelityFX/host/ffx_fsr2.h>
-#include <FidelityFX/host/backends/vk/ffx_vk.h>
+// FSR 2.2 HEADERS FOR SDK v1.1.4
+#include <ffx_fsr2.h>
+#include <ffx_vk.h>
 
 #include <iostream>
 #include <vector>
@@ -75,7 +75,7 @@ Texture createTexture(VkPhysicalDevice physicalDevice, VkDevice device, uint32_t
 }
 
 int main() {
-    std::cout << "--- Vulkan Headless Testbed (Phase 3 - AMD SDK v1.1.4) ---" << std::endl;
+    std::cout << "--- Vulkan Headless Testbed (Phase 3 - Unified API) ---" << std::endl;
 
     if (volkInitialize() != VK_SUCCESS) return 1;
 
@@ -158,26 +158,37 @@ int main() {
     std::cout << "Initializing AMD FSR 2.2 Context..." << std::endl;
 
     // 1. Allocate the "Scratch Buffer" (RAM) for the AMD Backend
-    size_t scratchBufferSize = ffxGetScratchMemorySizeVK(physicalDevice, vkGetDeviceProcAddr);
+    // CRITICAL FIX: The new SDK just takes (PhysicalDevice, maxContexts)
+    size_t scratchBufferSize = ffxGetScratchMemorySizeVK(physicalDevice, 1);
     void* scratchBuffer = malloc(scratchBufferSize);
 
-    // 2. Map the AMD Interface to Vulkan
+    // 2. Create the Vulkan Device Context
+    // CRITICAL FIX: The new SDK requires this struct to map the Vulkan pointers
+    VkDeviceContext vkDeviceContext = {};
+    vkDeviceContext.vkDevice = device;
+    vkDeviceContext.vkPhysicalDevice = physicalDevice;
+    vkDeviceContext.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
+    FfxDevice ffxDevice = ffxGetDeviceVK(&vkDeviceContext);
+
+    // 3. Map the AMD Interface to Vulkan
+    // CRITICAL FIX: The new SDK takes the FfxDevice and maxContexts in the initialization
     FfxInterface ffxInterface = {};
-    FfxErrorCode err = ffxGetInterfaceVK(&ffxInterface, scratchBuffer, scratchBufferSize, physicalDevice, vkGetDeviceProcAddr);
+    FfxErrorCode err = ffxGetInterfaceVK(&ffxInterface, ffxDevice, scratchBuffer, scratchBufferSize, 1);
     if (err != FFX_OK) {
         std::cout << "FAILED: Could not establish AMD FFX Interface! Error Code: " << err << std::endl;
         return 1;
     }
 
-    // 3. Create the FSR 2 Context (Validates all hardware features)
+    // 4. Create the FSR 2 Context (Validates all hardware features)
     FfxFsr2ContextDescription fsr2Desc = {};
     fsr2Desc.flags = FFX_FSR2_ENABLE_AUTO_EXPOSURE; 
     fsr2Desc.maxRenderSize.width = renderW;
     fsr2Desc.maxRenderSize.height = renderH;
     fsr2Desc.displaySize.width = displayW;
     fsr2Desc.displaySize.height = displayH;
-    fsr2Desc.callbacks = ffxInterface;
-    fsr2Desc.device = ffxGetDeviceVK(device);
+    
+    // CRITICAL FIX: In the new SDK, 'callbacks' and 'device' were merged into 'backendInterface'
+    fsr2Desc.backendInterface = ffxInterface;
 
     FfxFsr2Context fsr2Context;
     err = ffxFsr2ContextCreate(&fsr2Context, &fsr2Desc);
