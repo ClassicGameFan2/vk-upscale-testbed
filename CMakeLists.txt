@@ -32,8 +32,13 @@ FetchContent_MakeAvailable(ffx_sdk)
 
 add_executable(vk-upscale-testbed src/main.cpp)
 
-# Link Vulkan and Volk (VMA is gone!)
-target_link_libraries(vk-upscale-testbed PRIVATE volk::volk_headers volk::volk)
+# Link Vulkan, Volk, and the AMD FidelityFX FSR2 Backend!
+target_link_libraries(vk-upscale-testbed PRIVATE 
+    volk::volk_headers 
+    volk::volk 
+    ffx_fsr2 
+    ffx_backend_vk
+)
 
 if(MSVC)
     set_property(TARGET vk-upscale-testbed PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
