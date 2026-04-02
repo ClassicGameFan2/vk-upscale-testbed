@@ -1,11 +1,10 @@
 #define VOLK_IMPLEMENTATION
 #include "volk.h"
 
-// CRITICAL FIX: Tell VMA we are compiling against Vulkan 1.2+ core functions!
-// This stops VMA from trying to call ancient NULL-pointer KHR extensions and crashing.
-#define VMA_VULKAN_VERSION 1002000
+// CRITICAL FIX: Tell VMA to load functions dynamically, and disable static linking.
 #define VMA_STATIC_VULKAN_FUNCTIONS 0
-#define VMA_DYNAMIC_VULKAN_FUNCTIONS 0
+#define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
+#define VMA_VULKAN_VERSION 1002000
 #define VMA_IMPLEMENTATION
 #include "vk_mem_alloc.h"
 
@@ -23,7 +22,7 @@ int main() {
     VkApplicationInfo appInfo = {};
     appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     appInfo.pApplicationName = "VkUpscaleTestbed";
-    appInfo.apiVersion = VK_API_VERSION_1_2; // FSR 2/3 requires Vulkan 1.2+
+    appInfo.apiVersion = VK_API_VERSION_1_2; 
 
     VkInstanceCreateInfo instanceInfo = {};
     instanceInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -78,8 +77,6 @@ int main() {
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     deviceInfo.queueCreateInfoCount = 1;
     deviceInfo.pQueueCreateInfos = &queueCreateInfo;
-    deviceInfo.enabledExtensionCount = 0; 
-    deviceInfo.ppEnabledExtensionNames = nullptr;
 
     VkDevice device;
     if (vkCreateDevice(physicalDevice, &deviceInfo, nullptr, &device) != VK_SUCCESS) {
@@ -92,12 +89,17 @@ int main() {
     VkQueue queue;
     vkGetDeviceQueue(device, queueFamilyIndex, 0, &queue);
 
-    // Initialize AMD Vulkan Memory Allocator (VMA)
+    // --- CRITICAL FIX: Hand the Volk "Master Keys" to VMA ---
+    VmaVulkanFunctions vulkanFunctions = {};
+    vulkanFunctions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
+    vulkanFunctions.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
+
     VmaAllocatorCreateInfo allocatorInfo = {};
     allocatorInfo.physicalDevice = physicalDevice;
     allocatorInfo.device = device;
     allocatorInfo.instance = instance;
     allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_2;
+    allocatorInfo.pVulkanFunctions = &vulkanFunctions; // Pass the keys!
 
     VmaAllocator allocator;
     if (vmaCreateAllocator(&allocatorInfo, &allocator) != VK_SUCCESS) {
