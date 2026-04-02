@@ -1,8 +1,12 @@
 cmake_minimum_required(VERSION 3.14)
 project(VkUpscaleTestbed)
 
-# --- CRITICAL FIX: AMD SDK v1.1.4 requires an explicit build type! ---
-set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build." FORCE)
+# --- CRITICAL FIX: THE NUCLEAR OPTION ---
+# AMD's script randomly checks multiple different variables and fails if they are empty.
+# We forcefully hardcode every possible variable it could ask for!
+set(CMAKE_BUILD_TYPE "Release" CACHE STRING "" FORCE)
+set(BUILD_TYPE "Release" CACHE STRING "" FORCE)
+set(CMAKE_CONFIGURATION_TYPES "Release" CACHE STRING "" FORCE)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
@@ -32,7 +36,6 @@ FetchContent_MakeAvailable(ffx_sdk)
 
 add_executable(vk-upscale-testbed src/main.cpp)
 
-# Link Vulkan, Volk, and the AMD FidelityFX FSR2 Backend
 target_link_libraries(vk-upscale-testbed PRIVATE 
     volk::volk_headers 
     volk::volk 
