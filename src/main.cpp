@@ -1,9 +1,9 @@
 #define VOLK_IMPLEMENTATION
 #include "volk.h"
 
-// CRITICAL FIX: Turn off all auto-fetching in VMA. We will manually hand it the Volk pointers!
+// CRITICAL FIX: Revert to Dynamic Fetching. We give VMA the 2 Master Keys and let it find its own safe pointers!
 #define VMA_STATIC_VULKAN_FUNCTIONS 0
-#define VMA_DYNAMIC_VULKAN_FUNCTIONS 0
+#define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
 #define VMA_VULKAN_VERSION 1002000
 #define VMA_IMPLEMENTATION
 #include "vk_mem_alloc.h"
@@ -43,7 +43,7 @@ Texture createTexture(VkDevice device, VmaAllocator allocator, uint32_t width, u
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
     VmaAllocationCreateInfo allocInfo = {};
-    allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+    allocInfo.usage = VMA_MEMORY_USAGE_AUTO; // VMA 3.0 Standard!
 
     if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &tex.image, &tex.allocation, nullptr) != VK_SUCCESS) {
         std::cout << " [FAILED at vmaCreateImage!]" << std::endl;
@@ -127,40 +127,17 @@ int main() {
     VkQueue queue;
     vkGetDeviceQueue(device, queueFamilyIndex, 0, &queue);
 
-    // --- CRITICAL FIX: EXPLICITLY MAP EVERY VOLK FUNCTION TO VMA ---
+    // --- CRITICAL FIX: The 2 Master Keys ---
     VmaVulkanFunctions vulkanFunctions = {};
     vulkanFunctions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
     vulkanFunctions.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
-    vulkanFunctions.vkGetPhysicalDeviceProperties = vkGetPhysicalDeviceProperties;
-    vulkanFunctions.vkGetPhysicalDeviceMemoryProperties = vkGetPhysicalDeviceMemoryProperties;
-    vulkanFunctions.vkAllocateMemory = vkAllocateMemory;
-    vulkanFunctions.vkFreeMemory = vkFreeMemory;
-    vulkanFunctions.vkMapMemory = vkMapMemory;
-    vulkanFunctions.vkUnmapMemory = vkUnmapMemory;
-    vulkanFunctions.vkFlushMappedMemoryRanges = vkFlushMappedMemoryRanges;
-    vulkanFunctions.vkInvalidateMappedMemoryRanges = vkInvalidateMappedMemoryRanges;
-    vulkanFunctions.vkBindBufferMemory = vkBindBufferMemory;
-    vulkanFunctions.vkBindImageMemory = vkBindImageMemory;
-    vulkanFunctions.vkGetBufferMemoryRequirements = vkGetBufferMemoryRequirements;
-    vulkanFunctions.vkGetImageMemoryRequirements = vkGetImageMemoryRequirements;
-    vulkanFunctions.vkCreateBuffer = vkCreateBuffer;
-    vulkanFunctions.vkDestroyBuffer = vkDestroyBuffer;
-    vulkanFunctions.vkCreateImage = vkCreateImage;
-    vulkanFunctions.vkDestroyImage = vkDestroyImage;
-    vulkanFunctions.vkCmdCopyBuffer = vkCmdCopyBuffer;
-    // Vulkan 1.1 core functions required by VMA for Vulkan 1.2
-    vulkanFunctions.vkGetBufferMemoryRequirements2KHR = vkGetBufferMemoryRequirements2;
-    vulkanFunctions.vkGetImageMemoryRequirements2KHR = vkGetImageMemoryRequirements2;
-    vulkanFunctions.vkBindBufferMemory2KHR = vkBindBufferMemory2;
-    vulkanFunctions.vkBindImageMemory2KHR = vkBindImageMemory2;
-    vulkanFunctions.vkGetPhysicalDeviceMemoryProperties2KHR = vkGetPhysicalDeviceMemoryProperties2;
 
     VmaAllocatorCreateInfo allocatorInfo = {};
     allocatorInfo.physicalDevice = physicalDevice;
     allocatorInfo.device = device;
     allocatorInfo.instance = instance;
     allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_2;
-    allocatorInfo.pVulkanFunctions = &vulkanFunctions; // Pass the mapped functions
+    allocatorInfo.pVulkanFunctions = &vulkanFunctions;
 
     VmaAllocator allocator;
     if (vmaCreateAllocator(&allocatorInfo, &allocator) != VK_SUCCESS) return 1;
