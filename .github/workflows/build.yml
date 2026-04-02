@@ -13,14 +13,16 @@ jobs:
       uses: actions/checkout@v4
 
     - name: Configure CMake
-      # CRITICAL FIX: Force the Build Type via the terminal to bypass AMD's crash!
-      run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+      # CRITICAL FIX: Use the Ninja generator (-G Ninja) to force Single-Config!
+      run: cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Release
 
     - name: Build
-      run: cmake --build build --config Release
+      # Ninja doesn't need --config Release, it's already locked in!
+      run: cmake --build build
 
     - name: Upload Executable
       uses: actions/upload-artifact@v4
       with:
         name: vk-testbed-windows
-        path: build/Release/vk-upscale-testbed.exe
+        # CRITICAL FIX: Ninja drops the .exe directly into the build folder!
+        path: build/vk-upscale-testbed.exe
