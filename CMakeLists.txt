@@ -1,13 +1,6 @@
 cmake_minimum_required(VERSION 3.14)
 project(VkUpscaleTestbed)
 
-# --- CRITICAL FIX: THE NUCLEAR OPTION ---
-# AMD's script randomly checks multiple different variables and fails if they are empty.
-# We forcefully hardcode every possible variable it could ask for!
-set(CMAKE_BUILD_TYPE "Release" CACHE STRING "" FORCE)
-set(BUILD_TYPE "Release" CACHE STRING "" FORCE)
-set(CMAKE_CONFIGURATION_TYPES "Release" CACHE STRING "" FORCE)
-
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
@@ -28,14 +21,23 @@ FetchContent_MakeAvailable(volk)
 set(FFX_API_DX12 OFF CACHE BOOL "" FORCE)
 set(FFX_API_VULKAN ON CACHE BOOL "" FORCE)
 set(FFX_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+
 FetchContent_Declare(ffx_sdk
     GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git
     GIT_TAG        v1.1.4 
 )
-FetchContent_MakeAvailable(ffx_sdk)
+
+# --- CRITICAL FIX: Bypass the AMD Sample Framework entirely! ---
+# We manually extract the repository and ONLY compile the /sdk folder.
+FetchContent_GetProperties(ffx_sdk)
+if(NOT ffx_sdk_POPULATED)
+    FetchContent_Populate(ffx_sdk)
+    add_subdirectory(${ffx_sdk_SOURCE_DIR}/sdk ${ffx_sdk_BINARY_DIR}/sdk)
+endif()
 
 add_executable(vk-upscale-testbed src/main.cpp)
 
+# Link Vulkan, Volk, and the AMD FidelityFX FSR2 Backend
 target_link_libraries(vk-upscale-testbed PRIVATE 
     volk::volk_headers 
     volk::volk 
