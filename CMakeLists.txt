@@ -6,21 +6,18 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 include(FetchContent)
 
-# 1. Auto-Download Official Vulkan Headers
 FetchContent_Declare(vulkan_headers
     GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git
     GIT_TAG        main
 )
 FetchContent_MakeAvailable(vulkan_headers)
 
-# 2. Auto-Download Volk (Vulkan Meta-Loader)
 FetchContent_Declare(volk
     GIT_REPOSITORY https://github.com/zeux/volk.git
     GIT_TAG        master
 )
 FetchContent_MakeAvailable(volk)
 
-# 3. Auto-Download AMD FidelityFX Unified SDK!
 set(FFX_API_DX12 OFF CACHE BOOL "" FORCE)
 set(FFX_API_VULKAN ON CACHE BOOL "" FORCE)
 set(FFX_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -31,11 +28,6 @@ FetchContent_Declare(ffx_sdk
 FetchContent_MakeAvailable(ffx_sdk)
 
 add_executable(vk-upscale-testbed src/main.cpp)
-
-# --- CRITICAL FIX: Explicitly tell the compiler where the AMD SDK headers live! ---
-target_include_directories(vk-upscale-testbed PRIVATE 
-    ${ffx_sdk_SOURCE_DIR}/sdk/include
-)
 
 # Link Vulkan, Volk, and the AMD FidelityFX FSR2 Backend!
 target_link_libraries(vk-upscale-testbed PRIVATE 
