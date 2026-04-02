@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.14)
 project(VkUpscaleTestbed)
 
+# --- CRITICAL FIX: AMD SDK v1.1.4 requires an explicit build type! ---
+set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build." FORCE)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
@@ -18,7 +21,6 @@ FetchContent_Declare(volk
 )
 FetchContent_MakeAvailable(volk)
 
-# --- CRITICAL FIX: Pin to v1.1.4 to guarantee Vulkan Backend Support! ---
 set(FFX_API_DX12 OFF CACHE BOOL "" FORCE)
 set(FFX_API_VULKAN ON CACHE BOOL "" FORCE)
 set(FFX_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
