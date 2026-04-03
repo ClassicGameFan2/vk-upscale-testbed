@@ -1,14 +1,14 @@
 #define VOLK_IMPLEMENTATION
 #include "volk.h"
 
-// --- CRITICAL FIX: The correct paths for v1.1.4 Unified SDK! ---
 #include <FidelityFX/host/ffx_fsr2.h>
 #include <FidelityFX/host/backends/vk/ffx_vk.h>
 
 #include <iostream>
 #include <vector>
 
-uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+// --- CRITICAL FIX: Make the function static to avoid colliding with AMD's internal functions! ---
+static uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
     VkPhysicalDeviceMemoryProperties memProperties;
     vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
     for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
@@ -75,7 +75,7 @@ Texture createTexture(VkPhysicalDevice physicalDevice, VkDevice device, uint32_t
 
 int main() {
     std::cout << "--- Vulkan Headless Testbed (Phase 3 - AMD SDK v1.1.4) ---" << std::endl;
-
+    
     if (volkInitialize() != VK_SUCCESS) return 1;
 
     VkApplicationInfo appInfo = {};
@@ -89,13 +89,13 @@ int main() {
 
     VkInstance instance;
     if (vkCreateInstance(&instanceInfo, nullptr, &instance) != VK_SUCCESS) return 1;
+
     volkLoadInstance(instance);
 
     uint32_t deviceCount = 0;
     vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
     std::vector<VkPhysicalDevice> physicalDevices(deviceCount);
     vkEnumeratePhysicalDevices(instance, &deviceCount, physicalDevices.data());
-
     VkPhysicalDevice physicalDevice = physicalDevices[0]; 
     
     uint32_t queueFamilyCount = 0;
@@ -135,10 +135,12 @@ int main() {
 
     VkDevice device;
     if (vkCreateDevice(physicalDevice, &deviceInfo, nullptr, &device) != VK_SUCCESS) return 1;
+    
     volkLoadDevice(device);
 
     VkQueue queue;
     vkGetDeviceQueue(device, queueFamilyIndex, 0, &queue);
+
     std::cout << "SUCCESS: Core Vulkan Initialized with 1.2 Features." << std::endl;
 
     uint32_t renderW = 320, renderH = 240;
@@ -156,28 +158,24 @@ int main() {
     // =========================================================================
     std::cout << "Initializing AMD FSR 2.2 Context..." << std::endl;
 
-    // 1. Allocate the "Scratch Buffer" (RAM) for the AMD Backend
     size_t scratchBufferSize = ffxGetScratchMemorySizeVK(physicalDevice, 1);
     void* scratchBuffer = malloc(scratchBufferSize);
 
-    // 2. Create the Vulkan Device Context
     VkDeviceContext vkDeviceContext = {};
     vkDeviceContext.vkDevice = device;
     vkDeviceContext.vkPhysicalDevice = physicalDevice;
-    // CRITICAL FIX: The member name in the AMD header is 'vkDeviceProcAddr' (No 'Get'!)
-    vkDeviceContext.vkDeviceProcAddr = vkGetDeviceProcAddr; 
+    vkDeviceContext.vkDeviceProcAddr = vkGetDeviceProcAddr;
     
     FfxDevice ffxDevice = ffxGetDeviceVK(&vkDeviceContext);
 
-    // 3. Map the AMD Interface to Vulkan
     FfxInterface ffxInterface = {};
     FfxErrorCode err = ffxGetInterfaceVK(&ffxInterface, ffxDevice, scratchBuffer, scratchBufferSize, 1);
+    
     if (err != FFX_OK) {
         std::cout << "FAILED: Could not establish AMD FFX Interface! Error Code: " << err << std::endl;
         return 1;
     }
 
-    // 4. Create the FSR 2 Context (Validates all hardware features)
     FfxFsr2ContextDescription fsr2Desc = {};
     fsr2Desc.flags = FFX_FSR2_ENABLE_AUTO_EXPOSURE; 
     fsr2Desc.maxRenderSize.width = renderW;
@@ -188,14 +186,14 @@ int main() {
 
     FfxFsr2Context fsr2Context;
     err = ffxFsr2ContextCreate(&fsr2Context, &fsr2Desc);
-
+    
     if (err != FFX_OK) {
         std::cout << "FAILED: SwiftShader rejected the FSR 2.2 Context! Error Code: " << err << std::endl;
     } else {
         std::cout << "=========================================================" << std::endl;
         std::cout << "SUCCESS: AMD FSR 2.2 TEMPORAL UPSCALER IS ALIVE ON CPU!!!" << std::endl;
         std::cout << "=========================================================" << std::endl;
-
+        
         ffxFsr2ContextDestroy(&fsr2Context);
     }
 
