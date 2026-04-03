@@ -19,8 +19,6 @@ FetchContent_Declare(volk
 FetchContent_MakeAvailable(volk)
 
 # --- THE MASTER HACK: INTERCEPT FIND_PACKAGE ---
-# AMD's script requires the massive Vulkan SDK to be installed.
-# We intercept their check, point it to our lightweight headers, and force success!
 macro(find_package name)
     if("${name}" STREQUAL "Vulkan")
         if(NOT TARGET Vulkan::Vulkan)
@@ -29,14 +27,22 @@ macro(find_package name)
         endif()
         set(Vulkan_FOUND TRUE)
         set(VULKAN_FOUND TRUE)
+        set(Vulkan_INCLUDE_DIRS "${vulkan_headers_SOURCE_DIR}/include")
+        set(Vulkan_LIBRARIES Vulkan::Vulkan)
+        set(Vulkan_VERSION "1.3.250")
     else()
-        _find_package(${ARGV}) # Route all other checks back to standard CMake
+        _find_package(${ARGV})
     endif()
 endmacro()
 
 # --- CONFIGURE AMD SDK ---
+# We shotgun every known AMD backend flag to guarantee the Vulkan backend builds!
 set(FFX_FSR2 ON CACHE BOOL "" FORCE)
 set(FFX_API_VK ON CACHE BOOL "" FORCE)
+set(FFX_API_VULKAN ON CACHE BOOL "" FORCE)
+set(FFX_BACKEND_VK ON CACHE BOOL "" FORCE)
+set(FFX_API_BACKEND "VK" CACHE STRING "" FORCE)
+set(FFX_API_BACKENDS "VK" CACHE STRING "" FORCE)
 set(FFX_API_DX12 OFF CACHE BOOL "" FORCE)
 
 FetchContent_Declare(ffx_sdk
@@ -56,12 +62,12 @@ target_include_directories(vk-upscale-testbed PRIVATE
     ${ffx_sdk_SOURCE_DIR}/sdk/include/FidelityFX/host/backends
 )
 
-# Link the pure targets so CMake auto-resolves the _x64 names
+# Link the exact _x64 targets that AMD generates
 target_link_libraries(vk-upscale-testbed PRIVATE 
     volk::volk_headers 
     volk::volk 
-    ffx_fsr2 
-    ffx_backend_vk
+    ffx_fsr2_x64 
+    ffx_backend_vk_x64
 )
 
 if(MSVC)
