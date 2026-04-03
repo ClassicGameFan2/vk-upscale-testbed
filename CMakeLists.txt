@@ -18,7 +18,7 @@ FetchContent_Declare(volk
 )
 FetchContent_MakeAvailable(volk)
 
-# --- CRITICAL FIX: TRICK AMD INTO FINDING OUR VULKAN HEADERS ---
+# --- CRITICAL FIX: BULLETPROOF FINDVULKAN INTERCEPTOR ---
 file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/FindVulkan.cmake "
     if(NOT TARGET Vulkan::Vulkan)
         add_library(Vulkan::Vulkan INTERFACE IMPORTED)
@@ -33,10 +33,10 @@ file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/FindVulkan.cmake "
 list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_CURRENT_BINARY_DIR}")
 
 # --- THE ULTIMATE BYPASS ---
-set(FFX_FSR2 ON CACHE BOOL "" FORCE)
-set(FFX_API_VK ON CACHE BOOL "" FORCE)
-set(FFX_API_DX12 OFF CACHE BOOL "" FORCE)
+set(FFX_FSR1 ON CACHE BOOL "" FORCE)
+# CRITICAL FIX: The SDK strictly checks for "VK_X64" to include the backend folder!
 set(FFX_API_BACKEND "VK_X64" CACHE STRING "" FORCE)
+set(FFX_API_DX12 OFF CACHE BOOL "" FORCE)
 
 FetchContent_Declare(ffx_sdk
     GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git
@@ -49,7 +49,7 @@ if(NOT ffx_sdk_POPULATED)
     endif()
     FetchContent_Populate(ffx_sdk)
     
-    # --- WINDOWS 7 COMPATIBILITY SCRUBBER ---
+    # WINDOWS 7 COMPATIBILITY SCRUBBER
     file(GLOB_RECURSE ffx_source_files "${ffx_sdk_SOURCE_DIR}/sdk/src/*.cpp" "${ffx_sdk_SOURCE_DIR}/sdk/src/*.h")
     foreach(ffx_file IN LISTS ffx_source_files)
         file(READ ${ffx_file} file_contents)
@@ -73,17 +73,12 @@ target_include_directories(vk-upscale-testbed PRIVATE
 target_link_libraries(vk-upscale-testbed PRIVATE 
     volk::volk_headers 
     volk::volk 
-    ffx_fsr2_x64 
+    ffx_fsr1_x64
     ffx_backend_vk_x64
 )
 
-# --- CRITICAL FIX: THE VOLK LINKER TRAP ---
-# We use the plain signature to match AMD's internal CMake!
 target_link_libraries(ffx_backend_vk_x64 volk::volk)
 if(MSVC)
     target_compile_options(ffx_backend_vk_x64 PRIVATE "/FIvolk.h")
-endif()
-
-if(MSVC)
     set_property(TARGET vk-upscale-testbed PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
 endif()
