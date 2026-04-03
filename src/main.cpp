@@ -7,7 +7,12 @@
 #include <iostream>
 #include <vector>
 
-// --- CRITICAL FIX: Make the function static to avoid colliding with AMD's internal functions! ---
+// --- NEW: AMD SDK MESSAGE CALLBACK ---
+// This allows the AMD SDK to print its own internal errors to our console!
+static void FfxMessageCallback(FfxMsgType type, const wchar_t* message) {
+    std::wcout << L"[AMD SDK LOG] " << message << std::endl;
+}
+
 static uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
     VkPhysicalDeviceMemoryProperties memProperties;
     vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
@@ -111,7 +116,6 @@ int main() {
         }
     }
 
-    // ENABLE VULKAN 1.2 HARDWARE FEATURES FOR FSR
     VkPhysicalDeviceVulkan12Features features12 = {};
     features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
 
@@ -156,9 +160,12 @@ int main() {
     // =========================================================================
     // PHASE 3: INITIALIZING THE AMD FIDELITYFX FSR 2 SDK!
     // =========================================================================
-    std::cout << "Initializing AMD FSR 2.2 Context..." << std::endl;
+    std::cout << "\nInitializing AMD FSR 2.2 Context..." << std::endl;
 
+    std::cout << " -> ffxGetScratchMemorySizeVK..." << std::flush;
     size_t scratchBufferSize = ffxGetScratchMemorySizeVK(physicalDevice, 1);
+    std::cout << " OK (" << scratchBufferSize << " bytes)" << std::endl;
+
     void* scratchBuffer = malloc(scratchBufferSize);
 
     VkDeviceContext vkDeviceContext = {};
@@ -166,13 +173,17 @@ int main() {
     vkDeviceContext.vkPhysicalDevice = physicalDevice;
     vkDeviceContext.vkDeviceProcAddr = vkGetDeviceProcAddr;
     
+    std::cout << " -> ffxGetDeviceVK..." << std::flush;
     FfxDevice ffxDevice = ffxGetDeviceVK(&vkDeviceContext);
+    std::cout << " OK" << std::endl;
 
+    std::cout << " -> ffxGetInterfaceVK..." << std::flush;
     FfxInterface ffxInterface = {};
     FfxErrorCode err = ffxGetInterfaceVK(&ffxInterface, ffxDevice, scratchBuffer, scratchBufferSize, 1);
+    std::cout << " OK (Result Code: " << err << ")" << std::endl;
     
     if (err != FFX_OK) {
-        std::cout << "FAILED: Could not establish AMD FFX Interface! Error Code: " << err << std::endl;
+        std::cout << "FAILED: Could not establish AMD FFX Interface!" << std::endl;
         return 1;
     }
 
@@ -183,12 +194,17 @@ int main() {
     fsr2Desc.displaySize.width = displayW;
     fsr2Desc.displaySize.height = displayH;
     fsr2Desc.backendInterface = ffxInterface;
+    
+    // Wire up the AMD internal message logger
+    fsr2Desc.fpMessage = FfxMessageCallback;
 
+    std::cout << " -> ffxFsr2ContextCreate (Compiling Shaders, may take a few seconds)..." << std::flush;
     FfxFsr2Context fsr2Context;
     err = ffxFsr2ContextCreate(&fsr2Context, &fsr2Desc);
+    std::cout << " OK (Result Code: " << err << ")" << std::endl;
     
     if (err != FFX_OK) {
-        std::cout << "FAILED: SwiftShader rejected the FSR 2.2 Context! Error Code: " << err << std::endl;
+        std::cout << "FAILED: SwiftShader rejected the FSR 2.2 Context!" << std::endl;
     } else {
         std::cout << "=========================================================" << std::endl;
         std::cout << "SUCCESS: AMD FSR 2.2 TEMPORAL UPSCALER IS ALIVE ON CPU!!!" << std::endl;
