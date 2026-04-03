@@ -31,8 +31,8 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_BINARY_DIR}")
 
 # --- THE ULTIMATE BYPASS ---
 set(FFX_FSR2 ON CACHE BOOL "" FORCE)
-set(FFX_BACKEND_VK ON CACHE BOOL "" FORCE)
-set(FFX_API_VULKAN ON CACHE BOOL "" FORCE)
+# CRITICAL FIX: The correct AMD flag is FFX_API_VK!
+set(FFX_API_VK ON CACHE BOOL "" FORCE)
 set(FFX_API_DX12 OFF CACHE BOOL "" FORCE)
 
 FetchContent_Declare(ffx_sdk
@@ -52,12 +52,12 @@ target_include_directories(vk-upscale-testbed PRIVATE
     ${ffx_sdk_SOURCE_DIR}/sdk/include/FidelityFX/host/backends
 )
 
-# --- CRITICAL FIX: Use the Target Names, NOT the output file names! ---
+# Link the exact _x64 targets that AMD generates
 target_link_libraries(vk-upscale-testbed PRIVATE 
     volk::volk_headers 
     volk::volk 
-    ffx_fsr2 
-    ffx_backend_vk
+    ffx_fsr2_x64 
+    ffx_backend_vk_x64
 )
 
 if(MSVC)
