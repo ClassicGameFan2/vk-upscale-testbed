@@ -49,10 +49,7 @@ if(NOT ffx_sdk_POPULATED)
     endif()
     FetchContent_Populate(ffx_sdk)
     
-    # --- CRITICAL FIX: WINDOWS 7 COMPATIBILITY SCRUBBER ---
-    # We replace the Windows 10 API with '0 * sizeof('
-    # This safely converts the string to an integer, multiplies by 0 (returning S_OK),
-    # and completely strips the OS requirement without causing C++ syntax errors!
+    # --- WINDOWS 7 COMPATIBILITY SCRUBBER ---
     file(GLOB_RECURSE ffx_source_files "${ffx_sdk_SOURCE_DIR}/sdk/src/*.cpp" "${ffx_sdk_SOURCE_DIR}/sdk/src/*.h")
     foreach(ffx_file IN LISTS ffx_source_files)
         file(READ ${ffx_file} file_contents)
@@ -79,6 +76,14 @@ target_link_libraries(vk-upscale-testbed PRIVATE
     ffx_fsr2_x64 
     ffx_backend_vk_x64
 )
+
+# --- CRITICAL FIX: THE VOLK LINKER TRAP ---
+# We must force the AMD Vulkan backend to use Volk's macros instead of standard Vulkan prototypes!
+# Otherwise, it attempts to execute Volk's function pointers as raw code, causing an Access Violation!
+target_link_libraries(ffx_backend_vk_x64 PRIVATE volk::volk)
+if(MSVC)
+    target_compile_options(ffx_backend_vk_x64 PRIVATE "/FIvolk.h")
+endif()
 
 if(MSVC)
     set_property(TARGET vk-upscale-testbed PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
