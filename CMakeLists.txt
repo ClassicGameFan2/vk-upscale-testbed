@@ -19,8 +19,6 @@ FetchContent_Declare(volk
 FetchContent_MakeAvailable(volk)
 
 # --- CRITICAL FIX: TRICK AMD INTO FINDING OUR VULKAN HEADERS ---
-# AMD's script runs find_package(Vulkan). If it fails, it silently skips the Vulkan backend!
-# We create a dummy FindVulkan.cmake that points directly to our downloaded headers.
 file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/FindVulkan.cmake "
     if(NOT TARGET Vulkan::Vulkan)
         add_library(Vulkan::Vulkan INTERFACE IMPORTED)
@@ -54,11 +52,12 @@ target_include_directories(vk-upscale-testbed PRIVATE
     ${ffx_sdk_SOURCE_DIR}/sdk/include/FidelityFX/host/backends
 )
 
+# --- CRITICAL FIX: Use the Target Names, NOT the output file names! ---
 target_link_libraries(vk-upscale-testbed PRIVATE 
     volk::volk_headers 
     volk::volk 
-    ffx_fsr2_x64 
-    ffx_backend_vk_x64
+    ffx_fsr2 
+    ffx_backend_vk
 )
 
 if(MSVC)
