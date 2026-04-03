@@ -18,7 +18,9 @@ FetchContent_Declare(volk
 )
 FetchContent_MakeAvailable(volk)
 
-# --- CRITICAL FIX: TRICK AMD INTO FINDING OUR VULKAN HEADERS ---
+# --- CRITICAL FIX: BULLETPROOF FINDVULKAN SCRIPT ---
+# AMD's script requires specific Vulkan variables to build the backend.
+# We populate all of them here so it has no excuse to skip the build!
 file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/FindVulkan.cmake "
     if(NOT TARGET Vulkan::Vulkan)
         add_library(Vulkan::Vulkan INTERFACE IMPORTED)
@@ -26,8 +28,15 @@ file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/FindVulkan.cmake "
     endif()
     set(Vulkan_FOUND TRUE)
     set(VULKAN_FOUND TRUE)
+    set(Vulkan_INCLUDE_DIRS \"${vulkan_headers_SOURCE_DIR}/include\")
+    set(Vulkan_LIBRARIES Vulkan::Vulkan)
 ")
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_BINARY_DIR}")
+
+# --- THE ULTIMATE BYPASS ---
+set(FFX_FSR2 ON CACHE BOOL "" FORCE)
+set(FFX_API_VK ON CACHE BOOL "" FORCE)
+set(FFX_API_DX12 OFF CACHE BOOL "" FORCE)
 
 FetchContent_Declare(ffx_sdk
     GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git
@@ -36,16 +45,7 @@ FetchContent_Declare(ffx_sdk
 FetchContent_GetProperties(ffx_sdk)
 if(NOT ffx_sdk_POPULATED)
     FetchContent_Populate(ffx_sdk)
-    
-    # --- THE SURGICAL STRIKE ---
-    # We bypass all of AMD's wrappers and compile the exact components we need!
-    set(FFX_API_VK ON CACHE BOOL "" FORCE)
-    
-    # 1. Compile the Vulkan Backend
-    add_subdirectory(${ffx_sdk_SOURCE_DIR}/sdk/src/backends/vk ${ffx_sdk_BINARY_DIR}/sdk/src/backends/vk)
-    
-    # 2. Compile the FSR2 Core
-    add_subdirectory(${ffx_sdk_SOURCE_DIR}/sdk/src/components/fsr2 ${ffx_sdk_BINARY_DIR}/sdk/src/components/fsr2)
+    add_subdirectory(${ffx_sdk_SOURCE_DIR}/sdk ${ffx_sdk_BINARY_DIR}/sdk)
 endif()
 
 add_executable(vk-upscale-testbed src/main.cpp)
@@ -55,7 +55,7 @@ target_include_directories(vk-upscale-testbed PRIVATE
     ${ffx_sdk_SOURCE_DIR}/sdk/include/FidelityFX/host/backends
 )
 
-# Link the exact _x64 targets that AMD generates from those specific folders
+# Link the exact _x64 targets that AMD generates
 target_link_libraries(vk-upscale-testbed PRIVATE 
     volk::volk_headers 
     volk::volk 
