@@ -18,9 +18,8 @@ FetchContent_Declare(volk
 )
 FetchContent_MakeAvailable(volk)
 
-# --- CRITICAL FIX: BULLETPROOF FINDVULKAN SCRIPT ---
-# AMD's script requires specific Vulkan variables to build the backend.
-# We populate all of them here so it has no excuse to skip the build!
+# --- CRITICAL FIX: THE BULLETPROOF FINDVULKAN INTERCEPTOR ---
+# We provide the Vulkan_VERSION variable so AMD's script mathematically passes its version check.
 file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/FindVulkan.cmake "
     if(NOT TARGET Vulkan::Vulkan)
         add_library(Vulkan::Vulkan INTERFACE IMPORTED)
@@ -28,11 +27,13 @@ file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/FindVulkan.cmake "
     endif()
     set(Vulkan_FOUND TRUE)
     set(VULKAN_FOUND TRUE)
+    set(Vulkan_INCLUDE_DIR \"${vulkan_headers_SOURCE_DIR}/include\")
     set(Vulkan_INCLUDE_DIRS \"${vulkan_headers_SOURCE_DIR}/include\")
     set(Vulkan_LIBRARIES Vulkan::Vulkan)
+    set(Vulkan_VERSION \"1.3.250\")
 ")
-# PREPEND to the module path so CMake is forced to use our script instead of its own!
-set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_BINARY_DIR}" ${CMAKE_MODULE_PATH})
+# Force our script to be evaluated FIRST
+list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_CURRENT_BINARY_DIR}")
 
 # --- THE ULTIMATE BYPASS ---
 set(FFX_FSR2 ON CACHE BOOL "" FORCE)
@@ -57,7 +58,6 @@ target_include_directories(vk-upscale-testbed PRIVATE
     ${ffx_sdk_SOURCE_DIR}/sdk/include/FidelityFX/host/backends
 )
 
-# Link the exact _x64 targets that AMD generates
 target_link_libraries(vk-upscale-testbed PRIVATE 
     volk::volk_headers 
     volk::volk 
