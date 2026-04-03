@@ -18,28 +18,26 @@ FetchContent_Declare(volk
 )
 FetchContent_MakeAvailable(volk)
 
-# --- CRITICAL FIX: THE BULLETPROOF FINDVULKAN INTERCEPTOR ---
-# We provide the Vulkan_VERSION variable so AMD's script mathematically passes its version check.
-file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/FindVulkan.cmake "
-    if(NOT TARGET Vulkan::Vulkan)
-        add_library(Vulkan::Vulkan INTERFACE IMPORTED)
-        set_target_properties(Vulkan::Vulkan PROPERTIES INTERFACE_INCLUDE_DIRECTORIES \"${vulkan_headers_SOURCE_DIR}/include\")
-    endif()
-    set(Vulkan_FOUND TRUE)
-    set(VULKAN_FOUND TRUE)
-    set(Vulkan_INCLUDE_DIR \"${vulkan_headers_SOURCE_DIR}/include\")
-    set(Vulkan_INCLUDE_DIRS \"${vulkan_headers_SOURCE_DIR}/include\")
-    set(Vulkan_LIBRARIES Vulkan::Vulkan)
-    set(Vulkan_VERSION \"1.3.250\")
-")
-# Force our script to be evaluated FIRST
-list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_CURRENT_BINARY_DIR}")
+# --- CRITICAL FIX: PRE-POPULATE THE CMAKE CACHE ---
+# We inject the exact variables find_package(Vulkan) looks for.
+# This forces the Vulkan backend to compile without the 1GB Vulkan SDK!
+if(NOT TARGET Vulkan::Vulkan)
+    add_library(Vulkan::Vulkan INTERFACE IMPORTED)
+    set_target_properties(Vulkan::Vulkan PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${vulkan_headers_SOURCE_DIR}/include")
+endif()
+set(Vulkan_FOUND TRUE CACHE BOOL "" FORCE)
+set(VULKAN_FOUND TRUE CACHE BOOL "" FORCE)
+set(Vulkan_INCLUDE_DIR "${vulkan_headers_SOURCE_DIR}/include" CACHE PATH "" FORCE)
+set(Vulkan_LIBRARIES "Vulkan::Vulkan" CACHE STRING "" FORCE)
+set(Vulkan_LIBRARY "Vulkan::Vulkan" CACHE STRING "" FORCE)
+set(Vulkan_VERSION "1.3.250" CACHE STRING "" FORCE)
 
 # --- THE ULTIMATE BYPASS ---
 set(FFX_FSR2 ON CACHE BOOL "" FORCE)
 set(FFX_API_VK ON CACHE BOOL "" FORCE)
 set(FFX_API_VULKAN ON CACHE BOOL "" FORCE)
 set(FFX_API_DX12 OFF CACHE BOOL "" FORCE)
+set(FFX_BUILD_SHADERS OFF CACHE BOOL "" FORCE) # Prevent shader compiler requirement
 
 FetchContent_Declare(ffx_sdk
     GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git
