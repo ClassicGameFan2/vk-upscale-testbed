@@ -156,15 +156,20 @@ int main() {
     // =========================================================================
     std::cout << "Initializing AMD FSR 2.2 Context..." << std::endl;
 
+    // 1. Allocate the "Scratch Buffer" (RAM) for the AMD Backend
     size_t scratchBufferSize = ffxGetScratchMemorySizeVK(physicalDevice, 1);
     void* scratchBuffer = malloc(scratchBufferSize);
 
+    // 2. Create the Vulkan Device Context
     VkDeviceContext vkDeviceContext = {};
     vkDeviceContext.vkDevice = device;
     vkDeviceContext.vkPhysicalDevice = physicalDevice;
-    vkDeviceContext.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
+    // CRITICAL FIX: The member name in the AMD header is 'vkDeviceProcAddr' (No 'Get'!)
+    vkDeviceContext.vkDeviceProcAddr = vkGetDeviceProcAddr; 
+    
     FfxDevice ffxDevice = ffxGetDeviceVK(&vkDeviceContext);
 
+    // 3. Map the AMD Interface to Vulkan
     FfxInterface ffxInterface = {};
     FfxErrorCode err = ffxGetInterfaceVK(&ffxInterface, ffxDevice, scratchBuffer, scratchBufferSize, 1);
     if (err != FFX_OK) {
@@ -172,6 +177,7 @@ int main() {
         return 1;
     }
 
+    // 4. Create the FSR 2 Context (Validates all hardware features)
     FfxFsr2ContextDescription fsr2Desc = {};
     fsr2Desc.flags = FFX_FSR2_ENABLE_AUTO_EXPOSURE; 
     fsr2Desc.maxRenderSize.width = renderW;
@@ -182,14 +188,14 @@ int main() {
 
     FfxFsr2Context fsr2Context;
     err = ffxFsr2ContextCreate(&fsr2Context, &fsr2Desc);
-    
+
     if (err != FFX_OK) {
         std::cout << "FAILED: SwiftShader rejected the FSR 2.2 Context! Error Code: " << err << std::endl;
     } else {
         std::cout << "=========================================================" << std::endl;
         std::cout << "SUCCESS: AMD FSR 2.2 TEMPORAL UPSCALER IS ALIVE ON CPU!!!" << std::endl;
         std::cout << "=========================================================" << std::endl;
-        
+
         ffxFsr2ContextDestroy(&fsr2Context);
     }
 
