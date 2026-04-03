@@ -50,13 +50,14 @@ if(NOT ffx_sdk_POPULATED)
     FetchContent_Populate(ffx_sdk)
     
     # --- CRITICAL FIX: WINDOWS 7 COMPATIBILITY SCRUBBER ---
-    # Search all AMD source files and remove the Windows 10 SetThreadDescription API.
-    # We replace it with '0 * (' which turns the function call into a harmless math equation!
+    # We replace the Windows 10 API with '0 * sizeof('
+    # This safely converts the string to an integer, multiplies by 0 (returning S_OK),
+    # and completely strips the OS requirement without causing C++ syntax errors!
     file(GLOB_RECURSE ffx_source_files "${ffx_sdk_SOURCE_DIR}/sdk/src/*.cpp" "${ffx_sdk_SOURCE_DIR}/sdk/src/*.h")
     foreach(ffx_file IN LISTS ffx_source_files)
         file(READ ${ffx_file} file_contents)
         if(file_contents MATCHES "SetThreadDescription")
-            string(REPLACE "SetThreadDescription(" "0 * (" file_contents "${file_contents}")
+            string(REPLACE "SetThreadDescription(" "0 * sizeof(" file_contents "${file_contents}")
             file(WRITE ${ffx_file} "${file_contents}")
         endif()
     endforeach()
