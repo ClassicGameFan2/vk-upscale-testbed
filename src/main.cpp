@@ -6,10 +6,9 @@
 
 #include <iostream>
 #include <vector>
-#include <malloc.h> // Required for _aligned_malloc
+#include <malloc.h> 
 
 // --- SAFE AMD SDK MESSAGE CALLBACK ---
-// This safely prints AMD's internal logs to the console without crashing CRT streams
 static void FfxMessageCallback(FfxMsgType type, const wchar_t* message) {
     if (message) {
         std::wprintf(L"[AMD SDK LOG] %s\n", message);
@@ -87,7 +86,6 @@ int main() {
     
     if (volkInitialize() != VK_SUCCESS) return 1;
 
-    // CRITICAL FIX: Upgrade to Vulkan 1.3 to unlock all modern FSR features!
     VkApplicationInfo appInfo = {};
     appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     appInfo.pApplicationName = "VkUpscaleTestbed";
@@ -121,9 +119,19 @@ int main() {
         }
     }
 
-    // --- CRITICAL FIX: THE VULKAN FEATURE CHAIN ---
-    // We link Vulkan 1.1, 1.2, and 1.3 features together, query SwiftShader for them,
-    // and feed the entire chain into our Device creation so AMD has full hardware access!
+    // --- CRITICAL FIX: SHOTGUN ALL DEVICE EXTENSIONS ---
+    // Instead of guessing what AMD needs, we query SwiftShader for every single 
+    // extension it supports and force them ALL to ON!
+    uint32_t extCount = 0;
+    vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extCount, nullptr);
+    std::vector<VkExtensionProperties> availableExts(extCount);
+    vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extCount, availableExts.data());
+    
+    std::vector<const char*> enabledExtensions;
+    for (const auto& ext : availableExts) {
+        enabledExtensions.push_back(ext.extensionName);
+    }
+
     VkPhysicalDeviceVulkan13Features features13 = {};
     features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
 
@@ -152,7 +160,11 @@ int main() {
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     deviceInfo.queueCreateInfoCount = 1;
     deviceInfo.pQueueCreateInfos = &queueCreateInfo;
-    deviceInfo.pNext = &features2; // Inject all supported features!
+    deviceInfo.pNext = &features2; 
+    
+    // Inject all supported extensions into the Logical Device!
+    deviceInfo.enabledExtensionCount = (uint32_t)enabledExtensions.size();
+    deviceInfo.ppEnabledExtensionNames = enabledExtensions.data();
 
     VkDevice device;
     if (vkCreateDevice(physicalDevice, &deviceInfo, nullptr, &device) != VK_SUCCESS) return 1;
@@ -162,7 +174,7 @@ int main() {
     VkQueue queue;
     vkGetDeviceQueue(device, queueFamilyIndex, 0, &queue);
 
-    std::cout << "SUCCESS: Core Vulkan 1.3 Initialized with Full Features." << std::endl;
+    std::cout << "SUCCESS: Core Vulkan 1.3 Initialized with " << enabledExtensions.size() << " Extensions." << std::endl;
 
     uint32_t renderW = 320, renderH = 240;
     uint32_t displayW = 640, displayH = 480;
@@ -183,7 +195,6 @@ int main() {
     size_t scratchBufferSize = ffxGetScratchMemorySizeVK(physicalDevice, 1);
     std::cout << " OK (" << scratchBufferSize << " bytes)" << std::endl;
 
-    // CRITICAL FIX: Ensure strict 64-byte memory alignment for AMD's shader matrix math!
     void* scratchBuffer = _aligned_malloc(scratchBufferSize, 64);
 
     VkDeviceContext vkDeviceContext = {};
@@ -206,14 +217,13 @@ int main() {
     }
 
     FfxFsr2ContextDescription fsr2Desc = {};
-    fsr2Desc.flags = FFX_FSR2_ENABLE_AUTO_EXPOSURE; 
+    // CRITICAL FIX: Add DEBUG_CHECKING so AMD prints exactly what hardware feature it is missing!
+    fsr2Desc.flags = FFX_FSR2_ENABLE_AUTO_EXPOSURE | FFX_FSR2_ENABLE_DEBUG_CHECKING; 
     fsr2Desc.maxRenderSize.width = renderW;
     fsr2Desc.maxRenderSize.height = renderH;
     fsr2Desc.displaySize.width = displayW;
     fsr2Desc.displaySize.height = displayH;
     fsr2Desc.backendInterface = ffxInterface;
-    
-    // Wire up the AMD internal message logger
     fsr2Desc.fpMessage = FfxMessageCallback;
 
     std::cout << " -> ffxFsr2ContextCreate (Compiling Shaders, may take a few seconds)..." << std::endl;
@@ -234,7 +244,7 @@ int main() {
     // =========================================================================
     // CLEANUP
     // =========================================================================
-    _aligned_free(scratchBuffer); // Free the specially aligned memory
+    _aligned_free(scratchBuffer);
     colorTex.destroy(device);
     depthTex.destroy(device);
     motionTex.destroy(device);
