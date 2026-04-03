@@ -78,9 +78,8 @@ target_link_libraries(vk-upscale-testbed PRIVATE
 )
 
 # --- CRITICAL FIX: THE VOLK LINKER TRAP ---
-# We must force the AMD Vulkan backend to use Volk's macros instead of standard Vulkan prototypes!
-# Otherwise, it attempts to execute Volk's function pointers as raw code, causing an Access Violation!
-target_link_libraries(ffx_backend_vk_x64 PRIVATE volk::volk)
+# We use the plain signature to match AMD's internal CMake!
+target_link_libraries(ffx_backend_vk_x64 volk::volk)
 if(MSVC)
     target_compile_options(ffx_backend_vk_x64 PRIVATE "/FIvolk.h")
 endif()
