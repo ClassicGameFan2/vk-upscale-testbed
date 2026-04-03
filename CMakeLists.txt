@@ -31,11 +31,13 @@ file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/FindVulkan.cmake "
     set(Vulkan_INCLUDE_DIRS \"${vulkan_headers_SOURCE_DIR}/include\")
     set(Vulkan_LIBRARIES Vulkan::Vulkan)
 ")
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_BINARY_DIR}")
+# PREPEND to the module path so CMake is forced to use our script instead of its own!
+set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_BINARY_DIR}" ${CMAKE_MODULE_PATH})
 
 # --- THE ULTIMATE BYPASS ---
 set(FFX_FSR2 ON CACHE BOOL "" FORCE)
 set(FFX_API_VK ON CACHE BOOL "" FORCE)
+set(FFX_API_VULKAN ON CACHE BOOL "" FORCE)
 set(FFX_API_DX12 OFF CACHE BOOL "" FORCE)
 
 FetchContent_Declare(ffx_sdk
