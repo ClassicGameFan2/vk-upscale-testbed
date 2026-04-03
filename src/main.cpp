@@ -6,11 +6,15 @@
 
 #include <iostream>
 #include <vector>
+#include <malloc.h> // Required for _aligned_malloc
 
-// --- NEW: AMD SDK MESSAGE CALLBACK ---
-// This allows the AMD SDK to print its own internal errors to our console!
+// --- SAFE AMD SDK MESSAGE CALLBACK ---
+// This safely prints AMD's internal logs to the console without crashing CRT streams
 static void FfxMessageCallback(FfxMsgType type, const wchar_t* message) {
-    std::wcout << L"[AMD SDK LOG] " << message << std::endl;
+    if (message) {
+        std::wprintf(L"[AMD SDK LOG] %s\n", message);
+        std::fflush(stdout);
+    }
 }
 
 static uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
@@ -83,10 +87,11 @@ int main() {
     
     if (volkInitialize() != VK_SUCCESS) return 1;
 
+    // CRITICAL FIX: Upgrade to Vulkan 1.3 to unlock all modern FSR features!
     VkApplicationInfo appInfo = {};
     appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     appInfo.pApplicationName = "VkUpscaleTestbed";
-    appInfo.apiVersion = VK_API_VERSION_1_2; 
+    appInfo.apiVersion = VK_API_VERSION_1_3; 
 
     VkInstanceCreateInfo instanceInfo = {};
     instanceInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -116,12 +121,24 @@ int main() {
         }
     }
 
+    // --- CRITICAL FIX: THE VULKAN FEATURE CHAIN ---
+    // We link Vulkan 1.1, 1.2, and 1.3 features together, query SwiftShader for them,
+    // and feed the entire chain into our Device creation so AMD has full hardware access!
+    VkPhysicalDeviceVulkan13Features features13 = {};
+    features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+
     VkPhysicalDeviceVulkan12Features features12 = {};
     features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    features12.pNext = &features13;
+
+    VkPhysicalDeviceVulkan11Features features11 = {};
+    features11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+    features11.pNext = &features12;
 
     VkPhysicalDeviceFeatures2 features2 = {};
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-    features2.pNext = &features12;
+    features2.pNext = &features11;
+    
     vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
 
     float queuePriority = 1.0f;
@@ -135,7 +152,7 @@ int main() {
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     deviceInfo.queueCreateInfoCount = 1;
     deviceInfo.pQueueCreateInfos = &queueCreateInfo;
-    deviceInfo.pNext = &features2;
+    deviceInfo.pNext = &features2; // Inject all supported features!
 
     VkDevice device;
     if (vkCreateDevice(physicalDevice, &deviceInfo, nullptr, &device) != VK_SUCCESS) return 1;
@@ -145,7 +162,7 @@ int main() {
     VkQueue queue;
     vkGetDeviceQueue(device, queueFamilyIndex, 0, &queue);
 
-    std::cout << "SUCCESS: Core Vulkan Initialized with 1.2 Features." << std::endl;
+    std::cout << "SUCCESS: Core Vulkan 1.3 Initialized with Full Features." << std::endl;
 
     uint32_t renderW = 320, renderH = 240;
     uint32_t displayW = 640, displayH = 480;
@@ -166,7 +183,8 @@ int main() {
     size_t scratchBufferSize = ffxGetScratchMemorySizeVK(physicalDevice, 1);
     std::cout << " OK (" << scratchBufferSize << " bytes)" << std::endl;
 
-    void* scratchBuffer = malloc(scratchBufferSize);
+    // CRITICAL FIX: Ensure strict 64-byte memory alignment for AMD's shader matrix math!
+    void* scratchBuffer = _aligned_malloc(scratchBufferSize, 64);
 
     VkDeviceContext vkDeviceContext = {};
     vkDeviceContext.vkDevice = device;
@@ -198,10 +216,10 @@ int main() {
     // Wire up the AMD internal message logger
     fsr2Desc.fpMessage = FfxMessageCallback;
 
-    std::cout << " -> ffxFsr2ContextCreate (Compiling Shaders, may take a few seconds)..." << std::flush;
+    std::cout << " -> ffxFsr2ContextCreate (Compiling Shaders, may take a few seconds)..." << std::endl;
     FfxFsr2Context fsr2Context;
     err = ffxFsr2ContextCreate(&fsr2Context, &fsr2Desc);
-    std::cout << " OK (Result Code: " << err << ")" << std::endl;
+    std::cout << " -> ffxFsr2ContextCreate Finished. Result Code: " << err << std::endl;
     
     if (err != FFX_OK) {
         std::cout << "FAILED: SwiftShader rejected the FSR 2.2 Context!" << std::endl;
@@ -216,7 +234,7 @@ int main() {
     // =========================================================================
     // CLEANUP
     // =========================================================================
-    free(scratchBuffer);
+    _aligned_free(scratchBuffer); // Free the specially aligned memory
     colorTex.destroy(device);
     depthTex.destroy(device);
     motionTex.destroy(device);
