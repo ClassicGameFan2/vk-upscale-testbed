@@ -1,24 +1,12 @@
 #define VOLK_IMPLEMENTATION
 #include "volk.h"
 
-#include <FidelityFX/host/ffx_fsr2.h>
+#include <FidelityFX/host/ffx_fsr1.h>
 #include <FidelityFX/host/backends/vk/ffx_vk.h>
 
 #include <iostream>
 #include <vector>
-#include <string>
-#include <malloc.h> 
-
-// --- CRITICAL FIX: FOOLPROOF AMD MESSAGE LOGGER ---
-// Windows console struggles with raw wchar_t. We convert it to standard char!
-static void FfxMessageCallback(FfxMsgType type, const wchar_t* message) {
-    if (message) {
-        char buffer[2048];
-        size_t converted = 0;
-        wcstombs_s(&converted, buffer, sizeof(buffer), message, _TRUNCATE);
-        std::cout << "[AMD SDK LOG] " << buffer << std::endl;
-    }
-}
+#include <malloc.h>
 
 static uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
     VkPhysicalDeviceMemoryProperties memProperties;
@@ -86,7 +74,7 @@ Texture createTexture(VkPhysicalDevice physicalDevice, VkDevice device, uint32_t
 }
 
 int main() {
-    std::cout << "--- Vulkan Headless Testbed (Phase 3 - AMD SDK v1.1.4) ---" << std::endl;
+    std::cout << "--- Vulkan Headless Testbed (FSR 1.0 via SDK v1.1.4) ---" << std::endl;
     
     if (volkInitialize() != VK_SUCCESS) return 1;
 
@@ -123,8 +111,16 @@ int main() {
         }
     }
 
-    // --- CRITICAL FIX: CORE VULKAN 1.3 FEATURES ONLY ---
-    // No more extension shotgunning. We just request the features SwiftShader natively supports!
+    uint32_t extCount = 0;
+    vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extCount, nullptr);
+    std::vector<VkExtensionProperties> availableExts(extCount);
+    vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extCount, availableExts.data());
+    
+    std::vector<const char*> enabledExtensions;
+    for (const auto& ext : availableExts) {
+        enabledExtensions.push_back(ext.extensionName);
+    }
+
     VkPhysicalDeviceVulkan13Features features13 = {};
     features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
 
@@ -154,33 +150,23 @@ int main() {
     deviceInfo.queueCreateInfoCount = 1;
     deviceInfo.pQueueCreateInfos = &queueCreateInfo;
     deviceInfo.pNext = &features2; 
-    deviceInfo.enabledExtensionCount = 0; // ZERO extensions! Core 1.3 only!
-    deviceInfo.ppEnabledExtensionNames = nullptr;
+    deviceInfo.enabledExtensionCount = (uint32_t)enabledExtensions.size();
+    deviceInfo.ppEnabledExtensionNames = enabledExtensions.data();
 
     VkDevice device;
     if (vkCreateDevice(physicalDevice, &deviceInfo, nullptr, &device) != VK_SUCCESS) return 1;
     
     volkLoadDevice(device);
 
-    VkQueue queue;
-    vkGetDeviceQueue(device, queueFamilyIndex, 0, &queue);
-
-    std::cout << "SUCCESS: Core Vulkan 1.3 Initialized cleanly." << std::endl;
+    std::cout << "SUCCESS: Core Vulkan 1.3 Initialized with " << enabledExtensions.size() << " Extensions." << std::endl;
 
     uint32_t renderW = 320, renderH = 240;
     uint32_t displayW = 640, displayH = 480;
 
-    Texture colorTex = createTexture(physicalDevice, device, renderW, renderH, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
-    Texture depthTex = createTexture(physicalDevice, device, renderW, renderH, VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
-    Texture motionTex = createTexture(physicalDevice, device, renderW, renderH, VK_FORMAT_R16G16_SFLOAT, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
-    Texture outputTex = createTexture(physicalDevice, device, displayW, displayH, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
-    
-    std::cout << "SUCCESS: 4x FSR Textures Allocated." << std::endl;
-
     // =========================================================================
-    // PHASE 3: INITIALIZING THE AMD FIDELITYFX FSR 2 SDK!
+    // PHASE 3: INITIALIZING THE AMD FIDELITYFX FSR 1.0 SDK
     // =========================================================================
-    std::cout << "\nInitializing AMD FSR 2.2 Context..." << std::endl;
+    std::cout << "\nInitializing AMD FSR 1.0 Context..." << std::endl;
 
     size_t scratchBufferSize = ffxGetScratchMemorySizeVK(physicalDevice, 1);
     void* scratchBuffer = _aligned_malloc(scratchBufferSize, 64);
@@ -200,39 +186,36 @@ int main() {
         return 1;
     }
 
-    FfxFsr2ContextDescription fsr2Desc = {};
-    fsr2Desc.flags = FFX_FSR2_ENABLE_AUTO_EXPOSURE | FFX_FSR2_ENABLE_DEBUG_CHECKING; 
-    fsr2Desc.maxRenderSize.width = renderW;
-    fsr2Desc.maxRenderSize.height = renderH;
-    fsr2Desc.displaySize.width = displayW;
-    fsr2Desc.displaySize.height = displayH;
-    fsr2Desc.backendInterface = ffxInterface;
-    fsr2Desc.fpMessage = FfxMessageCallback;
+    // COMPLIANT FSR 1.0 CONTEXT SETUP
+    FfxFsr1ContextDescription fsr1Desc = {};
+    fsr1Desc.flags = FFX_FSR1_ENABLE_RCAS;
+    // CRITICAL: We must explicitly declare the output format for FSR 1.0!
+    fsr1Desc.outputFormat = ffxGetSurfaceFormatVK(VK_FORMAT_R8G8B8A8_UNORM);
+    fsr1Desc.maxRenderSize.width = renderW;
+    fsr1Desc.maxRenderSize.height = renderH;
+    fsr1Desc.displaySize.width = displayW;
+    fsr1Desc.displaySize.height = displayH;
+    fsr1Desc.backendInterface = ffxInterface;
 
-    std::cout << " -> ffxFsr2ContextCreate (Compiling Shaders, may take a few seconds)..." << std::endl;
-    FfxFsr2Context fsr2Context;
-    err = ffxFsr2ContextCreate(&fsr2Context, &fsr2Desc);
-    std::cout << " -> ffxFsr2ContextCreate Finished. Result Code: " << err << std::endl;
+    std::cout << " -> ffxFsr1ContextCreate..." << std::endl;
+    FfxFsr1Context fsr1Context;
+    err = ffxFsr1ContextCreate(&fsr1Context, &fsr1Desc);
+    std::cout << " -> ffxFsr1ContextCreate Finished. Result Code: " << err << std::endl;
     
     if (err != FFX_OK) {
-        std::cout << "FAILED: SwiftShader rejected the FSR 2.2 Context!" << std::endl;
+        std::cout << "FAILED: SwiftShader rejected the FSR 1.0 Context!" << std::endl;
     } else {
         std::cout << "=========================================================" << std::endl;
-        std::cout << "SUCCESS: AMD FSR 2.2 TEMPORAL UPSCALER IS ALIVE ON CPU!!!" << std::endl;
+        std::cout << "SUCCESS: AMD FSR 1.0 UPSCALER IS ALIVE ON CPU!!!" << std::endl;
         std::cout << "=========================================================" << std::endl;
         
-        ffxFsr2ContextDestroy(&fsr2Context);
+        ffxFsr1ContextDestroy(&fsr1Context);
     }
 
     // =========================================================================
     // CLEANUP
     // =========================================================================
     _aligned_free(scratchBuffer);
-    colorTex.destroy(device);
-    depthTex.destroy(device);
-    motionTex.destroy(device);
-    outputTex.destroy(device);
-
     vkDestroyDevice(device, nullptr);
     vkDestroyInstance(instance, nullptr);
     
