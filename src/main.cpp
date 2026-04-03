@@ -119,9 +119,6 @@ int main() {
         }
     }
 
-    // --- CRITICAL FIX: SHOTGUN ALL DEVICE EXTENSIONS ---
-    // Instead of guessing what AMD needs, we query SwiftShader for every single 
-    // extension it supports and force them ALL to ON!
     uint32_t extCount = 0;
     vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extCount, nullptr);
     std::vector<VkExtensionProperties> availableExts(extCount);
@@ -162,7 +159,6 @@ int main() {
     deviceInfo.pQueueCreateInfos = &queueCreateInfo;
     deviceInfo.pNext = &features2; 
     
-    // Inject all supported extensions into the Logical Device!
     deviceInfo.enabledExtensionCount = (uint32_t)enabledExtensions.size();
     deviceInfo.ppEnabledExtensionNames = enabledExtensions.data();
 
@@ -193,9 +189,13 @@ int main() {
 
     std::cout << " -> ffxGetScratchMemorySizeVK..." << std::flush;
     size_t scratchBufferSize = ffxGetScratchMemorySizeVK(physicalDevice, 1);
-    std::cout << " OK (" << scratchBufferSize << " bytes)" << std::endl;
+    std::cout << " OK (Calculated: " << scratchBufferSize << " bytes)" << std::endl;
 
-    void* scratchBuffer = _aligned_malloc(scratchBufferSize, 64);
+    // --- CRITICAL FIX: OVERALLOCATE SCRATCH MEMORY ---
+    // AMD's size calculation often misses alignment padding boundaries.
+    // We forcefully allocate DOUBLE the requested memory to guarantee success!
+    size_t safeBufferSize = scratchBufferSize * 2;
+    void* scratchBuffer = _aligned_malloc(safeBufferSize, 64);
 
     VkDeviceContext vkDeviceContext = {};
     vkDeviceContext.vkDevice = device;
@@ -208,7 +208,7 @@ int main() {
 
     std::cout << " -> ffxGetInterfaceVK..." << std::flush;
     FfxInterface ffxInterface = {};
-    FfxErrorCode err = ffxGetInterfaceVK(&ffxInterface, ffxDevice, scratchBuffer, scratchBufferSize, 1);
+    FfxErrorCode err = ffxGetInterfaceVK(&ffxInterface, ffxDevice, scratchBuffer, safeBufferSize, 1);
     std::cout << " OK (Result Code: " << err << ")" << std::endl;
     
     if (err != FFX_OK) {
@@ -217,7 +217,6 @@ int main() {
     }
 
     FfxFsr2ContextDescription fsr2Desc = {};
-    // CRITICAL FIX: Add DEBUG_CHECKING so AMD prints exactly what hardware feature it is missing!
     fsr2Desc.flags = FFX_FSR2_ENABLE_AUTO_EXPOSURE | FFX_FSR2_ENABLE_DEBUG_CHECKING; 
     fsr2Desc.maxRenderSize.width = renderW;
     fsr2Desc.maxRenderSize.height = renderH;
