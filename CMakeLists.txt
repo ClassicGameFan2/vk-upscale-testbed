@@ -18,32 +18,27 @@ FetchContent_Declare(volk
 )
 FetchContent_MakeAvailable(volk)
 
-# --- THE MASTER HACK: INTERCEPT FIND_PACKAGE ---
-macro(find_package name)
-    if("${name}" STREQUAL "Vulkan")
-        if(NOT TARGET Vulkan::Vulkan)
-            add_library(Vulkan::Vulkan INTERFACE IMPORTED)
-            set_target_properties(Vulkan::Vulkan PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${vulkan_headers_SOURCE_DIR}/include")
-        endif()
-        set(Vulkan_FOUND TRUE)
-        set(VULKAN_FOUND TRUE)
-        set(Vulkan_INCLUDE_DIRS "${vulkan_headers_SOURCE_DIR}/include")
-        set(Vulkan_LIBRARIES Vulkan::Vulkan)
-        set(Vulkan_VERSION "1.3.250")
-    else()
-        _find_package(${ARGV})
+# --- CRITICAL FIX: TRICK AMD INTO FINDING OUR VULKAN HEADERS ---
+file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/FindVulkan.cmake "
+    if(NOT TARGET Vulkan::Vulkan)
+        add_library(Vulkan::Vulkan INTERFACE IMPORTED)
+        set_target_properties(Vulkan::Vulkan PROPERTIES INTERFACE_INCLUDE_DIRECTORIES \"${vulkan_headers_SOURCE_DIR}/include\")
     endif()
-endmacro()
+    set(Vulkan_FOUND TRUE)
+    set(VULKAN_FOUND TRUE)
+    set(Vulkan_INCLUDE_DIRS \"${vulkan_headers_SOURCE_DIR}/include\")
+    set(Vulkan_LIBRARIES Vulkan::Vulkan)
+    set(Vulkan_VERSION \"1.3.250\")
+")
+list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_CURRENT_BINARY_DIR}")
 
 # --- CONFIGURE AMD SDK ---
-# We shotgun every known AMD backend flag to guarantee the Vulkan backend builds!
 set(FFX_FSR2 ON CACHE BOOL "" FORCE)
 set(FFX_API_VK ON CACHE BOOL "" FORCE)
-set(FFX_API_VULKAN ON CACHE BOOL "" FORCE)
-set(FFX_BACKEND_VK ON CACHE BOOL "" FORCE)
-set(FFX_API_BACKEND "VK" CACHE STRING "" FORCE)
-set(FFX_API_BACKENDS "VK" CACHE STRING "" FORCE)
 set(FFX_API_DX12 OFF CACHE BOOL "" FORCE)
+
+# CRITICAL FIX: The magic word must be exactly "VK_X64"
+set(FFX_API_BACKEND "VK_X64" CACHE STRING "" FORCE)
 
 FetchContent_Declare(ffx_sdk
     GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git
