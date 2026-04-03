@@ -8,6 +8,28 @@
 #include <vector>
 #include <malloc.h>
 
+// --- VULKAN VALIDATION LAYER CALLBACK ---
+// This will intercept the exact reason SwiftShader rejects the AMD shaders!
+static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
+    VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+    VkDebugUtilsMessageTypeFlagsEXT type,
+    const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
+    void* pUserData) {
+    if (severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
+        std::cout << "\n[VULKAN VALIDATION] " << pCallbackData->pMessage << std::endl;
+    }
+    return VK_FALSE;
+}
+
+static void FfxMessageCallback(FfxMsgType type, const wchar_t* message) {
+    if (message) {
+        char buffer[2048];
+        size_t converted = 0;
+        wcstombs_s(&converted, buffer, sizeof(buffer), message, _TRUNCATE);
+        std::cout << "[AMD SDK LOG] " << buffer << std::endl;
+    }
+}
+
 static uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
     VkPhysicalDeviceMemoryProperties memProperties;
     vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
@@ -17,66 +39,35 @@ static uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFil
     return 0; 
 }
 
-struct Texture {
-    VkImage image = VK_NULL_HANDLE;
-    VkDeviceMemory memory = VK_NULL_HANDLE;
-    VkImageView view = VK_NULL_HANDLE;
-
-    void destroy(VkDevice device) {
-        if (view) vkDestroyImageView(device, view, nullptr);
-        if (image) vkDestroyImage(device, image, nullptr);
-        if (memory) vkFreeMemory(device, memory, nullptr);
-    }
-};
-
-Texture createTexture(VkPhysicalDevice physicalDevice, VkDevice device, uint32_t width, uint32_t height, 
-                      VkFormat format, VkImageUsageFlags usage, VkImageAspectFlags aspect) {
-    Texture tex;
-    VkImageCreateInfo imageInfo = {};
-    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    imageInfo.imageType = VK_IMAGE_TYPE_2D;
-    imageInfo.extent.width = width;
-    imageInfo.extent.height = height;
-    imageInfo.extent.depth = 1;
-    imageInfo.mipLevels = 1;
-    imageInfo.arrayLayers = 1;
-    imageInfo.format = format;
-    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    imageInfo.usage = usage;
-    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    vkCreateImage(device, &imageInfo, nullptr, &tex.image);
-
-    VkMemoryRequirements memReqs;
-    vkGetImageMemoryRequirements(device, tex.image, &memReqs);
-
-    VkMemoryAllocateInfo allocInfo = {};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memReqs.size;
-    allocInfo.memoryTypeIndex = findMemoryType(physicalDevice, memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    vkAllocateMemory(device, &allocInfo, nullptr, &tex.memory);
-    vkBindImageMemory(device, tex.image, tex.memory, 0);
-
-    VkImageViewCreateInfo viewInfo = {};
-    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    viewInfo.image = tex.image;
-    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    viewInfo.format = format;
-    viewInfo.subresourceRange.aspectMask = aspect;
-    viewInfo.subresourceRange.baseMipLevel = 0;
-    viewInfo.subresourceRange.levelCount = 1;
-    viewInfo.subresourceRange.baseArrayLayer = 0;
-    viewInfo.subresourceRange.layerCount = 1;
-    vkCreateImageView(device, &viewInfo, nullptr, &tex.view);
-
-    return tex;
-}
-
 int main() {
-    std::cout << "--- Vulkan Headless Testbed (FSR 1.0 via SDK v1.1.4) ---" << std::endl;
+    std::cout << "--- Vulkan Headless Testbed (FSR 1.0 + Validation Layers) ---" << std::endl;
     
     if (volkInitialize() != VK_SUCCESS) return 1;
+
+    // 1. Enable Validation Layers
+    const char* validationLayerName = "VK_LAYER_KHRONOS_validation";
+    uint32_t layerCount;
+    vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
+    std::vector<VkLayerProperties> availableLayers(layerCount);
+    vkEnumerateInstanceLayerProperties(&layerCount, availableLayers.data());
+    
+    bool validationFound = false;
+    for (const auto& layer : availableLayers) {
+        if (strcmp(layer.layerName, validationLayerName) == 0) {
+            validationFound = true;
+            break;
+        }
+    }
+
+    std::vector<const char*> enabledLayers;
+    std::vector<const char*> instanceExtensions;
+    if (validationFound) {
+        enabledLayers.push_back(validationLayerName);
+        instanceExtensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        std::cout << "Validation Layers Enabled." << std::endl;
+    } else {
+        std::cout << "Validation Layers Not Found. Running blind." << std::endl;
+    }
 
     VkApplicationInfo appInfo = {};
     appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -86,11 +77,27 @@ int main() {
     VkInstanceCreateInfo instanceInfo = {};
     instanceInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     instanceInfo.pApplicationInfo = &appInfo;
+    instanceInfo.enabledLayerCount = (uint32_t)enabledLayers.size();
+    instanceInfo.ppEnabledLayerNames = enabledLayers.data();
+    instanceInfo.enabledExtensionCount = (uint32_t)instanceExtensions.size();
+    instanceInfo.ppEnabledExtensionNames = instanceExtensions.data();
 
     VkInstance instance;
     if (vkCreateInstance(&instanceInfo, nullptr, &instance) != VK_SUCCESS) return 1;
-
     volkLoadInstance(instance);
+
+    // 2. Attach the Debug Messenger
+    VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
+    if (validationFound) {
+        VkDebugUtilsMessengerCreateInfoEXT debugInfo = {};
+        debugInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+        debugInfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+        debugInfo.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+        debugInfo.pfnUserCallback = debugCallback;
+        
+        auto createDebug = (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
+        if (createDebug) createDebug(instance, &debugInfo, nullptr, &debugMessenger);
+    }
 
     uint32_t deviceCount = 0;
     vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
@@ -135,7 +142,6 @@ int main() {
     VkPhysicalDeviceFeatures2 features2 = {};
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     features2.pNext = &features11;
-    
     vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
 
     float queuePriority = 1.0f;
@@ -155,7 +161,6 @@ int main() {
 
     VkDevice device;
     if (vkCreateDevice(physicalDevice, &deviceInfo, nullptr, &device) != VK_SUCCESS) return 1;
-    
     volkLoadDevice(device);
 
     std::cout << "SUCCESS: Core Vulkan 1.3 Initialized with " << enabledExtensions.size() << " Extensions." << std::endl;
@@ -163,13 +168,12 @@ int main() {
     uint32_t renderW = 320, renderH = 240;
     uint32_t displayW = 640, displayH = 480;
 
-    // =========================================================================
-    // PHASE 3: INITIALIZING THE AMD FIDELITYFX FSR 1.0 SDK
-    // =========================================================================
     std::cout << "\nInitializing AMD FSR 1.0 Context..." << std::endl;
 
     size_t scratchBufferSize = ffxGetScratchMemorySizeVK(physicalDevice, 1);
-    void* scratchBuffer = _aligned_malloc(scratchBufferSize, 64);
+    // Double the buffer size and align it to 64 bytes to guarantee no memory bounds errors
+    size_t safeBufferSize = scratchBufferSize * 2;
+    void* scratchBuffer = _aligned_malloc(safeBufferSize, 64);
 
     VkDeviceContext vkDeviceContext = {};
     vkDeviceContext.vkDevice = device;
@@ -179,17 +183,15 @@ int main() {
     FfxDevice ffxDevice = ffxGetDeviceVK(&vkDeviceContext);
 
     FfxInterface ffxInterface = {};
-    FfxErrorCode err = ffxGetInterfaceVK(&ffxInterface, ffxDevice, scratchBuffer, scratchBufferSize, 1);
+    FfxErrorCode err = ffxGetInterfaceVK(&ffxInterface, ffxDevice, scratchBuffer, safeBufferSize, 1);
     
     if (err != FFX_OK) {
         std::cout << "FAILED: Could not establish AMD FFX Interface!" << std::endl;
         return 1;
     }
 
-    // COMPLIANT FSR 1.0 CONTEXT SETUP
     FfxFsr1ContextDescription fsr1Desc = {};
     fsr1Desc.flags = FFX_FSR1_ENABLE_RCAS;
-    // CRITICAL: We must explicitly declare the output format for FSR 1.0!
     fsr1Desc.outputFormat = ffxGetSurfaceFormatVK(VK_FORMAT_R8G8B8A8_UNORM);
     fsr1Desc.maxRenderSize.width = renderW;
     fsr1Desc.maxRenderSize.height = renderH;
@@ -208,18 +210,17 @@ int main() {
         std::cout << "=========================================================" << std::endl;
         std::cout << "SUCCESS: AMD FSR 1.0 UPSCALER IS ALIVE ON CPU!!!" << std::endl;
         std::cout << "=========================================================" << std::endl;
-        
         ffxFsr1ContextDestroy(&fsr1Context);
     }
 
-    // =========================================================================
-    // CLEANUP
-    // =========================================================================
     _aligned_free(scratchBuffer);
     vkDestroyDevice(device, nullptr);
+    if (debugMessenger) {
+        auto destroyDebug = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT");
+        if (destroyDebug) destroyDebug(instance, debugMessenger, nullptr);
+    }
     vkDestroyInstance(instance, nullptr);
     
     std::cout << "--- Phase 3 shut down cleanly. ---" << std::endl;
-
     return 0;
 }
