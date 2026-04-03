@@ -6,13 +6,17 @@
 
 #include <iostream>
 #include <vector>
+#include <string>
 #include <malloc.h> 
 
-// --- SAFE AMD SDK MESSAGE CALLBACK ---
+// --- CRITICAL FIX: FOOLPROOF AMD MESSAGE LOGGER ---
+// Windows console struggles with raw wchar_t. We convert it to standard char!
 static void FfxMessageCallback(FfxMsgType type, const wchar_t* message) {
     if (message) {
-        std::wprintf(L"[AMD SDK LOG] %s\n", message);
-        std::fflush(stdout);
+        char buffer[2048];
+        size_t converted = 0;
+        wcstombs_s(&converted, buffer, sizeof(buffer), message, _TRUNCATE);
+        std::cout << "[AMD SDK LOG] " << buffer << std::endl;
     }
 }
 
@@ -119,16 +123,8 @@ int main() {
         }
     }
 
-    uint32_t extCount = 0;
-    vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extCount, nullptr);
-    std::vector<VkExtensionProperties> availableExts(extCount);
-    vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extCount, availableExts.data());
-    
-    std::vector<const char*> enabledExtensions;
-    for (const auto& ext : availableExts) {
-        enabledExtensions.push_back(ext.extensionName);
-    }
-
+    // --- CRITICAL FIX: CORE VULKAN 1.3 FEATURES ONLY ---
+    // No more extension shotgunning. We just request the features SwiftShader natively supports!
     VkPhysicalDeviceVulkan13Features features13 = {};
     features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
 
@@ -158,9 +154,8 @@ int main() {
     deviceInfo.queueCreateInfoCount = 1;
     deviceInfo.pQueueCreateInfos = &queueCreateInfo;
     deviceInfo.pNext = &features2; 
-    
-    deviceInfo.enabledExtensionCount = (uint32_t)enabledExtensions.size();
-    deviceInfo.ppEnabledExtensionNames = enabledExtensions.data();
+    deviceInfo.enabledExtensionCount = 0; // ZERO extensions! Core 1.3 only!
+    deviceInfo.ppEnabledExtensionNames = nullptr;
 
     VkDevice device;
     if (vkCreateDevice(physicalDevice, &deviceInfo, nullptr, &device) != VK_SUCCESS) return 1;
@@ -170,7 +165,7 @@ int main() {
     VkQueue queue;
     vkGetDeviceQueue(device, queueFamilyIndex, 0, &queue);
 
-    std::cout << "SUCCESS: Core Vulkan 1.3 Initialized with " << enabledExtensions.size() << " Extensions." << std::endl;
+    std::cout << "SUCCESS: Core Vulkan 1.3 Initialized cleanly." << std::endl;
 
     uint32_t renderW = 320, renderH = 240;
     uint32_t displayW = 640, displayH = 480;
@@ -187,29 +182,18 @@ int main() {
     // =========================================================================
     std::cout << "\nInitializing AMD FSR 2.2 Context..." << std::endl;
 
-    std::cout << " -> ffxGetScratchMemorySizeVK..." << std::flush;
     size_t scratchBufferSize = ffxGetScratchMemorySizeVK(physicalDevice, 1);
-    std::cout << " OK (Calculated: " << scratchBufferSize << " bytes)" << std::endl;
-
-    // --- CRITICAL FIX: OVERALLOCATE SCRATCH MEMORY ---
-    // AMD's size calculation often misses alignment padding boundaries.
-    // We forcefully allocate DOUBLE the requested memory to guarantee success!
-    size_t safeBufferSize = scratchBufferSize * 2;
-    void* scratchBuffer = _aligned_malloc(safeBufferSize, 64);
+    void* scratchBuffer = _aligned_malloc(scratchBufferSize, 64);
 
     VkDeviceContext vkDeviceContext = {};
     vkDeviceContext.vkDevice = device;
     vkDeviceContext.vkPhysicalDevice = physicalDevice;
     vkDeviceContext.vkDeviceProcAddr = vkGetDeviceProcAddr;
     
-    std::cout << " -> ffxGetDeviceVK..." << std::flush;
     FfxDevice ffxDevice = ffxGetDeviceVK(&vkDeviceContext);
-    std::cout << " OK" << std::endl;
 
-    std::cout << " -> ffxGetInterfaceVK..." << std::flush;
     FfxInterface ffxInterface = {};
-    FfxErrorCode err = ffxGetInterfaceVK(&ffxInterface, ffxDevice, scratchBuffer, safeBufferSize, 1);
-    std::cout << " OK (Result Code: " << err << ")" << std::endl;
+    FfxErrorCode err = ffxGetInterfaceVK(&ffxInterface, ffxDevice, scratchBuffer, scratchBufferSize, 1);
     
     if (err != FFX_OK) {
         std::cout << "FAILED: Could not establish AMD FFX Interface!" << std::endl;
