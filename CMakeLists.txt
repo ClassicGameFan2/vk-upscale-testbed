@@ -32,12 +32,10 @@ file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/FindVulkan.cmake "
 ")
 list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_CURRENT_BINARY_DIR}")
 
-# --- CONFIGURE AMD SDK ---
+# --- THE ULTIMATE BYPASS ---
 set(FFX_FSR2 ON CACHE BOOL "" FORCE)
 set(FFX_API_VK ON CACHE BOOL "" FORCE)
 set(FFX_API_DX12 OFF CACHE BOOL "" FORCE)
-
-# CRITICAL FIX: The magic word must be exactly "VK_X64"
 set(FFX_API_BACKEND "VK_X64" CACHE STRING "" FORCE)
 
 FetchContent_Declare(ffx_sdk
@@ -46,7 +44,23 @@ FetchContent_Declare(ffx_sdk
 )
 FetchContent_GetProperties(ffx_sdk)
 if(NOT ffx_sdk_POPULATED)
+    if(POLICY CMP0169)
+        cmake_policy(SET CMP0169 OLD)
+    endif()
     FetchContent_Populate(ffx_sdk)
+    
+    # --- CRITICAL FIX: WINDOWS 7 COMPATIBILITY SCRUBBER ---
+    # Search all AMD source files and remove the Windows 10 SetThreadDescription API.
+    # We replace it with '0 * (' which turns the function call into a harmless math equation!
+    file(GLOB_RECURSE ffx_source_files "${ffx_sdk_SOURCE_DIR}/sdk/src/*.cpp" "${ffx_sdk_SOURCE_DIR}/sdk/src/*.h")
+    foreach(ffx_file IN LISTS ffx_source_files)
+        file(READ ${ffx_file} file_contents)
+        if(file_contents MATCHES "SetThreadDescription")
+            string(REPLACE "SetThreadDescription(" "0 * (" file_contents "${file_contents}")
+            file(WRITE ${ffx_file} "${file_contents}")
+        endif()
+    endforeach()
+
     add_subdirectory(${ffx_sdk_SOURCE_DIR}/sdk ${ffx_sdk_BINARY_DIR}/sdk)
 endif()
 
