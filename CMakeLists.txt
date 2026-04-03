@@ -19,8 +19,6 @@ FetchContent_Declare(volk
 FetchContent_MakeAvailable(volk)
 
 # --- THE ULTIMATE BYPASS ---
-# Skip AMD's root script entirely to avoid the architecture/SAMPLES crash.
-# Tell the SDK folder EXACTLY what we want it to build.
 set(FFX_FSR2 ON CACHE BOOL "" FORCE)
 set(FFX_BACKEND_VK ON CACHE BOOL "" FORCE)
 set(FFX_API_VULKAN ON CACHE BOOL "" FORCE)
@@ -33,24 +31,22 @@ FetchContent_Declare(ffx_sdk
 FetchContent_GetProperties(ffx_sdk)
 if(NOT ffx_sdk_POPULATED)
     FetchContent_Populate(ffx_sdk)
-    # Directly compile the SDK folder, skipping the root script!
     add_subdirectory(${ffx_sdk_SOURCE_DIR}/sdk ${ffx_sdk_BINARY_DIR}/sdk)
 endif()
 
 add_executable(vk-upscale-testbed src/main.cpp)
 
-# Tell the compiler exactly where the AMD headers are
 target_include_directories(vk-upscale-testbed PRIVATE 
     ${ffx_sdk_SOURCE_DIR}/sdk/include
     ${ffx_sdk_SOURCE_DIR}/sdk/include/FidelityFX/host/backends
 )
 
-# Link everything together
+# --- CRITICAL FIX: Add _x64 to the target names! ---
 target_link_libraries(vk-upscale-testbed PRIVATE 
     volk::volk_headers 
     volk::volk 
-    ffx_fsr2 
-    ffx_backend_vk
+    ffx_fsr2_x64 
+    ffx_backend_vk_x64
 )
 
 if(MSVC)
