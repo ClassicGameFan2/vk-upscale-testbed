@@ -8,37 +8,31 @@ include(FetchContent)
 
 FetchContent_Declare(vulkan_headers
     GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git
-    GIT_TAG        main
+    GIT_TAG main
 )
 FetchContent_MakeAvailable(vulkan_headers)
 
 FetchContent_Declare(volk
     GIT_REPOSITORY https://github.com/zeux/volk.git
-    GIT_TAG        master
+    GIT_TAG master
 )
 FetchContent_MakeAvailable(volk)
 
+# --- CRITICAL FIX: Appease AMD's root script, but disable the heavy samples! ---
+set(BUILD_TYPE "SAMPLES_VK" CACHE STRING "" FORCE)
 set(FFX_API_DX12 OFF CACHE BOOL "" FORCE)
 set(FFX_API_VULKAN ON CACHE BOOL "" FORCE)
 set(FFX_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(FFX_FSR2 ON CACHE BOOL "" FORCE)
+set(FFX_BACKEND_VK ON CACHE BOOL "" FORCE)
 
 FetchContent_Declare(ffx_sdk
     GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git
-    GIT_TAG        v1.1.4 
+    GIT_TAG v1.1.4 
 )
-
-FetchContent_GetProperties(ffx_sdk)
-if(NOT ffx_sdk_POPULATED)
-    FetchContent_Populate(ffx_sdk)
-    add_subdirectory(${ffx_sdk_SOURCE_DIR}/sdk ${ffx_sdk_BINARY_DIR}/sdk)
-endif()
+FetchContent_MakeAvailable(ffx_sdk)
 
 add_executable(vk-upscale-testbed src/main.cpp)
-
-# --- CRITICAL FIX: Tell the compiler exactly where the AMD headers are! ---
-target_include_directories(vk-upscale-testbed PRIVATE 
-    ${ffx_sdk_SOURCE_DIR}/sdk/include
-)
 
 # Link Vulkan, Volk, and the AMD FidelityFX FSR2 Backend
 target_link_libraries(vk-upscale-testbed PRIVATE 
