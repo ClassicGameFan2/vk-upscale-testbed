@@ -79,6 +79,7 @@ endif()
 
 # We need a tiny stb implementation file to compile the headers
 file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/stb_impl.cpp "
+    #define _CRT_SECURE_NO_WARNINGS
     #define STB_IMAGE_IMPLEMENTATION
     #define STB_IMAGE_WRITE_IMPLEMENTATION
     #include \"stb_image.h\"
