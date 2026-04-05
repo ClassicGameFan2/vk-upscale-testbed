@@ -18,6 +18,13 @@ FetchContent_Declare(volk
 )
 FetchContent_MakeAvailable(volk)
 
+# Fetch stb_image
+FetchContent_Declare(stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG master
+)
+FetchContent_MakeAvailable(stb)
+
 # --- CRITICAL FIX: BULLETPROOF FINDVULKAN INTERCEPTOR ---
 file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/FindVulkan.cmake "
     if(NOT TARGET Vulkan::Vulkan)
@@ -32,7 +39,8 @@ file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/FindVulkan.cmake "
 ")
 list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_CURRENT_BINARY_DIR}")
 
-# --- THE ULTIMATE BYPASS ---
+# --- ENABLE BOTH FSR 1 AND FSR 2 ---
+set(FFX_FSR1 ON CACHE BOOL "" FORCE)
 set(FFX_FSR2 ON CACHE BOOL "" FORCE)
 
 # CRITICAL FIX: The SDK strictly checks for "VK_X64" to include the backend folder!
@@ -69,17 +77,27 @@ if(NOT ffx_sdk_POPULATED)
     add_subdirectory(${ffx_sdk_SOURCE_DIR}/sdk ${ffx_sdk_BINARY_DIR}/sdk)
 endif()
 
-add_executable(vk-upscale-testbed src/main.cpp)
+# We need a tiny stb implementation file to compile the headers
+file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/stb_impl.cpp "
+    #define STB_IMAGE_IMPLEMENTATION
+    #define STB_IMAGE_WRITE_IMPLEMENTATION
+    #include \"stb_image.h\"
+    #include \"stb_image_write.h\"
+")
+
+add_executable(vk-upscale-testbed src/main.cpp ${CMAKE_CURRENT_BINARY_DIR}/stb_impl.cpp)
 
 target_include_directories(vk-upscale-testbed PRIVATE 
+    ${stb_SOURCE_DIR}
     ${ffx_sdk_SOURCE_DIR}/sdk/include
     ${ffx_sdk_SOURCE_DIR}/sdk/include/FidelityFX/host/backends
 )
 
-# Link the exact _x64 targets that AMD generates
+# Link both FSR1 and FSR2
 target_link_libraries(vk-upscale-testbed PRIVATE 
     volk::volk_headers 
     volk::volk 
+    ffx_fsr1_x64
     ffx_fsr2_x64
     ffx_backend_vk_x64
 )
