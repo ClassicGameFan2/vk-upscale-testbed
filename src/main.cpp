@@ -10,8 +10,7 @@
 #include <string>
 #include <cmath>
 
-// Image libs (Implementation is compiled in stb_impl.cpp!)
-#include "stb_image.h"
+#define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
 static void FfxMessageCallback(FfxMsgType type, const wchar_t* message) {
@@ -387,7 +386,12 @@ int main() {
         }
 
         vkEndCommandBuffer(cmd);
-        VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO, 0, nullptr, nullptr, 1, &cmd };
+        
+        VkSubmitInfo submitInfo = {};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &cmd;
+        
         vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
         vkQueueWaitIdle(queue);
 
@@ -408,15 +412,34 @@ int main() {
     vkCmdCopyImageToBuffer(cmd, outputImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, downloadBuffer, 1, &outRegion);
 
     vkEndCommandBuffer(cmd);
-    VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO, 0, nullptr, nullptr, 1, &cmd };
-    vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
+    
+    VkSubmitInfo submitInfo2 = {};
+    submitInfo2.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo2.commandBufferCount = 1;
+    submitInfo2.pCommandBuffers = &cmd;
+    
+    vkQueueSubmit(queue, 1, &submitInfo2, VK_NULL_HANDLE);
     vkQueueWaitIdle(queue);
 
+    // --- SAVE PNG ---
     void* outData;
     vkMapMemory(device, downloadMemory, 0, outSize, 0, &outData);
     stbi_write_png("FSR_2.3.3_2x.png", displayW, displayH, 4, outData, displayW * 4);
     vkUnmapMemory(device, downloadMemory);
     std::cout << "Done!" << std::endl;
+
+    // Cleanup
+    ffxFsr2ContextDestroy(&fsr2Context);
+    vkDestroyImage(device, colorImage, nullptr); vkFreeMemory(device, colorMem, nullptr);
+    vkDestroyImage(device, depthImage, nullptr); vkFreeMemory(device, depthMem, nullptr);
+    vkDestroyImage(device, mvImage, nullptr); vkFreeMemory(device, mvMem, nullptr);
+    vkDestroyImage(device, outputImage, nullptr); vkFreeMemory(device, outputMem, nullptr);
+    vkDestroyBuffer(device, uploadBuffer, nullptr); vkFreeMemory(device, uploadMemory, nullptr);
+    vkDestroyBuffer(device, downloadBuffer, nullptr); vkFreeMemory(device, downloadMemory, nullptr);
+    vkDestroyCommandPool(device, commandPool, nullptr);
+    vkDestroyDevice(device, nullptr);
+    vkDestroyInstance(instance, nullptr);
+    _aligned_free(scratchBuffer);
 
     return 0;
 }
