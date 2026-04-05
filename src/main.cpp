@@ -261,7 +261,8 @@ int main(int argc, char** argv) {
     ffxGetInterfaceVK(&ffxInterface, ffxGetDeviceVK(&vkDeviceContext), scratchBuffer, safeBufferSize, 1);
 
     FfxFsr2ContextDescription fsr2Desc = {};
-    fsr2Desc.flags = FFX_FSR2_ENABLE_DEBUG_CHECKING | FFX_FSR2_ENABLE_AUTO_EXPOSURE | FFX_FSR2_ENABLE_DEPTH_INVERTED;
+    // FIX: Disabled Auto-Exposure and Inverted Depth for static SDR images!
+    fsr2Desc.flags = FFX_FSR2_ENABLE_DEBUG_CHECKING;
     fsr2Desc.maxRenderSize = { (uint32_t)renderW, (uint32_t)renderH };
     fsr2Desc.displaySize = { displayW, displayH };
     fsr2Desc.fpMessage = FfxMessageCallback;
@@ -291,8 +292,8 @@ int main(int argc, char** argv) {
     region.imageExtent = { (uint32_t)renderW, (uint32_t)renderH, 1 };
     vkCmdCopyBufferToImage(cmd, uploadBuffer, colorImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-    // Clear Depth (0.0f = Inverted Far Plane) and MV (0,0)
-    VkClearDepthStencilValue depthClear = {0.0f, 0}; 
+    // FIX: Clear Depth to 1.0f (Standard Far Plane)
+    VkClearDepthStencilValue depthClear = {1.0f, 0}; 
     VkImageSubresourceRange depthRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
     vkCmdClearDepthStencilImage(cmd, depthImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &depthClear, 1, &depthRange);
 
@@ -320,6 +321,8 @@ int main(int argc, char** argv) {
     FfxResource mvRes = ffxGetResourceVK(mvImage, ffxGetImageResourceDescriptionVK(mvImage, mvInfo, FFX_RESOURCE_USAGE_READ_ONLY), L"MVs", FFX_RESOURCE_STATE_COMPUTE_READ);
     FfxResource outputRes = ffxGetResourceVK(outputImage, ffxGetImageResourceDescriptionVK(outputImage, outputInfo, FFX_RESOURCE_USAGE_UAV), L"Output", FFX_RESOURCE_STATE_UNORDERED_ACCESS);
 
+    int32_t phaseCount = ffxFsr2GetJitterPhaseCount(renderW, displayW);
+
     for (int i = 0; i < 32; i++) {
         vkResetCommandBuffer(cmd, 0);
         vkBeginCommandBuffer(cmd, &beginInfo);
@@ -331,20 +334,25 @@ int main(int argc, char** argv) {
         dispatchDesc.motionVectors = mvRes;
         dispatchDesc.output = outputRes;
         
-        // Zero Jitter & Zero MV Scale (Ablation Study)
-        dispatchDesc.jitterOffset.x = 0.0f;
-        dispatchDesc.jitterOffset.y = 0.0f;
+        // FIX: Provide REAL sub-pixel Jitter so FSR 2 actually accumulates data!
+        float jX = 0, jY = 0;
+        ffxFsr2GetJitterOffset(&jX, &jY, i, phaseCount);
+        dispatchDesc.jitterOffset.x = jX;
+        dispatchDesc.jitterOffset.y = jY;
+
         dispatchDesc.motionVectorScale.x = 0.0f; 
         dispatchDesc.motionVectorScale.y = 0.0f;
         
         dispatchDesc.renderSize = { (uint32_t)renderW, (uint32_t)renderH };
-        dispatchDesc.enableSharpening = true;
+        dispatchDesc.enableSharpening = false; // Disabled to rule out RCAS artifacts
         dispatchDesc.sharpness = 0.2f;
         dispatchDesc.frameTimeDelta = 16.6f;
         dispatchDesc.preExposure = 1.0f;
         dispatchDesc.reset = (i == 0); // True ONLY on first frame!
-        dispatchDesc.cameraNear = 1000.0f; // Reversed Z
-        dispatchDesc.cameraFar = 0.1f;
+        
+        // FIX: Standard Depth bounds (0.1 to 1000.0)
+        dispatchDesc.cameraNear = 0.1f;
+        dispatchDesc.cameraFar = 1000.0f;
         dispatchDesc.cameraFovAngleVertical = 1.047f; // ~60 degrees
         dispatchDesc.viewSpaceToMetersFactor = 1.0f;
 
@@ -371,7 +379,6 @@ int main(int argc, char** argv) {
     outRegion.imageSubresource.layerCount = 1;
     outRegion.imageExtent = { displayW, displayH, 1 };
     
-    // CRITICAL: vkCmdCopyImageToBuffer argument order is (cmd, image, layout, buffer, count, pRegions)
     vkCmdCopyImageToBuffer(cmd, outputImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, downloadBuffer, 1, &outRegion);
 
     vkEndCommandBuffer(cmd);
