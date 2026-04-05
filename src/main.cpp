@@ -10,7 +10,8 @@
 #include <string>
 #include <cmath>
 
-#define STB_IMAGE_WRITE_IMPLEMENTATION
+// Image libs (Implementation is in stb_impl.cpp!)
+#include "stb_image.h"
 #include "stb_image_write.h"
 
 static void FfxMessageCallback(FfxMsgType type, const wchar_t* message) {
