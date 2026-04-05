@@ -10,7 +10,8 @@
 #include <string>
 #include <cmath>
 
-#define STB_IMAGE_WRITE_IMPLEMENTATION
+// Image libs (Implementation is compiled in stb_impl.cpp!)
+#include "stb_image.h"
 #include "stb_image_write.h"
 
 static void FfxMessageCallback(FfxMsgType type, const wchar_t* message) {
@@ -386,9 +387,7 @@ int main() {
         }
 
         vkEndCommandBuffer(cmd);
-        VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
-        submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &cmd;
+        VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO, 0, nullptr, nullptr, 1, &cmd };
         vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
         vkQueueWaitIdle(queue);
 
@@ -409,9 +408,7 @@ int main() {
     vkCmdCopyImageToBuffer(cmd, outputImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, downloadBuffer, 1, &outRegion);
 
     vkEndCommandBuffer(cmd);
-    VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &cmd;
+    VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO, 0, nullptr, nullptr, 1, &cmd };
     vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
     vkQueueWaitIdle(queue);
 
