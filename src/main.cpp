@@ -10,16 +10,18 @@
 #include <string>
 #include <cmath>
 
-// Image libs (Implementation is in stb_impl.cpp!)
+// Image libs
 #include "stb_image.h"
 #include "stb_image_write.h"
 
+// 100% crash-proof wide-string printer
 static void FfxMessageCallback(FfxMsgType type, const wchar_t* message) {
     if (message) {
-        char buffer[2048];
-        size_t converted = 0;
-        wcstombs_s(&converted, buffer, sizeof(buffer), message, _TRUNCATE);
-        std::cout << "[AMD SDK] " << buffer << std::endl;
+        std::cout << "[AMD SDK] ";
+        for (int i = 0; i < 2048 && message[i] != 0; ++i) {
+            std::cout << (char)message[i];
+        }
+        std::cout << std::endl;
     }
 }
 
@@ -32,7 +34,7 @@ static uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFil
     return 0; 
 }
 
-// --- PROCEDURAL 3D RAYTRACER ---
+// --- PROCEDURAL 3D RAYTRACER (INVERTED DEPTH) ---
 void renderScene(int w, int h, float jx, float jy, unsigned char* colorOut, float* depthOut) {
     float aspect = (float)w / (float)h;
     float fovY = 1.04719755f; // 60 degrees in radians
@@ -48,7 +50,7 @@ void renderScene(int w, int h, float jx, float jy, unsigned char* colorOut, floa
 
             // Ray Origin & Direction
             float ro[3] = {0.0f, 1.0f, 0.0f};
-            float rd[3] = {ndcX * aspect * tanHalfFov, -ndcY * tanHalfFov, 1.0f}; // -ndcY for Vulkan Y-down
+            float rd[3] = {ndcX * aspect * tanHalfFov, -ndcY * tanHalfFov, 1.0f};
             float len = sqrtf(rd[0]*rd[0] + rd[1]*rd[1] + rd[2]*rd[2]);
             rd[0]/=len; rd[1]/=len; rd[2]/=len;
 
@@ -72,7 +74,7 @@ void renderScene(int w, int h, float jx, float jy, unsigned char* colorOut, floa
                     nx/=nlen; ny/=nlen; nz/=nlen;
                     
                     float light[3] = {0.577f, 0.577f, -0.577f}; // Directional light
-                    float ndotl = fmax(0.2f, -(nx*light[0] + ny*light[1] + nz*light[2])); // Diffuse + Ambient
+                    float ndotl = fmax(0.2f, -(nx*light[0] + ny*light[1] + nz*light[2]));
                     r = (unsigned char)(200 * ndotl);
                     g = (unsigned char)(50 * ndotl);
                     b = (unsigned char)(50 * ndotl);
@@ -98,13 +100,12 @@ void renderScene(int w, int h, float jx, float jy, unsigned char* colorOut, floa
             colorOut[idx*4+2] = b;
             colorOut[idx*4+3] = 255;
 
-            // Calculate True 3D Depth (Standard 0 to 1)
+            // Calculate True 3D INVERTED Depth
             if (hitZ > 0.0f) {
-                // View space Z to Projection space Depth
-                float depth = (zFar * (hitZ - zNear)) / (hitZ * (zFar - zNear));
+                float depth = (zNear * (zFar - hitZ)) / (hitZ * (zFar - zNear));
                 depthOut[idx] = depth;
             } else {
-                depthOut[idx] = 1.0f; // Far Plane
+                depthOut[idx] = 0.0f; // Inverted Far Plane is 0.0
             }
         }
     }
@@ -283,7 +284,7 @@ int main() {
     VkImageCreateInfo outputInfo = createImage(device, physicalDevice, displayW, displayH, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, outputImage, outputMem);
 
     // --- SETUP FSR 2 CONTEXT ---
-    std::cout << "Initializing FSR 2.3.3 Context..." << std::endl;
+    std::cout << "Initializing FSR 2.3.3 Context..." << std::flush;
     size_t safeBufferSize = ffxGetScratchMemorySizeVK(physicalDevice, 1) * 2;
     void* scratchBuffer = _aligned_malloc(safeBufferSize, 64);
 
@@ -292,15 +293,20 @@ int main() {
     ffxGetInterfaceVK(&ffxInterface, ffxGetDeviceVK(&vkDeviceContext), scratchBuffer, safeBufferSize, 1);
 
     FfxFsr2ContextDescription fsr2Desc = {};
-    // Clean SDR Setup
-    fsr2Desc.flags = FFX_FSR2_ENABLE_DEBUG_CHECKING; 
+    memset(&fsr2Desc, 0, sizeof(FfxFsr2ContextDescription)); // Explicit zero
+    fsr2Desc.flags = FFX_FSR2_ENABLE_DEBUG_CHECKING | FFX_FSR2_ENABLE_DEPTH_INVERTED | FFX_FSR2_ENABLE_AUTO_EXPOSURE; 
     fsr2Desc.maxRenderSize = { (uint32_t)renderW, (uint32_t)renderH };
     fsr2Desc.displaySize = { displayW, displayH };
     fsr2Desc.fpMessage = FfxMessageCallback;
     fsr2Desc.backendInterface = ffxInterface;
 
     FfxFsr2Context fsr2Context;
-    if (ffxFsr2ContextCreate(&fsr2Context, &fsr2Desc) != FFX_OK) return 1;
+    FfxErrorCode err = ffxFsr2ContextCreate(&fsr2Context, &fsr2Desc);
+    if (err != FFX_OK) {
+        std::cout << "\nFAILED: ffxFsr2ContextCreate returned " << err << std::endl;
+        return 1;
+    }
+    std::cout << " OK!" << std::endl;
 
     FfxResource colorRes = ffxGetResourceVK(colorImage, ffxGetImageResourceDescriptionVK(colorImage, colorInfo, FFX_RESOURCE_USAGE_READ_ONLY), L"Color", FFX_RESOURCE_STATE_COMPUTE_READ);
     FfxResource depthRes = ffxGetResourceVK(depthImage, ffxGetImageResourceDescriptionVK(depthImage, depthInfo, FFX_RESOURCE_USAGE_READ_ONLY), L"Depth", FFX_RESOURCE_STATE_COMPUTE_READ);
@@ -361,6 +367,7 @@ int main() {
 
         // 4. Dispatch FSR
         FfxFsr2DispatchDescription dispatchDesc = {};
+        memset(&dispatchDesc, 0, sizeof(FfxFsr2DispatchDescription)); // Explicit zero
         dispatchDesc.commandList = ffxGetCommandListVK(cmd);
         dispatchDesc.color = colorRes;
         dispatchDesc.depth = depthRes;
@@ -377,12 +384,14 @@ int main() {
         dispatchDesc.frameTimeDelta = 16.6f;
         dispatchDesc.preExposure = 1.0f;
         dispatchDesc.reset = (i == 0); 
+        
         dispatchDesc.cameraNear = 0.1f;
         dispatchDesc.cameraFar = 100.0f;
         dispatchDesc.cameraFovAngleVertical = 1.047f; // 60 degrees
 
-        if (ffxFsr2ContextDispatch(&fsr2Context, &dispatchDesc) != FFX_OK) {
-            std::cout << "FAILED: ffxFsr2ContextDispatch failed on loop " << i << std::endl;
+        err = ffxFsr2ContextDispatch(&fsr2Context, &dispatchDesc);
+        if (err != FFX_OK) {
+            std::cout << "\nFAILED: ffxFsr2ContextDispatch failed on loop " << i << std::endl;
             return 1;
         }
 
