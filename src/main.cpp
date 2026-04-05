@@ -215,7 +215,7 @@ int main(int argc, char** argv) {
 
     VkCommandPoolCreateInfo poolInfo = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
     poolInfo.queueFamilyIndex = queueFamilyIndex;
-    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT; // Allow resetting!
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT; 
     VkCommandPool commandPool;
     vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool);
 
@@ -261,8 +261,7 @@ int main(int argc, char** argv) {
     ffxGetInterfaceVK(&ffxInterface, ffxGetDeviceVK(&vkDeviceContext), scratchBuffer, safeBufferSize, 1);
 
     FfxFsr2ContextDescription fsr2Desc = {};
-    // FIX: Disabled Auto-Exposure and Inverted Depth for static SDR images!
-    fsr2Desc.flags = FFX_FSR2_ENABLE_DEBUG_CHECKING;
+    fsr2Desc.flags = FFX_FSR2_ENABLE_DEBUG_CHECKING; // Clean configuration for Static SDR Images
     fsr2Desc.maxRenderSize = { (uint32_t)renderW, (uint32_t)renderH };
     fsr2Desc.displaySize = { displayW, displayH };
     fsr2Desc.fpMessage = FfxMessageCallback;
@@ -292,7 +291,7 @@ int main(int argc, char** argv) {
     region.imageExtent = { (uint32_t)renderW, (uint32_t)renderH, 1 };
     vkCmdCopyBufferToImage(cmd, uploadBuffer, colorImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-    // FIX: Clear Depth to 1.0f (Standard Far Plane)
+    // Clear Depth to 1.0f (Standard Far Plane)
     VkClearDepthStencilValue depthClear = {1.0f, 0}; 
     VkImageSubresourceRange depthRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
     vkCmdClearDepthStencilImage(cmd, depthImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &depthClear, 1, &depthRange);
@@ -314,14 +313,12 @@ int main(int argc, char** argv) {
     vkQueueWaitIdle(queue);
 
     // --- TEMPORAL LOOP ---
-    std::cout << "Dispatching FSR 2.3.3 Temporal Jitter Loop (32 Passes)..." << std::endl;
+    std::cout << "Dispatching FSR 2.3.3 Static Frame Loop (32 Passes)..." << std::endl;
 
     FfxResource colorRes = ffxGetResourceVK(colorImage, ffxGetImageResourceDescriptionVK(colorImage, colorInfo, FFX_RESOURCE_USAGE_READ_ONLY), L"Color", FFX_RESOURCE_STATE_COMPUTE_READ);
     FfxResource depthRes = ffxGetResourceVK(depthImage, ffxGetImageResourceDescriptionVK(depthImage, depthInfo, FFX_RESOURCE_USAGE_READ_ONLY), L"Depth", FFX_RESOURCE_STATE_COMPUTE_READ);
     FfxResource mvRes = ffxGetResourceVK(mvImage, ffxGetImageResourceDescriptionVK(mvImage, mvInfo, FFX_RESOURCE_USAGE_READ_ONLY), L"MVs", FFX_RESOURCE_STATE_COMPUTE_READ);
     FfxResource outputRes = ffxGetResourceVK(outputImage, ffxGetImageResourceDescriptionVK(outputImage, outputInfo, FFX_RESOURCE_USAGE_UAV), L"Output", FFX_RESOURCE_STATE_UNORDERED_ACCESS);
-
-    int32_t phaseCount = ffxFsr2GetJitterPhaseCount(renderW, displayW);
 
     for (int i = 0; i < 32; i++) {
         vkResetCommandBuffer(cmd, 0);
@@ -334,25 +331,22 @@ int main(int argc, char** argv) {
         dispatchDesc.motionVectors = mvRes;
         dispatchDesc.output = outputRes;
         
-        // FIX: Provide REAL sub-pixel Jitter so FSR 2 actually accumulates data!
-        float jX = 0, jY = 0;
-        ffxFsr2GetJitterOffset(&jX, &jY, i, phaseCount);
-        dispatchDesc.jitterOffset.x = jX;
-        dispatchDesc.jitterOffset.y = jY;
-
+        // Zero Jitter for Flat Static Sprites
+        dispatchDesc.jitterOffset.x = 0.0f;
+        dispatchDesc.jitterOffset.y = 0.0f;
         dispatchDesc.motionVectorScale.x = 0.0f; 
         dispatchDesc.motionVectorScale.y = 0.0f;
         
         dispatchDesc.renderSize = { (uint32_t)renderW, (uint32_t)renderH };
-        dispatchDesc.enableSharpening = false; // Disabled to rule out RCAS artifacts
+        dispatchDesc.enableSharpening = true;
         dispatchDesc.sharpness = 0.2f;
         dispatchDesc.frameTimeDelta = 16.6f;
         dispatchDesc.preExposure = 1.0f;
-        dispatchDesc.reset = (i == 0); // True ONLY on first frame!
+        dispatchDesc.reset = (i == 0); 
         
-        // FIX: Standard Depth bounds (0.1 to 1000.0)
+        // Standard Depth Math (No NaN explosion)
         dispatchDesc.cameraNear = 0.1f;
-        dispatchDesc.cameraFar = 1000.0f;
+        dispatchDesc.cameraFar = 100.0f;
         dispatchDesc.cameraFovAngleVertical = 1.047f; // ~60 degrees
         dispatchDesc.viewSpaceToMetersFactor = 1.0f;
 
