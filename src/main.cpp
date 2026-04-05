@@ -380,12 +380,19 @@ int main() {
         dispatchDesc.cameraFar = 100.0f;
         dispatchDesc.cameraFovAngleVertical = 1.047f; // 60 degrees
 
-        ffxFsr2ContextDispatch(&fsr2Context, &dispatchDesc);
+        if (ffxFsr2ContextDispatch(&fsr2Context, &dispatchDesc) != FFX_OK) {
+            std::cout << "FAILED: ffxFsr2ContextDispatch failed on loop " << i << std::endl;
+            return 1;
+        }
 
         vkEndCommandBuffer(cmd);
-        VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO, 0, nullptr, nullptr, 1, &cmd };
+        VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &cmd;
         vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
         vkQueueWaitIdle(queue);
+
+        if ((i + 1) % 8 == 0) std::cout << "  -> Completed Pass " << (i + 1) << "/32" << std::endl;
     }
 
     // --- DOWNLOAD RESULT ---
@@ -398,10 +405,13 @@ int main() {
     outRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     outRegion.imageSubresource.layerCount = 1;
     outRegion.imageExtent = { displayW, displayH, 1 };
+    
     vkCmdCopyImageToBuffer(cmd, outputImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, downloadBuffer, 1, &outRegion);
 
     vkEndCommandBuffer(cmd);
-    VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO, 0, nullptr, nullptr, 1, &cmd };
+    VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmd;
     vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
     vkQueueWaitIdle(queue);
 
