@@ -14,6 +14,11 @@
 // Image libs (Implementation is compiled in stb_impl.cpp!)
 #include "stb_image_write.h"
 
+// --- THE NEW AMD ASSERT CATCHER ---
+static void AssertCallback(const char* message) {
+    std::cout << "\n[AMD SDK ASSERTION FAILED] " << message << std::endl;
+}
+
 static void FfxMessageCallback(FfxMsgType type, const wchar_t* message) {
     if (message) {
         std::cout << "[AMD SDK] ";
@@ -185,6 +190,9 @@ void transitionImageLayout(VkCommandBuffer cmd, VkImage image, VkImageLayout old
 int main() {
     std::cout << "--- FSR 3D Ablation Study (FSR 1.2 & FSR 2.3.3) ---" << std::endl;
 
+    // Wire up the AMD Assert Catcher!
+    ffxAssertSetPrintingCallback(AssertCallback);
+
     uint32_t renderW = 320, renderH = 240;
     uint32_t displayW = 640, displayH = 480;
 
@@ -313,7 +321,6 @@ int main() {
     std::cout << " OK!" << std::endl;
 
     std::cout << "  [Trace] ffxFsr1ContextCreate..." << std::flush;
-    // CRITICAL FIX: ALLOCATE CONTEXT ON HEAP TO PREVENT STACK OVERFLOW!
     FfxFsr1Context* fsr1Context = new FfxFsr1Context();
     FfxErrorCode err1 = ffxFsr1ContextCreate(fsr1Context, &fsr1Desc);
     if (err1 != FFX_OK) {
@@ -404,7 +411,6 @@ int main() {
     std::cout << " OK!" << std::endl;
 
     std::cout << "  [Trace] ffxFsr2ContextCreate..." << std::flush;
-    // CRITICAL FIX: ALLOCATE CONTEXT ON HEAP TO PREVENT STACK OVERFLOW!
     FfxFsr2Context* fsr2Context = new FfxFsr2Context();
     FfxErrorCode err2 = ffxFsr2ContextCreate(fsr2Context, &fsr2Desc);
     if (err2 != FFX_OK) {
