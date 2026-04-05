@@ -69,9 +69,11 @@ if(NOT ffx_sdk_POPULATED)
         endif()
     endforeach()
 
-    # SWIFTSHADER MEMORY FIX: Force AMD to accept Host Visible VRAM!
+    # SWIFTSHADER MEMORY FIX & VULKAN ERROR TRACER
     file(READ "${ffx_sdk_SOURCE_DIR}/sdk/src/backends/vk/ffx_vk.cpp" vk_backend_code)
     string(REPLACE "if (requestedProperties == VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT && (memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))" "if (false)" vk_backend_code "${vk_backend_code}")
+    string(PREPEND vk_backend_code "#include <stdio.h>\n")
+    string(REPLACE "return FFX_ERROR_BACKEND_API_ERROR;" "{ printf(\"\\n[VK BACKEND ERROR] ffx_vk.cpp failed at line %d\\n\", __LINE__); fflush(stdout); return FFX_ERROR_BACKEND_API_ERROR; }" vk_backend_code "${vk_backend_code}")
     file(WRITE "${ffx_sdk_SOURCE_DIR}/sdk/src/backends/vk/ffx_vk.cpp" "${vk_backend_code}")
 
     add_subdirectory(${ffx_sdk_SOURCE_DIR}/sdk ${ffx_sdk_BINARY_DIR}/sdk)
@@ -80,9 +82,7 @@ endif()
 # We need a tiny stb implementation file to compile the headers
 file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/stb_impl.cpp "
     #define _CRT_SECURE_NO_WARNINGS
-    #define STB_IMAGE_IMPLEMENTATION
     #define STB_IMAGE_WRITE_IMPLEMENTATION
-    #include \"stb_image.h\"
     #include \"stb_image_write.h\"
 ")
 
