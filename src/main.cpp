@@ -124,7 +124,7 @@ int main(int argc, char** argv) {
     int renderW, renderH, channels;
     unsigned char* pixels = stbi_load(inFile.c_str(), &renderW, &renderH, &channels, 4);
     if (!pixels) {
-        std::cout << "Failed to load PNG!" << std::endl;
+        std::cout << "FAILED: Could not load " << inFile << ". Does the file exist?" << std::endl;
         return 1;
     }
 
@@ -132,18 +132,29 @@ int main(int argc, char** argv) {
     uint32_t displayH = (uint32_t)(renderH * scaleFactor);
     std::cout << "Scaling: " << renderW << "x" << renderH << " -> " << displayW << "x" << displayH << std::endl;
 
-    if (volkInitialize() != VK_SUCCESS) return 1;
+    std::cout << "Initializing Volk..." << std::endl;
+    if (volkInitialize() != VK_SUCCESS) {
+        std::cout << "FAILED: volkInitialize() failed. Make sure vulkan-1.dll is in your Working Directory!" << std::endl;
+        return 1;
+    }
 
     VkApplicationInfo appInfo = { VK_STRUCTURE_TYPE_APPLICATION_INFO };
     appInfo.apiVersion = VK_API_VERSION_1_3; 
     VkInstanceCreateInfo instanceInfo = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
     instanceInfo.pApplicationInfo = &appInfo;
     VkInstance instance;
-    if (vkCreateInstance(&instanceInfo, nullptr, &instance) != VK_SUCCESS) return 1;
+    if (vkCreateInstance(&instanceInfo, nullptr, &instance) != VK_SUCCESS) {
+        std::cout << "FAILED: vkCreateInstance failed!" << std::endl;
+        return 1;
+    }
     volkLoadInstance(instance);
 
     uint32_t deviceCount = 0;
     vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
+    if (deviceCount == 0) {
+        std::cout << "FAILED: No Vulkan physical devices found!" << std::endl;
+        return 1;
+    }
     std::vector<VkPhysicalDevice> physicalDevices(deviceCount);
     vkEnumeratePhysicalDevices(instance, &deviceCount, physicalDevices.data());
     VkPhysicalDevice physicalDevice = physicalDevices[0]; 
@@ -158,6 +169,20 @@ int main(int argc, char** argv) {
         if ((queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && (queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT)) {
             queueFamilyIndex = i; break;
         }
+    }
+    if (queueFamilyIndex == -1) {
+        std::cout << "FAILED: No graphics/compute queue found!" << std::endl;
+        return 1;
+    }
+
+    // Shotgun all extensions for compatibility with FSR 2
+    uint32_t extCount = 0;
+    vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extCount, nullptr);
+    std::vector<VkExtensionProperties> availableExts(extCount);
+    vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extCount, availableExts.data());
+    std::vector<const char*> enabledExtensions;
+    for (const auto& ext : availableExts) {
+        enabledExtensions.push_back(ext.extensionName);
     }
 
     float queuePriority = 1.0f;
@@ -175,8 +200,14 @@ int main(int argc, char** argv) {
     deviceInfo.queueCreateInfoCount = 1;
     deviceInfo.pQueueCreateInfos = &queueCreateInfo;
     deviceInfo.pNext = &features2; 
+    deviceInfo.enabledExtensionCount = (uint32_t)enabledExtensions.size();
+    deviceInfo.ppEnabledExtensionNames = enabledExtensions.data();
+
     VkDevice device;
-    if (vkCreateDevice(physicalDevice, &deviceInfo, nullptr, &device) != VK_SUCCESS) return 1;
+    if (vkCreateDevice(physicalDevice, &deviceInfo, nullptr, &device) != VK_SUCCESS) {
+        std::cout << "FAILED: vkCreateDevice failed!" << std::endl;
+        return 1;
+    }
     volkLoadDevice(device);
 
     VkQueue queue;
@@ -184,6 +215,7 @@ int main(int argc, char** argv) {
 
     VkCommandPoolCreateInfo poolInfo = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
     poolInfo.queueFamilyIndex = queueFamilyIndex;
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT; // Allow resetting!
     VkCommandPool commandPool;
     vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool);
 
@@ -193,6 +225,8 @@ int main(int argc, char** argv) {
     allocInfo.commandBufferCount = 1;
     VkCommandBuffer cmd;
     vkAllocateCommandBuffers(device, &allocInfo, &cmd);
+
+    std::cout << "Allocating VRAM Buffers..." << std::endl;
 
     // --- ALLOCATE IMAGES & STAGING BUFFERS ---
     VkDeviceSize imageSize = renderW * renderH * 4;
@@ -218,6 +252,7 @@ int main(int argc, char** argv) {
     VkImageCreateInfo outputInfo = createImage(device, physicalDevice, displayW, displayH, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, outputImage, outputMem);
 
     // --- SETUP FSR 2 CONTEXT ---
+    std::cout << "Creating FSR 2.3.3 Context..." << std::endl;
     size_t safeBufferSize = ffxGetScratchMemorySizeVK(physicalDevice, 1) * 2;
     void* scratchBuffer = _aligned_malloc(safeBufferSize, 64);
 
@@ -233,9 +268,13 @@ int main(int argc, char** argv) {
     fsr2Desc.backendInterface = ffxInterface;
 
     FfxFsr2Context fsr2Context;
-    ffxFsr2ContextCreate(&fsr2Context, &fsr2Desc);
+    if (ffxFsr2ContextCreate(&fsr2Context, &fsr2Desc) != FFX_OK) {
+        std::cout << "FAILED: ffxFsr2ContextCreate failed!" << std::endl;
+        return 1;
+    }
 
-    // --- RECORD COMMAND BUFFER ---
+    // --- RECORD PRE-LOOP UPLOADS ---
+    std::cout << "Uploading Image to VRAM..." << std::endl;
     VkCommandBufferBeginInfo beginInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     vkBeginCommandBuffer(cmd, &beginInfo);
 
@@ -266,15 +305,25 @@ int main(int argc, char** argv) {
     transitionImageLayout(cmd, depthImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
     transitionImageLayout(cmd, mvImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
 
-    // Define FSR Resources
+    vkEndCommandBuffer(cmd);
+    VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmd;
+    vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
+    vkQueueWaitIdle(queue);
+
+    // --- TEMPORAL LOOP ---
+    std::cout << "Dispatching FSR 2.3.3 Temporal Jitter Loop (32 Passes)..." << std::endl;
+
     FfxResource colorRes = ffxGetResourceVK(colorImage, ffxGetImageResourceDescriptionVK(colorImage, colorInfo, FFX_RESOURCE_USAGE_READ_ONLY), L"Color", FFX_RESOURCE_STATE_COMPUTE_READ);
     FfxResource depthRes = ffxGetResourceVK(depthImage, ffxGetImageResourceDescriptionVK(depthImage, depthInfo, FFX_RESOURCE_USAGE_READ_ONLY), L"Depth", FFX_RESOURCE_STATE_COMPUTE_READ);
     FfxResource mvRes = ffxGetResourceVK(mvImage, ffxGetImageResourceDescriptionVK(mvImage, mvInfo, FFX_RESOURCE_USAGE_READ_ONLY), L"MVs", FFX_RESOURCE_STATE_COMPUTE_READ);
     FfxResource outputRes = ffxGetResourceVK(outputImage, ffxGetImageResourceDescriptionVK(outputImage, outputInfo, FFX_RESOURCE_USAGE_UAV), L"Output", FFX_RESOURCE_STATE_UNORDERED_ACCESS);
 
-    std::cout << "Dispatching FSR 2.3.3 Temporal Jitter Loop (32 Passes)..." << std::endl;
-
     for (int i = 0; i < 32; i++) {
+        vkResetCommandBuffer(cmd, 0);
+        vkBeginCommandBuffer(cmd, &beginInfo);
+
         FfxFsr2DispatchDescription dispatchDesc = {};
         dispatchDesc.commandList = ffxGetCommandListVK(cmd);
         dispatchDesc.color = colorRes;
@@ -299,23 +348,33 @@ int main(int argc, char** argv) {
         dispatchDesc.cameraFovAngleVertical = 1.047f; // ~60 degrees
         dispatchDesc.viewSpaceToMetersFactor = 1.0f;
 
-        ffxFsr2ContextDispatch(&fsr2Context, &dispatchDesc);
+        if (ffxFsr2ContextDispatch(&fsr2Context, &dispatchDesc) != FFX_OK) {
+            std::cout << "FAILED: ffxFsr2ContextDispatch failed on loop " << i << std::endl;
+            return 1;
+        }
+
+        vkEndCommandBuffer(cmd);
+        vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
+        vkQueueWaitIdle(queue);
+
+        if ((i + 1) % 8 == 0) std::cout << "  -> Completed Pass " << (i + 1) << "/32" << std::endl;
     }
 
-    // Download Result
+    // --- DOWNLOAD RESULT ---
+    std::cout << "Downloading Result..." << std::endl;
+    vkResetCommandBuffer(cmd, 0);
+    vkBeginCommandBuffer(cmd, &beginInfo);
+
     transitionImageLayout(cmd, outputImage, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
     VkBufferImageCopy outRegion = {};
     outRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     outRegion.imageSubresource.layerCount = 1;
     outRegion.imageExtent = { displayW, displayH, 1 };
+    
+    // CRITICAL: vkCmdCopyImageToBuffer argument order is (cmd, image, layout, buffer, count, pRegions)
     vkCmdCopyImageToBuffer(cmd, outputImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, downloadBuffer, 1, &outRegion);
 
     vkEndCommandBuffer(cmd);
-
-    // --- SUBMIT AND WAIT ---
-    VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &cmd;
     vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
     vkQueueWaitIdle(queue);
 
