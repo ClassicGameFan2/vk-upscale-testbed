@@ -18,7 +18,7 @@ FetchContent_Declare(volk
 )
 FetchContent_MakeAvailable(volk)
 
-# Fetch stb_image
+# --- FETCH STB_IMAGE ---
 FetchContent_Declare(stb
     GIT_REPOSITORY https://github.com/nothings/stb.git
     GIT_TAG master
