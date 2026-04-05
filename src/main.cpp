@@ -11,7 +11,7 @@
 #include <string>
 #include <cmath>
 
-#define STB_IMAGE_WRITE_IMPLEMENTATION
+// Image libs (Implementation is compiled in stb_impl.cpp!)
 #include "stb_image_write.h"
 
 static void FfxMessageCallback(FfxMsgType type, const wchar_t* message) {
@@ -506,7 +506,13 @@ int main() {
     vkCmdCopyImageToBuffer(cmd, outputImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, downloadBuffer, 1, &outRegion);
 
     vkEndCommandBuffer(cmd);
-    vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
+    
+    VkSubmitInfo submitInfo2 = {};
+    submitInfo2.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo2.commandBufferCount = 1;
+    submitInfo2.pCommandBuffers = &cmd;
+    
+    vkQueueSubmit(queue, 1, &submitInfo2, VK_NULL_HANDLE);
     vkQueueWaitIdle(queue);
 
     vkMapMemory(device, downloadMemory, 0, outSize, 0, &outData);
