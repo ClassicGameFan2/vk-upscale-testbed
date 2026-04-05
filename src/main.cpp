@@ -278,7 +278,6 @@ int main() {
 
     VkDeviceContext vkDeviceContext = { device, physicalDevice, vkGetDeviceProcAddr };
     
-    // INCREASE MAX CONTEXTS TO 4 TO PREVENT OOB MEMORY CORRUPTION
     std::cout << "\n[Trace] Allocating Backend Scratch Memory..." << std::flush;
     size_t safeBufferSize = ffxGetScratchMemorySizeVK(physicalDevice, 4) * 2;
     void* scratchBuffer = _aligned_malloc(safeBufferSize, 64);
@@ -314,8 +313,9 @@ int main() {
     std::cout << " OK!" << std::endl;
 
     std::cout << "  [Trace] ffxFsr1ContextCreate..." << std::flush;
-    FfxFsr1Context fsr1Context;
-    FfxErrorCode err1 = ffxFsr1ContextCreate(&fsr1Context, &fsr1Desc);
+    // CRITICAL FIX: ALLOCATE CONTEXT ON HEAP TO PREVENT STACK OVERFLOW!
+    FfxFsr1Context* fsr1Context = new FfxFsr1Context();
+    FfxErrorCode err1 = ffxFsr1ContextCreate(fsr1Context, &fsr1Desc);
     if (err1 != FFX_OK) {
         std::cout << "\nFAILED: ffxFsr1ContextCreate returned " << err1 << std::endl;
         return 1;
@@ -354,7 +354,7 @@ int main() {
     dispatchDesc1.renderSize = { (uint32_t)renderW, (uint32_t)renderH };
     dispatchDesc1.enableSharpening = true;
     dispatchDesc1.sharpness = 0.2f;
-    ffxFsr1ContextDispatch(&fsr1Context, &dispatchDesc1);
+    ffxFsr1ContextDispatch(fsr1Context, &dispatchDesc1);
 
     transitionImageLayout(cmd, outputImage, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
     VkBufferImageCopy outRegion = {};
@@ -374,7 +374,8 @@ int main() {
     std::cout << "Saved FSR_1.2_2x.png successfully!" << std::endl;
 
     std::cout << "  [Trace] Destroying FSR 1.2 Context..." << std::flush;
-    ffxFsr1ContextDestroy(&fsr1Context);
+    ffxFsr1ContextDestroy(fsr1Context);
+    delete fsr1Context;
     std::cout << " OK!" << std::endl;
 
 
@@ -403,8 +404,9 @@ int main() {
     std::cout << " OK!" << std::endl;
 
     std::cout << "  [Trace] ffxFsr2ContextCreate..." << std::flush;
-    FfxFsr2Context fsr2Context;
-    FfxErrorCode err2 = ffxFsr2ContextCreate(&fsr2Context, &fsr2Desc);
+    // CRITICAL FIX: ALLOCATE CONTEXT ON HEAP TO PREVENT STACK OVERFLOW!
+    FfxFsr2Context* fsr2Context = new FfxFsr2Context();
+    FfxErrorCode err2 = ffxFsr2ContextCreate(fsr2Context, &fsr2Desc);
     if (err2 != FFX_OK) {
         std::cout << "\nFAILED: ffxFsr2ContextCreate returned " << err2 << std::endl;
         return 1;
@@ -486,7 +488,7 @@ int main() {
         dispatchDesc.cameraFar = 100.0f;
         dispatchDesc.cameraFovAngleVertical = 1.047f; // 60 degrees
 
-        if (ffxFsr2ContextDispatch(&fsr2Context, &dispatchDesc) != FFX_OK) {
+        if (ffxFsr2ContextDispatch(fsr2Context, &dispatchDesc) != FFX_OK) {
             std::cout << "FAILED: ffxFsr2ContextDispatch failed on loop " << i << std::endl;
             return 1;
         }
@@ -520,7 +522,8 @@ int main() {
     vkUnmapMemory(device, downloadMemory);
     std::cout << "Saved FSR_2.3.3_2x.png successfully!" << std::endl;
 
-    ffxFsr2ContextDestroy(&fsr2Context);
+    ffxFsr2ContextDestroy(fsr2Context);
+    delete fsr2Context;
     
     // Cleanup
     vkDestroyImage(device, colorImage, nullptr); vkFreeMemory(device, colorMem, nullptr);
