@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.14)
-project(VkUpscaleTestbed)
 
+project(VkUpscaleTestbed)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
@@ -34,6 +34,7 @@ list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_CURRENT_BINARY_DIR}")
 
 # --- THE ULTIMATE BYPASS ---
 set(FFX_FSR1 ON CACHE BOOL "" FORCE)
+
 # CRITICAL FIX: The SDK strictly checks for "VK_X64" to include the backend folder!
 set(FFX_API_BACKEND "VK_X64" CACHE STRING "" FORCE)
 set(FFX_API_DX12 OFF CACHE BOOL "" FORCE)
@@ -42,13 +43,14 @@ FetchContent_Declare(ffx_sdk
     GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git
     GIT_TAG v1.1.4 
 )
+
 FetchContent_GetProperties(ffx_sdk)
 if(NOT ffx_sdk_POPULATED)
     if(POLICY CMP0169)
         cmake_policy(SET CMP0169 OLD)
     endif()
     FetchContent_Populate(ffx_sdk)
-    
+
     # WINDOWS 7 COMPATIBILITY SCRUBBER
     file(GLOB_RECURSE ffx_source_files "${ffx_sdk_SOURCE_DIR}/sdk/src/*.cpp" "${ffx_sdk_SOURCE_DIR}/sdk/src/*.h")
     foreach(ffx_file IN LISTS ffx_source_files)
@@ -58,6 +60,12 @@ if(NOT ffx_sdk_POPULATED)
             file(WRITE ${ffx_file} "${file_contents}")
         endif()
     endforeach()
+
+    # VULKAN ERROR TRACER: Inject line-number printing into the VK backend!
+    file(READ "${ffx_sdk_SOURCE_DIR}/sdk/src/backends/vk/ffx_vk.cpp" vk_backend_code)
+    string(PREPEND vk_backend_code "#include <stdio.h>\n")
+    string(REPLACE "return FFX_ERROR_BACKEND_API_ERROR;" "{ printf(\"\\n[VK BACKEND ERROR] ffx_vk.cpp failed at line %d\\n\", __LINE__); fflush(stdout); return FFX_ERROR_BACKEND_API_ERROR; }" vk_backend_code "${vk_backend_code}")
+    file(WRITE "${ffx_sdk_SOURCE_DIR}/sdk/src/backends/vk/ffx_vk.cpp" "${vk_backend_code}")
 
     add_subdirectory(${ffx_sdk_SOURCE_DIR}/sdk ${ffx_sdk_BINARY_DIR}/sdk)
 endif()
