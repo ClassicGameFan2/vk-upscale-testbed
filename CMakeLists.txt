@@ -33,7 +33,7 @@ file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/FindVulkan.cmake "
 list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_CURRENT_BINARY_DIR}")
 
 # --- THE ULTIMATE BYPASS ---
-set(FFX_FSR1 ON CACHE BOOL "" FORCE)
+set(FFX_FSR2 ON CACHE BOOL "" FORCE)
 
 # CRITICAL FIX: The SDK strictly checks for "VK_X64" to include the backend folder!
 set(FFX_API_BACKEND "VK_X64" CACHE STRING "" FORCE)
@@ -80,7 +80,7 @@ target_include_directories(vk-upscale-testbed PRIVATE
 target_link_libraries(vk-upscale-testbed PRIVATE 
     volk::volk_headers 
     volk::volk 
-    ffx_fsr1_x64
+    ffx_fsr2_x64
     ffx_backend_vk_x64
 )
 
