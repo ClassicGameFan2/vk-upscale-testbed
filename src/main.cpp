@@ -11,6 +11,7 @@
 #include <string>
 #include <cmath>
 
+#define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
 static void FfxMessageCallback(FfxMsgType type, const wchar_t* message) {
@@ -42,20 +43,17 @@ void renderScene(int w, int h, float jx, float jy, unsigned char* colorOut, floa
 
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
-            // NDC space with FSR Sub-Pixel Jitter applied
             float ndcX = ((x + 0.5f + jx) / w) * 2.0f - 1.0f;
             float ndcY = ((y + 0.5f + jy) / h) * 2.0f - 1.0f;
 
-            // Ray Origin & Direction
             float ro[3] = {0.0f, 1.0f, 0.0f};
             float rd[3] = {ndcX * aspect * tanHalfFov, -ndcY * tanHalfFov, 1.0f};
             float len = sqrtf(rd[0]*rd[0] + rd[1]*rd[1] + rd[2]*rd[2]);
             rd[0]/=len; rd[1]/=len; rd[2]/=len;
 
             float hitZ = -1.0f;
-            unsigned char r = 135, g = 206, b = 235; // Sky Blue background
+            unsigned char r = 135, g = 206, b = 235;
 
-            // 1. Raycast Sphere at (0, 1, 4) radius 1.5
             float oc[3] = {ro[0] - 0.0f, ro[1] - 1.0f, ro[2] - 4.0f};
             float b_dot = rd[0]*oc[0] + rd[1]*oc[1] + rd[2]*oc[2];
             float c_val = oc[0]*oc[0] + oc[1]*oc[1] + oc[2]*oc[2] - (1.5f * 1.5f);
@@ -71,7 +69,7 @@ void renderScene(int w, int h, float jx, float jy, unsigned char* colorOut, floa
                     float nlen = sqrtf(nx*nx + ny*ny + nz*nz);
                     nx/=nlen; ny/=nlen; nz/=nlen;
                     
-                    float light[3] = {0.577f, 0.577f, -0.577f}; // Directional light
+                    float light[3] = {0.577f, 0.577f, -0.577f};
                     float ndotl = fmax(0.2f, -(nx*light[0] + ny*light[1] + nz*light[2]));
                     r = (unsigned char)(200 * ndotl);
                     g = (unsigned char)(50 * ndotl);
@@ -79,7 +77,6 @@ void renderScene(int w, int h, float jx, float jy, unsigned char* colorOut, floa
                 }
             }
 
-            // 2. Raycast Checkerboard Floor (y = 0)
             if (rd[1] < 0.0f) {
                 float t = -ro[1] / rd[1];
                 if (t > zNear && t < zFar && (hitZ < 0.0f || t < hitZ)) {
@@ -98,12 +95,11 @@ void renderScene(int w, int h, float jx, float jy, unsigned char* colorOut, floa
             colorOut[idx*4+2] = b;
             colorOut[idx*4+3] = 255;
 
-            // Calculate True 3D INVERTED Depth
             if (hitZ > 0.0f) {
                 float depth = (zNear * (zFar - hitZ)) / (hitZ * (zFar - zNear));
                 depthOut[idx] = depth;
             } else {
-                depthOut[idx] = 0.0f; // Inverted Far Plane is 0.0
+                depthOut[idx] = 0.0f;
             }
         }
     }
@@ -281,8 +277,13 @@ int main() {
     VkImageCreateInfo outputInfo = createImage(device, physicalDevice, displayW, displayH, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, outputImage, outputMem);
 
     VkDeviceContext vkDeviceContext = { device, physicalDevice, vkGetDeviceProcAddr };
-    size_t safeBufferSize = ffxGetScratchMemorySizeVK(physicalDevice, 1) * 2;
+    
+    // INCREASE MAX CONTEXTS TO 4 TO PREVENT OOB MEMORY CORRUPTION
+    std::cout << "\n[Trace] Allocating Backend Scratch Memory..." << std::flush;
+    size_t safeBufferSize = ffxGetScratchMemorySizeVK(physicalDevice, 4) * 2;
     void* scratchBuffer = _aligned_malloc(safeBufferSize, 64);
+    std::cout << " OK!" << std::endl;
+
     VkCommandBufferBeginInfo beginInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     VkSubmitInfo submitInfo = {};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -292,24 +293,39 @@ int main() {
     // =========================================================================
     // FSR 1.2 TEST
     // =========================================================================
-    std::cout << "\nInitializing FSR 1.2 Context..." << std::flush;
+    std::cout << "\nInitializing FSR 1.2 Context..." << std::endl;
+    
+    std::cout << "  [Trace] Clearing Scratch Buffer..." << std::flush;
     memset(scratchBuffer, 0, safeBufferSize);
-    FfxInterface ffxInterface1 = {};
-    ffxGetInterfaceVK(&ffxInterface1, ffxGetDeviceVK(&vkDeviceContext), scratchBuffer, safeBufferSize, 1);
+    std::cout << " OK!" << std::endl;
 
+    std::cout << "  [Trace] ffxGetInterfaceVK..." << std::flush;
+    FfxInterface ffxInterface1 = {};
+    if (ffxGetInterfaceVK(&ffxInterface1, ffxGetDeviceVK(&vkDeviceContext), scratchBuffer, safeBufferSize, 4) != FFX_OK) return 1;
+    std::cout << " OK!" << std::endl;
+
+    std::cout << "  [Trace] Populating FfxFsr1ContextDescription..." << std::flush;
     FfxFsr1ContextDescription fsr1Desc = {};
     fsr1Desc.flags = FFX_FSR1_ENABLE_RCAS; 
     fsr1Desc.outputFormat = ffxGetSurfaceFormatVK(VK_FORMAT_R8G8B8A8_UNORM);
     fsr1Desc.maxRenderSize = { (uint32_t)renderW, (uint32_t)renderH };
     fsr1Desc.displaySize = { displayW, displayH };
     fsr1Desc.backendInterface = ffxInterface1;
-
-    FfxFsr1Context fsr1Context;
-    if (ffxFsr1ContextCreate(&fsr1Context, &fsr1Desc) != FFX_OK) return 1;
     std::cout << " OK!" << std::endl;
 
+    std::cout << "  [Trace] ffxFsr1ContextCreate..." << std::flush;
+    FfxFsr1Context fsr1Context;
+    FfxErrorCode err1 = ffxFsr1ContextCreate(&fsr1Context, &fsr1Desc);
+    if (err1 != FFX_OK) {
+        std::cout << "\nFAILED: ffxFsr1ContextCreate returned " << err1 << std::endl;
+        return 1;
+    }
+    std::cout << " OK!" << std::endl;
+
+    std::cout << "  [Trace] Mapping Resources..." << std::flush;
     FfxResource colorRes1 = ffxGetResourceVK(colorImage, ffxGetImageResourceDescriptionVK(colorImage, colorInfo, FFX_RESOURCE_USAGE_READ_ONLY), L"Color", FFX_RESOURCE_STATE_COMPUTE_READ);
     FfxResource outputRes1 = ffxGetResourceVK(outputImage, ffxGetImageResourceDescriptionVK(outputImage, outputInfo, FFX_RESOURCE_USAGE_UAV), L"Output", FFX_RESOURCE_STATE_UNORDERED_ACCESS);
+    std::cout << " OK!" << std::endl;
 
     std::cout << "Executing FSR 1.2 Spatial Upscaler..." << std::endl;
     
@@ -357,32 +373,50 @@ int main() {
     vkUnmapMemory(device, downloadMemory);
     std::cout << "Saved FSR_1.2_2x.png successfully!" << std::endl;
 
+    std::cout << "  [Trace] Destroying FSR 1.2 Context..." << std::flush;
     ffxFsr1ContextDestroy(&fsr1Context);
+    std::cout << " OK!" << std::endl;
+
 
     // =========================================================================
     // FSR 2.3.3 TEST
     // =========================================================================
-    std::cout << "\nInitializing FSR 2.3.3 Context..." << std::flush;
+    std::cout << "\nInitializing FSR 2.3.3 Context..." << std::endl;
+    
+    std::cout << "  [Trace] Clearing Scratch Buffer..." << std::flush;
     memset(scratchBuffer, 0, safeBufferSize);
-    FfxInterface ffxInterface2 = {};
-    ffxGetInterfaceVK(&ffxInterface2, ffxGetDeviceVK(&vkDeviceContext), scratchBuffer, safeBufferSize, 1);
+    std::cout << " OK!" << std::endl;
 
+    std::cout << "  [Trace] ffxGetInterfaceVK..." << std::flush;
+    FfxInterface ffxInterface2 = {};
+    if (ffxGetInterfaceVK(&ffxInterface2, ffxGetDeviceVK(&vkDeviceContext), scratchBuffer, safeBufferSize, 4) != FFX_OK) return 1;
+    std::cout << " OK!" << std::endl;
+
+    std::cout << "  [Trace] Populating FfxFsr2ContextDescription..." << std::flush;
     FfxFsr2ContextDescription fsr2Desc = {};
-    // True 3D Engine Setup: Depth Inverted and Auto Exposure active!
+    memset(&fsr2Desc, 0, sizeof(FfxFsr2ContextDescription)); // Explicit zero
     fsr2Desc.flags = FFX_FSR2_ENABLE_DEBUG_CHECKING | FFX_FSR2_ENABLE_DEPTH_INVERTED | FFX_FSR2_ENABLE_AUTO_EXPOSURE; 
     fsr2Desc.maxRenderSize = { (uint32_t)renderW, (uint32_t)renderH };
     fsr2Desc.displaySize = { displayW, displayH };
     fsr2Desc.fpMessage = FfxMessageCallback;
     fsr2Desc.backendInterface = ffxInterface2;
-
-    FfxFsr2Context fsr2Context;
-    if (ffxFsr2ContextCreate(&fsr2Context, &fsr2Desc) != FFX_OK) return 1;
     std::cout << " OK!" << std::endl;
 
+    std::cout << "  [Trace] ffxFsr2ContextCreate..." << std::flush;
+    FfxFsr2Context fsr2Context;
+    FfxErrorCode err2 = ffxFsr2ContextCreate(&fsr2Context, &fsr2Desc);
+    if (err2 != FFX_OK) {
+        std::cout << "\nFAILED: ffxFsr2ContextCreate returned " << err2 << std::endl;
+        return 1;
+    }
+    std::cout << " OK!" << std::endl;
+
+    std::cout << "  [Trace] Mapping Resources..." << std::flush;
     FfxResource colorRes2 = ffxGetResourceVK(colorImage, ffxGetImageResourceDescriptionVK(colorImage, colorInfo, FFX_RESOURCE_USAGE_READ_ONLY), L"Color", FFX_RESOURCE_STATE_COMPUTE_READ);
     FfxResource depthRes2 = ffxGetResourceVK(depthImage, ffxGetImageResourceDescriptionVK(depthImage, depthInfo, FFX_RESOURCE_USAGE_READ_ONLY), L"Depth", FFX_RESOURCE_STATE_COMPUTE_READ);
     FfxResource mvRes2 = ffxGetResourceVK(mvImage, ffxGetImageResourceDescriptionVK(mvImage, mvInfo, FFX_RESOURCE_USAGE_READ_ONLY), L"MVs", FFX_RESOURCE_STATE_COMPUTE_READ);
     FfxResource outputRes2 = ffxGetResourceVK(outputImage, ffxGetImageResourceDescriptionVK(outputImage, outputInfo, FFX_RESOURCE_USAGE_UAV), L"Output", FFX_RESOURCE_STATE_UNORDERED_ACCESS);
+    std::cout << " OK!" << std::endl;
 
     int32_t phaseCount = ffxFsr2GetJitterPhaseCount(renderW, displayW);
 
@@ -452,7 +486,10 @@ int main() {
         dispatchDesc.cameraFar = 100.0f;
         dispatchDesc.cameraFovAngleVertical = 1.047f; // 60 degrees
 
-        ffxFsr2ContextDispatch(&fsr2Context, &dispatchDesc);
+        if (ffxFsr2ContextDispatch(&fsr2Context, &dispatchDesc) != FFX_OK) {
+            std::cout << "FAILED: ffxFsr2ContextDispatch failed on loop " << i << std::endl;
+            return 1;
+        }
 
         vkEndCommandBuffer(cmd);
         vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
