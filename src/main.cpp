@@ -1,3 +1,4 @@
+#define _CRT_SECURE_NO_WARNINGS
 #define VOLK_IMPLEMENTATION
 #include "volk.h"
 
@@ -307,7 +308,7 @@ int main(int argc, char** argv) {
     outRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     outRegion.imageSubresource.layerCount = 1;
     outRegion.imageExtent = { displayW, displayH, 1 };
-    vkCmdCopyImageToBuffer(cmd, outputImage, downloadBuffer, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 1, &outRegion);
+    vkCmdCopyImageToBuffer(cmd, outputImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, downloadBuffer, 1, &outRegion);
 
     vkEndCommandBuffer(cmd);
 
