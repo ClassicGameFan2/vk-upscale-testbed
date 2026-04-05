@@ -69,12 +69,21 @@ if(NOT ffx_sdk_POPULATED)
         endif()
     endforeach()
 
-    # SWIFTSHADER MEMORY FIX & VULKAN ERROR TRACER
+    # SWIFTSHADER MEMORY FIX & DEEP VULKAN TRACER
     file(READ "${ffx_sdk_SOURCE_DIR}/sdk/src/backends/vk/ffx_vk.cpp" vk_backend_code)
     string(REPLACE "if (requestedProperties == VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT && (memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))" "if (false)" vk_backend_code "${vk_backend_code}")
     string(PREPEND vk_backend_code "#include <stdio.h>\n")
     string(REPLACE "return FFX_ERROR_BACKEND_API_ERROR;" "{ printf(\"\\n[VK BACKEND ERROR] ffx_vk.cpp failed at line %d\\n\", __LINE__); fflush(stdout); return FFX_ERROR_BACKEND_API_ERROR; }" vk_backend_code "${vk_backend_code}")
+    string(REPLACE "backendInterface->fpGetPermutationBlobByIndex" "printf(\"    [Trace-VK] Fetching Shader Blob...\\n\"); fflush(stdout); backendInterface->fpGetPermutationBlobByIndex" vk_backend_code "${vk_backend_code}")
+    string(REPLACE "if (backendContext->vkFunctionTable.vkCreateComputePipelines" "printf(\"    [Trace-VK] vkCreateComputePipelines...\\n\"); fflush(stdout); if (backendContext->vkFunctionTable.vkCreateComputePipelines" vk_backend_code "${vk_backend_code}")
     file(WRITE "${ffx_sdk_SOURCE_DIR}/sdk/src/backends/vk/ffx_vk.cpp" "${vk_backend_code}")
+
+    # DEEP FSR1 TRACER
+    file(READ "${ffx_sdk_SOURCE_DIR}/sdk/src/components/fsr1/ffx_fsr1.cpp" fsr1_code)
+    string(PREPEND fsr1_code "#include <stdio.h>\n")
+    string(REPLACE "errorCode = createPipelineStates(context);" "printf(\"  [Trace-FSR1] createPipelineStates...\\n\"); fflush(stdout); errorCode = createPipelineStates(context);" fsr1_code "${fsr1_code}")
+    string(REPLACE "FFX_VALIDATE(context->contextDescription.backendInterface.fpCreateResource" "printf(\"  [Trace-FSR1] fpCreateResource (RCAS Output)...\\n\"); fflush(stdout); FFX_VALIDATE(context->contextDescription.backendInterface.fpCreateResource" fsr1_code "${fsr1_code}")
+    file(WRITE "${ffx_sdk_SOURCE_DIR}/sdk/src/components/fsr1/ffx_fsr1.cpp" "${fsr1_code}")
 
     add_subdirectory(${ffx_sdk_SOURCE_DIR}/sdk ${ffx_sdk_BINARY_DIR}/sdk)
 endif()
