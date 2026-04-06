@@ -14,11 +14,6 @@
 // Image libs (Implementation is compiled in stb_impl.cpp!)
 #include "stb_image_write.h"
 
-// --- THE NEW AMD ASSERT CATCHER ---
-static void AssertCallback(const char* message) {
-    std::cout << "\n[AMD SDK ASSERTION FAILED] " << message << std::endl;
-}
-
 static void FfxMessageCallback(FfxMsgType type, const wchar_t* message) {
     if (message) {
         std::cout << "[AMD SDK] ";
@@ -190,9 +185,6 @@ void transitionImageLayout(VkCommandBuffer cmd, VkImage image, VkImageLayout old
 int main() {
     std::cout << "--- FSR 3D Ablation Study (FSR 1.2 & FSR 2.3.3) ---" << std::endl;
 
-    // Wire up the AMD Assert Catcher!
-    ffxAssertSetPrintingCallback(AssertCallback);
-
     uint32_t renderW = 320, renderH = 240;
     uint32_t displayW = 640, displayH = 480;
 
@@ -218,6 +210,22 @@ int main() {
     vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, queueFamilies.data());
 
     int queueFamilyIndex = 0;
+    for (uint32_t i = 0; i < queueFamilyCount; i++) {
+        if ((queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && (queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT)) {
+            queueFamilyIndex = i; break;
+        }
+    }
+
+    // Shotgun all extensions for compatibility with FSR 2
+    uint32_t extCount = 0;
+    vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extCount, nullptr);
+    std::vector<VkExtensionProperties> availableExts(extCount);
+    vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extCount, availableExts.data());
+    std::vector<const char*> enabledExtensions;
+    for (const auto& ext : availableExts) {
+        enabledExtensions.push_back(ext.extensionName);
+    }
+
     float queuePriority = 1.0f;
     VkDeviceQueueCreateInfo queueCreateInfo = { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };
     queueCreateInfo.queueFamilyIndex = queueFamilyIndex;
@@ -229,10 +237,13 @@ int main() {
     VkPhysicalDeviceFeatures2 features2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &features11 };
     vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
 
+    // CRITICAL FIX: Explicitly pass the extension array to device creation!
     VkDeviceCreateInfo deviceInfo = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
     deviceInfo.queueCreateInfoCount = 1;
     deviceInfo.pQueueCreateInfos = &queueCreateInfo;
     deviceInfo.pNext = &features2; 
+    deviceInfo.enabledExtensionCount = (uint32_t)enabledExtensions.size();
+    deviceInfo.ppEnabledExtensionNames = enabledExtensions.data();
 
     VkDevice device;
     vkCreateDevice(physicalDevice, &deviceInfo, nullptr, &device);
