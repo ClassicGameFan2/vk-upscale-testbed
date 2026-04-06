@@ -1,7 +1,6 @@
 #define _CRT_SECURE_NO_WARNINGS
 #define VOLK_IMPLEMENTATION
 #include "volk.h"
-
 #include <FidelityFX/host/ffx_fsr1.h>
 #include <FidelityFX/host/ffx_fsr2.h>
 #include <FidelityFX/host/backends/vk/ffx_vk.h>
@@ -14,7 +13,6 @@
 // Image libs (Implementation is compiled in stb_impl.cpp!)
 #include "stb_image_write.h"
 
-// --- THE NEW AMD ASSERT CATCHER ---
 static void AssertCallback(const char* message) {
     std::cout << "\n[AMD SDK ASSERTION FAILED] " << message << std::endl;
 }
@@ -38,10 +36,10 @@ static uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFil
     return 0; 
 }
 
-// --- PROCEDURAL 3D RAYTRACER (INVERTED DEPTH) ---
-void renderScene(int w, int h, float jx, float jy, unsigned char* colorOut, float* depthOut) {
+// --- PROCEDURAL 3D RAYTRACER (HDR LINEAR FLOATS + INVERTED DEPTH) ---
+void renderScene(int w, int h, float jx, float jy, float* colorOut, float* depthOut) {
     float aspect = (float)w / (float)h;
-    float fovY = 1.04719755f; // 60 degrees in radians
+    float fovY = 1.04719755f; // 60 degrees
     float tanHalfFov = tanf(fovY / 2.0f);
     float zNear = 0.1f;
     float zFar = 100.0f;
@@ -57,7 +55,9 @@ void renderScene(int w, int h, float jx, float jy, unsigned char* colorOut, floa
             rd[0]/=len; rd[1]/=len; rd[2]/=len;
 
             float hitZ = -1.0f;
-            unsigned char r = 135, g = 206, b = 235;
+            
+            // Linear Sky Blue
+            float r = powf(135.0f/255.0f, 2.2f), g = powf(206.0f/255.0f, 2.2f), b = powf(235.0f/255.0f, 2.2f);
 
             float oc[3] = {ro[0] - 0.0f, ro[1] - 1.0f, ro[2] - 4.0f};
             float b_dot = rd[0]*oc[0] + rd[1]*oc[1] + rd[2]*oc[2];
@@ -73,12 +73,12 @@ void renderScene(int w, int h, float jx, float jy, unsigned char* colorOut, floa
                     float nz = (ro[2] + rd[2]*t) - 4.0f;
                     float nlen = sqrtf(nx*nx + ny*ny + nz*nz);
                     nx/=nlen; ny/=nlen; nz/=nlen;
-                    
+
                     float light[3] = {0.577f, 0.577f, -0.577f};
                     float ndotl = fmax(0.2f, -(nx*light[0] + ny*light[1] + nz*light[2]));
-                    r = (unsigned char)(200 * ndotl);
-                    g = (unsigned char)(50 * ndotl);
-                    b = (unsigned char)(50 * ndotl);
+                    r = powf(200.0f/255.0f, 2.2f) * ndotl;
+                    g = powf(50.0f/255.0f, 2.2f) * ndotl;
+                    b = powf(50.0f/255.0f, 2.2f) * ndotl;
                 }
             }
 
@@ -89,8 +89,8 @@ void renderScene(int w, int h, float jx, float jy, unsigned char* colorOut, floa
                     float px = ro[0] + rd[0]*t;
                     float pz = ro[2] + rd[2]*t;
                     int chk = ((int)floorf(px) + (int)floorf(pz)) % 2;
-                    if (chk == 0) { r = 220; g = 220; b = 220; }
-                    else { r = 80; g = 80; b = 80; }
+                    if (chk == 0) { r = powf(220.0f/255.0f, 2.2f); g = r; b = r; }
+                    else          { r = powf(80.0f/255.0f, 2.2f);  g = r; b = r; }
                 }
             }
 
@@ -98,19 +98,32 @@ void renderScene(int w, int h, float jx, float jy, unsigned char* colorOut, floa
             colorOut[idx*4+0] = r;
             colorOut[idx*4+1] = g;
             colorOut[idx*4+2] = b;
-            colorOut[idx*4+3] = 255;
+            colorOut[idx*4+3] = 1.0f;
 
             if (hitZ > 0.0f) {
                 float depth = (zNear * (zFar - hitZ)) / (hitZ * (zFar - zNear));
                 depthOut[idx] = depth;
             } else {
-                depthOut[idx] = 0.0f;
+                depthOut[idx] = 0.0f; // Inverted Far
             }
         }
     }
 }
 
-// --- VULKAN HELPERS ---
+// Convert downloaded Float to sRGB 8-bit Image
+void saveFloatImage(const std::string& filename, int w, int h, const float* data) {
+    std::vector<unsigned char> bytes(w * h * 4);
+    for (int i = 0; i < w * h * 4; ++i) {
+        float v = data[i];
+        if (v < 0.0f) v = 0.0f;
+        if (v > 1.0f) v = 1.0f;
+        // Gamma correct back to sRGB for saving
+        bytes[i] = (unsigned char)(powf(v, 1.0f / 2.2f) * 255.0f);
+    }
+    stbi_write_png(filename.c_str(), w, h, 4, bytes.data(), w * 4);
+    std::cout << "Saved " << filename << " successfully!" << std::endl;
+}
+
 void createBuffer(VkDevice device, VkPhysicalDevice physicalDevice, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory) {
     VkBufferCreateInfo bufferInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
     bufferInfo.size = size;
@@ -152,10 +165,10 @@ VkImageCreateInfo createImage(VkDevice device, VkPhysicalDevice physicalDevice, 
     allocInfo.memoryTypeIndex = findMemoryType(physicalDevice, memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     vkAllocateMemory(device, &allocInfo, nullptr, &imageMemory);
     vkBindImageMemory(device, image, imageMemory, 0);
+
     return imageInfo;
 }
 
-// Stateful Transition Helper
 void transition(VkCommandBuffer cmd, VkImage image, VkImageLayout& currentLayout, VkImageLayout newLayout, VkImageAspectFlags aspectMask) {
     if (currentLayout == newLayout) return;
 
@@ -171,9 +184,9 @@ void transition(VkCommandBuffer cmd, VkImage image, VkImageLayout& currentLayout
     barrier.subresourceRange.baseArrayLayer = 0;
     barrier.subresourceRange.layerCount = 1;
 
-    // Heavy Sync to completely protect SwiftShader
     barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT;
     barrier.dstAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT;
+
     VkPipelineStageFlags sourceStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     VkPipelineStageFlags destinationStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
 
@@ -182,9 +195,9 @@ void transition(VkCommandBuffer cmd, VkImage image, VkImageLayout& currentLayout
 }
 
 int main() {
-    std::cout << "--- FSR 3D Ablation Study (FSR 1.2 & FSR 2.3.3) ---" << std::endl;
+    std::cout << "--- FSR 3D Ablation Study (128-Bit Float Pipeline) ---" << std::endl;
+    std::cout.flush();
 
-    // Wire up the AMD Assert Catcher!
     ffxAssertSetPrintingCallback(AssertCallback);
 
     uint32_t renderW = 320, renderH = 240;
@@ -223,10 +236,19 @@ int main() {
     VkPhysicalDeviceFeatures2 features2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &features11 };
     vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
 
+    uint32_t extCount = 0;
+    vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extCount, nullptr);
+    std::vector<VkExtensionProperties> availableExts(extCount);
+    vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extCount, availableExts.data());
+    std::vector<const char*> enabledExtensions;
+    for (const auto& ext : availableExts) enabledExtensions.push_back(ext.extensionName);
+
     VkDeviceCreateInfo deviceInfo = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
     deviceInfo.queueCreateInfoCount = 1;
     deviceInfo.pQueueCreateInfos = &queueCreateInfo;
     deviceInfo.pNext = &features2; 
+    deviceInfo.enabledExtensionCount = (uint32_t)enabledExtensions.size();
+    deviceInfo.ppEnabledExtensionNames = enabledExtensions.data();
 
     VkDevice device;
     vkCreateDevice(physicalDevice, &deviceInfo, nullptr, &device);
@@ -250,43 +272,40 @@ int main() {
 
     // --- ABLATION BASELINES ---
     std::cout << "Rendering Native_1x.png (320x240)..." << std::endl;
-    std::vector<unsigned char> native1x(renderW * renderH * 4);
+    std::vector<float> native1x(renderW * renderH * 4);
     std::vector<float> depth1x(renderW * renderH);
     renderScene(renderW, renderH, 0.0f, 0.0f, native1x.data(), depth1x.data());
-    stbi_write_png("Native_1x.png", renderW, renderH, 4, native1x.data(), renderW * 4);
+    saveFloatImage("Native_1x.png", renderW, renderH, native1x.data());
 
     std::cout << "Rendering Native_2x.png (640x480)..." << std::endl;
-    std::vector<unsigned char> native2x(displayW * displayH * 4);
+    std::vector<float> native2x(displayW * displayH * 4);
     std::vector<float> depth2x(displayW * displayH);
     renderScene(displayW, displayH, 0.0f, 0.0f, native2x.data(), depth2x.data());
-    stbi_write_png("Native_2x.png", displayW, displayH, 4, native2x.data(), displayW * 4);
+    saveFloatImage("Native_2x.png", displayW, displayH, native2x.data());
 
     // --- ALLOCATE VRAM BUFFERS ---
-    VkDeviceSize uploadSize = (renderW * renderH * 4) + (renderW * renderH * sizeof(float));
+    VkDeviceSize uploadSize = (renderW * renderH * 4 * sizeof(float)) + (renderW * renderH * sizeof(float));
     VkBuffer uploadBuffer; VkDeviceMemory uploadMemory;
     createBuffer(device, physicalDevice, uploadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, uploadBuffer, uploadMemory);
-    
-    // CRITICAL FIX: The Output Buffer is now 16 bytes per pixel to safely download Floats!
+
     VkBuffer downloadBuffer; VkDeviceMemory downloadMemory;
-    VkDeviceSize outSize = displayW * displayH * 16;
+    VkDeviceSize outSize = displayW * displayH * 4 * sizeof(float);
     createBuffer(device, physicalDevice, outSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, downloadBuffer, downloadMemory);
 
     VkImage colorImage, depthImage, mvImage, outputImage;
     VkDeviceMemory colorMem, depthMem, mvMem, outputMem;
-    
-    VkImageCreateInfo colorInfo = createImage(device, physicalDevice, renderW, renderH, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, colorImage, colorMem);
+
+    // CRITICAL: Everything operates natively in 32-bit floats!
+    VkImageCreateInfo colorInfo = createImage(device, physicalDevice, renderW, renderH, VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, colorImage, colorMem);
     VkImageCreateInfo depthInfo = createImage(device, physicalDevice, renderW, renderH, VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, depthImage, depthMem);
     VkImageCreateInfo mvInfo = createImage(device, physicalDevice, renderW, renderH, VK_FORMAT_R16G16_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, mvImage, mvMem);
-    
-    // CRITICAL FIX: The Output Image is now SFLOAT to prevent emulator image-store data corruption!
     VkImageCreateInfo outputInfo = createImage(device, physicalDevice, displayW, displayH, VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, outputImage, outputMem);
 
     VkDeviceContext vkDeviceContext = { device, physicalDevice, vkGetDeviceProcAddr };
-    
     std::cout << "\n[Trace] Allocating Backend Scratch Memory..." << std::flush;
     size_t safeBufferSize = ffxGetScratchMemorySizeVK(physicalDevice, 4) * 2;
     void* scratchBuffer = _aligned_malloc(safeBufferSize, 64);
-    std::cout << " OK!" << std::endl;
+    std::cout << " OK!" << std::endl; std::cout.flush();
 
     VkCommandBufferBeginInfo beginInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     VkSubmitInfo submitInfo = {};
@@ -294,7 +313,6 @@ int main() {
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &cmd;
 
-    // Track Image Layouts Safely
     VkImageLayout colorLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkImageLayout depthLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkImageLayout mvLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -303,50 +321,36 @@ int main() {
     // =========================================================================
     // FSR 1.2 TEST
     // =========================================================================
-    std::cout << "\nInitializing FSR 1.2 Context..." << std::endl;
-    
-    std::cout << "  [Trace] Clearing Scratch Buffer..." << std::flush;
+    std::cout << "\n=== FSR 1.2 TEST ===" << std::endl; std::cout.flush();
     memset(scratchBuffer, 0, safeBufferSize);
-    std::cout << " OK!" << std::endl;
-
-    std::cout << "  [Trace] ffxGetInterfaceVK..." << std::flush;
+    
     FfxInterface ffxInterface1 = {};
     if (ffxGetInterfaceVK(&ffxInterface1, ffxGetDeviceVK(&vkDeviceContext), scratchBuffer, safeBufferSize, 4) != FFX_OK) return 1;
-    std::cout << " OK!" << std::endl;
 
-    std::cout << "  [Trace] Populating FfxFsr1ContextDescription..." << std::flush;
     FfxFsr1ContextDescription fsr1Desc = {};
-    fsr1Desc.flags = FFX_FSR1_ENABLE_RCAS; 
+    fsr1Desc.flags = FFX_FSR1_ENABLE_RCAS | FFX_FSR1_ENABLE_HIGH_DYNAMIC_RANGE; 
     fsr1Desc.outputFormat = ffxGetSurfaceFormatVK(VK_FORMAT_R32G32B32A32_SFLOAT);
     fsr1Desc.maxRenderSize = { (uint32_t)renderW, (uint32_t)renderH };
     fsr1Desc.displaySize = { displayW, displayH };
     fsr1Desc.backendInterface = ffxInterface1;
-    std::cout << " OK!" << std::endl;
 
-    std::cout << "  [Trace] ffxFsr1ContextCreate..." << std::flush;
-    FfxFsr1Context* fsr1Context = new FfxFsr1Context();
-    FfxErrorCode err1 = ffxFsr1ContextCreate(fsr1Context, &fsr1Desc);
-    if (err1 != FFX_OK) {
-        std::cout << "\nFAILED: ffxFsr1ContextCreate returned " << err1 << std::endl;
-        return 1;
-    }
-    std::cout << " OK!" << std::endl;
+    FfxFsr1Context* fsr1Context = (FfxFsr1Context*)_aligned_malloc(sizeof(FfxFsr1Context), 64);
+    memset(fsr1Context, 0, sizeof(FfxFsr1Context));
+    if (ffxFsr1ContextCreate(fsr1Context, &fsr1Desc) != FFX_OK) return 1;
 
-    std::cout << "  [Trace] Mapping Resources..." << std::flush;
     FfxResource colorRes1 = ffxGetResourceVK(colorImage, ffxGetImageResourceDescriptionVK(colorImage, colorInfo, FFX_RESOURCE_USAGE_READ_ONLY), L"Color", FFX_RESOURCE_STATE_COMPUTE_READ);
     FfxResource outputRes1 = ffxGetResourceVK(outputImage, ffxGetImageResourceDescriptionVK(outputImage, outputInfo, FFX_RESOURCE_USAGE_UAV), L"Output", FFX_RESOURCE_STATE_UNORDERED_ACCESS);
-    std::cout << " OK!" << std::endl;
 
-    std::cout << "Executing FSR 1.2 Spatial Upscaler..." << std::endl;
-    
+    std::cout << "Executing FSR 1.2 Spatial Upscaler..." << std::endl; std::cout.flush();
+
     void* mappedData;
     vkMapMemory(device, uploadMemory, 0, uploadSize, 0, &mappedData);
-    memcpy(mappedData, native1x.data(), native1x.size());
+    memcpy(mappedData, native1x.data(), native1x.size() * sizeof(float));
     vkUnmapMemory(device, uploadMemory);
 
     vkResetCommandBuffer(cmd, 0);
     vkBeginCommandBuffer(cmd, &beginInfo);
-    
+
     transition(cmd, colorImage, colorLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
     transition(cmd, outputImage, outputLayout, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
 
@@ -355,7 +359,7 @@ int main() {
     cRegion.imageSubresource.layerCount = 1;
     cRegion.imageExtent = { (uint32_t)renderW, (uint32_t)renderH, 1 };
     vkCmdCopyBufferToImage(cmd, uploadBuffer, colorImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cRegion);
-    
+
     transition(cmd, colorImage, colorLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
 
     FfxFsr1DispatchDescription dispatchDesc1 = {};
@@ -368,93 +372,67 @@ int main() {
     ffxFsr1ContextDispatch(fsr1Context, &dispatchDesc1);
 
     transition(cmd, outputImage, outputLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+
     VkBufferImageCopy outRegion = {};
     outRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     outRegion.imageSubresource.layerCount = 1;
     outRegion.imageExtent = { displayW, displayH, 1 };
     vkCmdCopyImageToBuffer(cmd, outputImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, downloadBuffer, 1, &outRegion);
+
     vkEndCommandBuffer(cmd);
-    
     vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
     vkQueueWaitIdle(queue);
 
     void* outData;
     vkMapMemory(device, downloadMemory, 0, outSize, 0, &outData);
-    float* outDataF = (float*)outData;
-    std::vector<unsigned char> finalImg1(displayW * displayH * 4);
-    for(uint32_t p = 0; p < displayW * displayH * 4; p++) {
-        float v = outDataF[p];
-        if (v < 0.0f) v = 0.0f;
-        if (v > 1.0f) v = 1.0f;
-        finalImg1[p] = (unsigned char)(v * 255.0f);
-    }
-    stbi_write_png("FSR_1.2_2x.png", displayW, displayH, 4, finalImg1.data(), displayW * 4);
+    saveFloatImage("FSR_1.2_2x.png", displayW, displayH, (float*)outData);
     vkUnmapMemory(device, downloadMemory);
-    std::cout << "Saved FSR_1.2_2x.png successfully!" << std::endl;
 
-    std::cout << "  [Trace] Destroying FSR 1.2 Context..." << std::flush;
     ffxFsr1ContextDestroy(fsr1Context);
-    delete fsr1Context;
-    std::cout << " OK!" << std::endl;
-
+    _aligned_free(fsr1Context);
 
     // =========================================================================
     // FSR 2.3.3 TEST
     // =========================================================================
-    std::cout << "\nInitializing FSR 2.3.3 Context..." << std::endl;
-    
-    std::cout << "  [Trace] Clearing Scratch Buffer..." << std::flush;
+    std::cout << "\n=== FSR 2.3.3 TEST ===" << std::endl; std::cout.flush();
+    std::cout << "Initializing FSR 2.3.3 Context..." << std::endl; std::cout.flush();
     memset(scratchBuffer, 0, safeBufferSize);
-    std::cout << " OK!" << std::endl;
 
-    std::cout << "  [Trace] ffxGetInterfaceVK..." << std::flush;
     FfxInterface ffxInterface2 = {};
     if (ffxGetInterfaceVK(&ffxInterface2, ffxGetDeviceVK(&vkDeviceContext), scratchBuffer, safeBufferSize, 4) != FFX_OK) return 1;
-    std::cout << " OK!" << std::endl;
 
-    std::cout << "  [Trace] Populating FfxFsr2ContextDescription..." << std::flush;
     FfxFsr2ContextDescription fsr2Desc = {};
-    memset(&fsr2Desc, 0, sizeof(FfxFsr2ContextDescription)); // Explicit zero
-    
-    // CRITICAL FIX: Disable Auto Exposure to prevent pure black/white image crush!
-    fsr2Desc.flags = FFX_FSR2_ENABLE_DEBUG_CHECKING | FFX_FSR2_ENABLE_DEPTH_INVERTED; 
+    memset(&fsr2Desc, 0, sizeof(FfxFsr2ContextDescription));
+    fsr2Desc.flags = FFX_FSR2_ENABLE_DEBUG_CHECKING | FFX_FSR2_ENABLE_DEPTH_INVERTED | FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE; 
     fsr2Desc.maxRenderSize = { (uint32_t)renderW, (uint32_t)renderH };
     fsr2Desc.displaySize = { displayW, displayH };
     fsr2Desc.fpMessage = FfxMessageCallback;
     fsr2Desc.backendInterface = ffxInterface2;
-    std::cout << " OK!" << std::endl;
 
-    std::cout << "  [Trace] ffxFsr2ContextCreate..." << std::flush;
-    FfxFsr2Context* fsr2Context = new FfxFsr2Context();
-    FfxErrorCode err2 = ffxFsr2ContextCreate(fsr2Context, &fsr2Desc);
-    if (err2 != FFX_OK) {
-        std::cout << "\nFAILED: ffxFsr2ContextCreate returned " << err2 << std::endl;
-        return 1;
-    }
-    std::cout << " OK!" << std::endl;
+    FfxFsr2Context* fsr2Context = (FfxFsr2Context*)_aligned_malloc(sizeof(FfxFsr2Context), 64);
+    memset(fsr2Context, 0, sizeof(FfxFsr2Context));
+    if (ffxFsr2ContextCreate(fsr2Context, &fsr2Desc) != FFX_OK) return 1;
 
-    std::cout << "  [Trace] Mapping Resources..." << std::flush;
     FfxResource colorRes2 = ffxGetResourceVK(colorImage, ffxGetImageResourceDescriptionVK(colorImage, colorInfo, FFX_RESOURCE_USAGE_READ_ONLY), L"Color", FFX_RESOURCE_STATE_COMPUTE_READ);
     FfxResource depthRes2 = ffxGetResourceVK(depthImage, ffxGetImageResourceDescriptionVK(depthImage, depthInfo, FFX_RESOURCE_USAGE_READ_ONLY), L"Depth", FFX_RESOURCE_STATE_COMPUTE_READ);
     FfxResource mvRes2 = ffxGetResourceVK(mvImage, ffxGetImageResourceDescriptionVK(mvImage, mvInfo, FFX_RESOURCE_USAGE_READ_ONLY), L"MVs", FFX_RESOURCE_STATE_COMPUTE_READ);
     FfxResource outputRes2 = ffxGetResourceVK(outputImage, ffxGetImageResourceDescriptionVK(outputImage, outputInfo, FFX_RESOURCE_USAGE_UAV), L"Output", FFX_RESOURCE_STATE_UNORDERED_ACCESS);
-    std::cout << " OK!" << std::endl;
 
     int32_t phaseCount = ffxFsr2GetJitterPhaseCount(renderW, displayW);
 
-    std::cout << "Executing FSR 2.3.3 Temporal Engine (32 Frames)..." << std::endl;
+    std::cout << "Executing FSR 2.3.3 Temporal Engine (32 Frames)..." << std::endl; std::cout.flush();
 
     for (int i = 0; i < 32; i++) {
         float jX = 0, jY = 0;
         ffxFsr2GetJitterOffset(&jX, &jY, i, phaseCount);
 
-        std::vector<unsigned char> fColor(renderW * renderH * 4);
+        std::vector<float> fColor(renderW * renderH * 4);
         std::vector<float> fDepth(renderW * renderH);
         renderScene(renderW, renderH, jX, jY, fColor.data(), fDepth.data());
 
         vkMapMemory(device, uploadMemory, 0, uploadSize, 0, &mappedData);
-        memcpy(mappedData, fColor.data(), fColor.size());
-        memcpy((uint8_t*)mappedData + fColor.size(), fDepth.data(), fDepth.size() * sizeof(float));
+        memcpy(mappedData, fColor.data(), fColor.size() * sizeof(float));
+        memcpy((uint8_t*)mappedData + (fColor.size() * sizeof(float)), fDepth.data(), fDepth.size() * sizeof(float));
         vkUnmapMemory(device, uploadMemory);
 
         vkResetCommandBuffer(cmd, 0);
@@ -463,7 +441,6 @@ int main() {
         transition(cmd, colorImage, colorLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
         transition(cmd, depthImage, depthLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
         transition(cmd, mvImage, mvLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-        
         if (i == 0) {
             transition(cmd, outputImage, outputLayout, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
         }
@@ -475,7 +452,7 @@ int main() {
         vkCmdCopyBufferToImage(cmd, uploadBuffer, colorImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cRegion2);
 
         VkBufferImageCopy dRegion = {};
-        dRegion.bufferOffset = fColor.size();
+        dRegion.bufferOffset = fColor.size() * sizeof(float);
         dRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
         dRegion.imageSubresource.layerCount = 1;
         dRegion.imageExtent = { (uint32_t)renderW, (uint32_t)renderH, 1 };
@@ -496,7 +473,6 @@ int main() {
         dispatchDesc.depth = depthRes2;
         dispatchDesc.motionVectors = mvRes2;
         dispatchDesc.output = outputRes2;
-        
         dispatchDesc.jitterOffset.x = jX;
         dispatchDesc.jitterOffset.y = jY;
         dispatchDesc.motionVectorScale.x = (float)renderW; 
@@ -509,48 +485,34 @@ int main() {
         dispatchDesc.reset = (i == 0); 
         dispatchDesc.cameraNear = 0.1f;
         dispatchDesc.cameraFar = 100.0f;
-        dispatchDesc.cameraFovAngleVertical = 1.047f; // 60 degrees
+        dispatchDesc.cameraFovAngleVertical = 1.047f;
 
-        if (ffxFsr2ContextDispatch(fsr2Context, &dispatchDesc) != FFX_OK) {
-            std::cout << "FAILED: ffxFsr2ContextDispatch failed on loop " << i << std::endl;
-            return 1;
-        }
+        if (ffxFsr2ContextDispatch(fsr2Context, &dispatchDesc) != FFX_OK) return 1;
 
         vkEndCommandBuffer(cmd);
         vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
         vkQueueWaitIdle(queue);
 
-        if ((i + 1) % 8 == 0) std::cout << "  -> Completed Pass " << (i + 1) << "/32" << std::endl;
+        if ((i + 1) % 8 == 0) std::cout << " -> Completed Pass " << (i + 1) << "/32" << std::endl;
     }
 
     std::cout << "Downloading FSR_2.3.3_2x.png..." << std::endl;
     vkResetCommandBuffer(cmd, 0);
     vkBeginCommandBuffer(cmd, &beginInfo);
-
     transition(cmd, outputImage, outputLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
     vkCmdCopyImageToBuffer(cmd, outputImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, downloadBuffer, 1, &outRegion);
-
     vkEndCommandBuffer(cmd);
+    
     vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
     vkQueueWaitIdle(queue);
 
     vkMapMemory(device, downloadMemory, 0, outSize, 0, &outData);
-    float* outData2F = (float*)outData;
-    std::vector<unsigned char> finalImg2(displayW * displayH * 4);
-    for(uint32_t p = 0; p < displayW * displayH * 4; p++) {
-        float v = outData2F[p];
-        if (v < 0.0f) v = 0.0f;
-        if (v > 1.0f) v = 1.0f;
-        finalImg2[p] = (unsigned char)(v * 255.0f);
-    }
-    stbi_write_png("FSR_2.3.3_2x.png", displayW, displayH, 4, finalImg2.data(), displayW * 4);
+    saveFloatImage("FSR_2.3.3_2x.png", displayW, displayH, (float*)outData);
     vkUnmapMemory(device, downloadMemory);
-    std::cout << "Saved FSR_2.3.3_2x.png successfully!" << std::endl;
 
     ffxFsr2ContextDestroy(fsr2Context);
-    delete fsr2Context;
-    
-    // Cleanup
+    _aligned_free(fsr2Context);
+
     vkDestroyImage(device, colorImage, nullptr); vkFreeMemory(device, colorMem, nullptr);
     vkDestroyImage(device, depthImage, nullptr); vkFreeMemory(device, depthMem, nullptr);
     vkDestroyImage(device, mvImage, nullptr); vkFreeMemory(device, mvMem, nullptr);
