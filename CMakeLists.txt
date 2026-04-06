@@ -115,6 +115,11 @@ target_link_libraries(vk-upscale-testbed PRIVATE
     ffx_backend_vk_x64
 )
 
+# PREVENT SILENT CRASHES! Tell AMD to not execute __debugbreak()
+target_compile_definitions(ffx_backend_vk_x64 PRIVATE DISABLE_FFX_DEBUG_BREAK=1)
+target_compile_definitions(ffx_fsr1_x64 PRIVATE DISABLE_FFX_DEBUG_BREAK=1)
+target_compile_definitions(ffx_fsr2_x64 PRIVATE DISABLE_FFX_DEBUG_BREAK=1)
+
 target_link_libraries(ffx_backend_vk_x64 volk::volk)
 if(MSVC)
     target_compile_options(ffx_backend_vk_x64 PRIVATE "/FIvolk.h")
