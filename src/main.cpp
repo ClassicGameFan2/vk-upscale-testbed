@@ -113,12 +113,18 @@ void renderScene(int w, int h, float jx, float jy, float* colorOut, float* depth
 // Convert downloaded Float to sRGB 8-bit Image
 void saveFloatImage(const std::string& filename, int w, int h, const float* data) {
     std::vector<unsigned char> bytes(w * h * 4);
-    for (int i = 0; i < w * h * 4; ++i) {
-        float v = data[i];
-        if (v < 0.0f) v = 0.0f;
-        if (v > 1.0f) v = 1.0f;
-        // Gamma correct back to sRGB for saving
-        bytes[i] = (unsigned char)(powf(v, 1.0f / 2.2f) * 255.0f);
+    for (int i = 0; i < w * h * 4; i+=4) {
+        // Iterate RGB
+        for (int c = 0; c < 3; c++) {
+            float v = data[i+c];
+            if (std::isnan(v)) v = 0.0f; // Filter NaNs
+            if (v < 0.0f) v = 0.0f;
+            if (v > 1.0f) v = 1.0f;
+            // Gamma correct back to sRGB for saving
+            bytes[i+c] = (unsigned char)(powf(v, 1.0f / 2.2f) * 255.0f);
+        }
+        // CRITICAL FIX: Force Alpha to 255 (Opaque) to prevent Windows Image Viewer silhouette bleeding!
+        bytes[i+3] = 255; 
     }
     stbi_write_png(filename.c_str(), w, h, 4, bytes.data(), w * 4);
     std::cout << "Saved " << filename << " successfully!" << std::endl;
@@ -301,6 +307,20 @@ int main() {
     VkImageCreateInfo mvInfo = createImage(device, physicalDevice, renderW, renderH, VK_FORMAT_R16G16_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, mvImage, mvMem);
     VkImageCreateInfo outputInfo = createImage(device, physicalDevice, displayW, displayH, VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, outputImage, outputMem);
 
+    // --- MANUALLY BYPASS FSR 2 AUTO EXPOSURE ---
+    // We allocate a 1x1 Texture and fill it with 1.0f to completely eliminate the "dark sunglasses" effect
+    VkBuffer expUploadBuffer; VkDeviceMemory expUploadMemory;
+    createBuffer(device, physicalDevice, sizeof(float), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, expUploadBuffer, expUploadMemory);
+    
+    void* expMapped;
+    vkMapMemory(device, expUploadMemory, 0, sizeof(float), 0, &expMapped);
+    float expVal = 1.0f; // Perfect, neutral exposure 
+    memcpy(expMapped, &expVal, sizeof(float));
+    vkUnmapMemory(device, expUploadMemory);
+
+    VkImage expImage; VkDeviceMemory expImageMem;
+    VkImageCreateInfo expInfo = createImage(device, physicalDevice, 1, 1, VK_FORMAT_R32_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, expImage, expImageMem);
+
     VkDeviceContext vkDeviceContext = { device, physicalDevice, vkGetDeviceProcAddr };
     std::cout << "\n[Trace] Allocating Backend Scratch Memory..." << std::flush;
     size_t safeBufferSize = ffxGetScratchMemorySizeVK(physicalDevice, 4) * 2;
@@ -317,6 +337,21 @@ int main() {
     VkImageLayout depthLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkImageLayout mvLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkImageLayout outputLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImageLayout expLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    // upload manual exposure buffer
+    vkResetCommandBuffer(cmd, 0);
+    vkBeginCommandBuffer(cmd, &beginInfo);
+    transition(cmd, expImage, expLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+    VkBufferImageCopy expCopy = {};
+    expCopy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    expCopy.imageSubresource.layerCount = 1;
+    expCopy.imageExtent = { 1, 1, 1 };
+    vkCmdCopyBufferToImage(cmd, expUploadBuffer, expImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &expCopy);
+    transition(cmd, expImage, expLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+    vkEndCommandBuffer(cmd);
+    vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
+    vkQueueWaitIdle(queue);
 
     // =========================================================================
     // FSR 1.2 TEST
@@ -403,8 +438,8 @@ int main() {
 
     FfxFsr2ContextDescription fsr2Desc = {};
     memset(&fsr2Desc, 0, sizeof(FfxFsr2ContextDescription));
-    // CRITICAL FIX: Enabled Auto Exposure so FSR 2 mathematically balances the brightness!
-    fsr2Desc.flags = FFX_FSR2_ENABLE_DEBUG_CHECKING | FFX_FSR2_ENABLE_DEPTH_INVERTED | FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE | FFX_FSR2_ENABLE_AUTO_EXPOSURE; 
+    // CRITICAL FIX: We explicitly DO NOT USE Auto-Exposure here. We will pass our manual 1.0x multiplier!
+    fsr2Desc.flags = FFX_FSR2_ENABLE_DEBUG_CHECKING | FFX_FSR2_ENABLE_DEPTH_INVERTED | FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE; 
     fsr2Desc.maxRenderSize = { (uint32_t)renderW, (uint32_t)renderH };
     fsr2Desc.displaySize = { displayW, displayH };
     fsr2Desc.fpMessage = FfxMessageCallback;
@@ -418,6 +453,7 @@ int main() {
     FfxResource depthRes2 = ffxGetResourceVK(depthImage, ffxGetImageResourceDescriptionVK(depthImage, depthInfo, FFX_RESOURCE_USAGE_READ_ONLY), L"Depth", FFX_RESOURCE_STATE_COMPUTE_READ);
     FfxResource mvRes2 = ffxGetResourceVK(mvImage, ffxGetImageResourceDescriptionVK(mvImage, mvInfo, FFX_RESOURCE_USAGE_READ_ONLY), L"MVs", FFX_RESOURCE_STATE_COMPUTE_READ);
     FfxResource outputRes2 = ffxGetResourceVK(outputImage, ffxGetImageResourceDescriptionVK(outputImage, outputInfo, FFX_RESOURCE_USAGE_UAV), L"Output", FFX_RESOURCE_STATE_UNORDERED_ACCESS);
+    FfxResource expRes2 = ffxGetResourceVK(expImage, ffxGetImageResourceDescriptionVK(expImage, expInfo, FFX_RESOURCE_USAGE_READ_ONLY), L"Exposure", FFX_RESOURCE_STATE_COMPUTE_READ);
 
     int32_t phaseCount = ffxFsr2GetJitterPhaseCount(renderW, displayW);
 
@@ -473,6 +509,7 @@ int main() {
         dispatchDesc.color = colorRes2;
         dispatchDesc.depth = depthRes2;
         dispatchDesc.motionVectors = mvRes2;
+        dispatchDesc.exposure = expRes2; // CRITICAL: Pass manual 1.0f exposure!
         dispatchDesc.output = outputRes2;
         dispatchDesc.jitterOffset.x = jX;
         dispatchDesc.jitterOffset.y = jY;
@@ -518,8 +555,10 @@ int main() {
     vkDestroyImage(device, depthImage, nullptr); vkFreeMemory(device, depthMem, nullptr);
     vkDestroyImage(device, mvImage, nullptr); vkFreeMemory(device, mvMem, nullptr);
     vkDestroyImage(device, outputImage, nullptr); vkFreeMemory(device, outputMem, nullptr);
+    vkDestroyImage(device, expImage, nullptr); vkFreeMemory(device, expImageMem, nullptr);
     vkDestroyBuffer(device, uploadBuffer, nullptr); vkFreeMemory(device, uploadMemory, nullptr);
     vkDestroyBuffer(device, downloadBuffer, nullptr); vkFreeMemory(device, downloadMemory, nullptr);
+    vkDestroyBuffer(device, expUploadBuffer, nullptr); vkFreeMemory(device, expUploadMemory, nullptr);
     vkDestroyCommandPool(device, commandPool, nullptr);
     vkDestroyDevice(device, nullptr);
     vkDestroyInstance(instance, nullptr);
