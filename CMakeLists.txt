@@ -85,15 +85,6 @@ if(NOT ffx_sdk_POPULATED)
     string(REPLACE "errorCode = createPipelineStates(context);" "printf(\" [Trace-FSR1] createPipelineStates...\\n\"); fflush(stdout); errorCode = createPipelineStates(context);" fsr1_code "${fsr1_code}")
     file(WRITE "${ffx_sdk_SOURCE_DIR}/sdk/src/components/fsr1/ffx_fsr1.cpp" "${fsr1_code}")
 
-    # --- FSR 2 PURE 32-BIT FLOAT OVERRIDE ---
-    # This totally bypasses SwiftShader's 16-bit half-float corruption bugs!
-    file(READ "${ffx_sdk_SOURCE_DIR}/sdk/src/components/fsr2/ffx_fsr2.cpp" fsr2_code)
-    string(REPLACE "FFX_SURFACE_FORMAT_R16G16B16A16_FLOAT" "FFX_SURFACE_FORMAT_R32G32B32A32_FLOAT" fsr2_code "${fsr2_code}")
-    string(REPLACE "FFX_SURFACE_FORMAT_R16G16_FLOAT" "FFX_SURFACE_FORMAT_R32G32_FLOAT" fsr2_code "${fsr2_code}")
-    string(REPLACE "FFX_SURFACE_FORMAT_R16_FLOAT" "FFX_SURFACE_FORMAT_R32_FLOAT" fsr2_code "${fsr2_code}")
-    string(REPLACE "FFX_SURFACE_FORMAT_R11G11B10_FLOAT" "FFX_SURFACE_FORMAT_R32G32B32A32_FLOAT" fsr2_code "${fsr2_code}")
-    file(WRITE "${ffx_sdk_SOURCE_DIR}/sdk/src/components/fsr2/ffx_fsr2.cpp" "${fsr2_code}")
-
     add_subdirectory(${ffx_sdk_SOURCE_DIR}/sdk ${ffx_sdk_BINARY_DIR}/sdk)
 endif()
 
