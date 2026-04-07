@@ -315,17 +315,7 @@ int main() {
     VkImageCreateInfo mvInfo = createImage(device, physicalDevice, renderW, renderH, VK_FORMAT_R32G32_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, mvImage, mvMem);
     VkImageCreateInfo outputInfo = createImage(device, physicalDevice, displayW, displayH, VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, outputImage, outputMem);
 
-    // --- MANUAL NEUTRAL EXPOSURE TEXTURE ---
-    // CRITICAL FIX: FSR 2 requires specifically a 1-channel R32_FLOAT for exposure!
-    VkBuffer expUploadBuffer; VkDeviceMemory expUploadMemory;
-    createBuffer(device, physicalDevice, sizeof(float), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, expUploadBuffer, expUploadMemory);
-    
-    void* expMapped;
-    vkMapMemory(device, expUploadMemory, 0, sizeof(float), 0, &expMapped);
-    float expVal[1] = { 1.0f }; // Perfect, neutral exposure
-    memcpy(expMapped, expVal, sizeof(float));
-    vkUnmapMemory(device, expUploadMemory);
-
+    // 1-CHANNEL R32 EXPOSURE TEXTURE
     VkImage expImage; VkDeviceMemory expImageMem;
     VkImageCreateInfo expInfo = createImage(device, physicalDevice, 1, 1, VK_FORMAT_R32_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, expImage, expImageMem);
 
@@ -346,20 +336,6 @@ int main() {
     VkImageLayout mvLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkImageLayout outputLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkImageLayout expLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-    // Upload manual exposure buffer
-    vkResetCommandBuffer(cmd, 0);
-    vkBeginCommandBuffer(cmd, &beginInfo);
-    transition(cmd, expImage, expLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-    VkBufferImageCopy expCopy = {};
-    expCopy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    expCopy.imageSubresource.layerCount = 1;
-    expCopy.imageExtent = { 1, 1, 1 };
-    vkCmdCopyBufferToImage(cmd, expUploadBuffer, expImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &expCopy);
-    transition(cmd, expImage, expLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-    vkEndCommandBuffer(cmd);
-    vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
-    vkQueueWaitIdle(queue);
 
     // =========================================================================
     // FSR 1.2 TEST
@@ -446,7 +422,6 @@ int main() {
 
     FfxFsr2ContextDescription fsr2Desc = {};
     memset(&fsr2Desc, 0, sizeof(FfxFsr2ContextDescription));
-    // CRITICAL: We include Jitter Cancellation because our 3D camera is perfectly still, preventing false temporal rejection!
     fsr2Desc.flags = FFX_FSR2_ENABLE_DEBUG_CHECKING | FFX_FSR2_ENABLE_DEPTH_INVERTED | FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE | FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION; 
     fsr2Desc.maxRenderSize = { (uint32_t)renderW, (uint32_t)renderH };
     fsr2Desc.displaySize = { displayW, displayH };
@@ -468,7 +443,6 @@ int main() {
     std::cout << "Executing FSR 2.3.3 Temporal Engine (32 Frames)..." << std::endl; std::cout.flush();
 
     for (int i = 0; i < 32; i++) {
-        // We restore true 3D Jitter exactly as requested
         float jX = 0, jY = 0;
         ffxFsr2GetJitterOffset(&jX, &jY, i, phaseCount);
 
@@ -484,13 +458,17 @@ int main() {
         vkResetCommandBuffer(cmd, 0);
         vkBeginCommandBuffer(cmd, &beginInfo);
 
+        // Transition ALL inputs
         transition(cmd, colorImage, colorLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
         transition(cmd, depthImage, depthLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
         transition(cmd, mvImage, mvLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+        transition(cmd, expImage, expLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+        
         if (i == 0) {
             transition(cmd, outputImage, outputLayout, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
         }
 
+        // Upload Data
         VkBufferImageCopy cRegion2 = {};
         cRegion2.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         cRegion2.imageSubresource.layerCount = 1;
@@ -504,13 +482,19 @@ int main() {
         dRegion.imageExtent = { (uint32_t)renderW, (uint32_t)renderH, 1 };
         vkCmdCopyBufferToImage(cmd, uploadBuffer, depthImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &dRegion);
 
+        // Clear MV and Exposure directly on GPU (bypasses upload alignment bugs!)
         VkClearColorValue mvClear = {{0.0f, 0.0f, 0.0f, 0.0f}};
-        VkImageSubresourceRange mvRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        vkCmdClearColorImage(cmd, mvImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &mvClear, 1, &mvRange);
+        VkImageSubresourceRange colorRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCmdClearColorImage(cmd, mvImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &mvClear, 1, &colorRange);
 
+        VkClearColorValue expClear = {{1.0f, 0.0f, 0.0f, 0.0f}};
+        vkCmdClearColorImage(cmd, expImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &expClear, 1, &colorRange);
+
+        // Transition back to Shader Read for FSR
         transition(cmd, colorImage, colorLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
         transition(cmd, depthImage, depthLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
         transition(cmd, mvImage, mvLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+        transition(cmd, expImage, expLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
 
         FfxFsr2DispatchDescription dispatchDesc = {};
         memset(&dispatchDesc, 0, sizeof(FfxFsr2DispatchDescription)); 
@@ -518,7 +502,7 @@ int main() {
         dispatchDesc.color = colorRes2;
         dispatchDesc.depth = depthRes2;
         dispatchDesc.motionVectors = mvRes2;
-        dispatchDesc.exposure = expRes2; // CRITICAL: Pass Manual 1.0f exposure correctly mapped
+        dispatchDesc.exposure = expRes2; 
         dispatchDesc.output = outputRes2;
         dispatchDesc.jitterOffset.x = jX;
         dispatchDesc.jitterOffset.y = jY;
@@ -568,7 +552,6 @@ int main() {
     vkDestroyImage(device, expImage, nullptr); vkFreeMemory(device, expImageMem, nullptr);
     vkDestroyBuffer(device, uploadBuffer, nullptr); vkFreeMemory(device, uploadMemory, nullptr);
     vkDestroyBuffer(device, downloadBuffer, nullptr); vkFreeMemory(device, downloadMemory, nullptr);
-    vkDestroyBuffer(device, expUploadBuffer, nullptr); vkFreeMemory(device, expUploadMemory, nullptr);
     vkDestroyCommandPool(device, commandPool, nullptr);
     vkDestroyDevice(device, nullptr);
     vkDestroyInstance(instance, nullptr);
