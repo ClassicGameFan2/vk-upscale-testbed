@@ -113,19 +113,28 @@ void renderScene(int w, int h, float jx, float jy, float* colorOut, float* depth
 // Convert downloaded Float to sRGB 8-bit Image
 void saveFloatImage(const std::string& filename, int w, int h, const float* data) {
     std::vector<unsigned char> bytes(w * h * 4);
+    int nanCount = 0;
+    
     for (int i = 0; i < w * h * 4; i+=4) {
-        // Iterate RGB
         for (int c = 0; c < 3; c++) {
             float v = data[i+c];
-            if (std::isnan(v)) v = 0.0f; // Filter NaNs
+            if (std::isnan(v)) { 
+                v = 0.0f; 
+                nanCount++;
+            }
             if (v < 0.0f) v = 0.0f;
             if (v > 1.0f) v = 1.0f;
             // Gamma correct back to sRGB for saving
             bytes[i+c] = (unsigned char)(powf(v, 1.0f / 2.2f) * 255.0f);
         }
-        // Force Alpha to 255 (Opaque) to prevent Windows Image Viewer silhouette bleeding
+        // Force Alpha to 255 (Opaque)
         bytes[i+3] = 255; 
     }
+    
+    if (nanCount > 0) {
+        std::cout << "\n[WARNING] " << nanCount << " NaNs (Corrupted Pixels) detected in " << filename << "!\n";
+    }
+
     stbi_write_png(filename.c_str(), w, h, 4, bytes.data(), w * 4);
     std::cout << "Saved " << filename << " successfully!" << std::endl;
 }
@@ -301,10 +310,10 @@ int main() {
     VkImage colorImage, depthImage, mvImage, outputImage;
     VkDeviceMemory colorMem, depthMem, mvMem, outputMem;
 
-    VkImageCreateInfo colorInfo = createImage(device, physicalDevice, renderW, renderH, VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, colorImage, colorMem);
+    VkImageCreateInfo colorInfo = createImage(device, physicalDevice, renderW, renderH, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, colorImage, colorMem);
     VkImageCreateInfo depthInfo = createImage(device, physicalDevice, renderW, renderH, VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, depthImage, depthMem);
     VkImageCreateInfo mvInfo = createImage(device, physicalDevice, renderW, renderH, VK_FORMAT_R16G16_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, mvImage, mvMem);
-    VkImageCreateInfo outputInfo = createImage(device, physicalDevice, displayW, displayH, VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, outputImage, outputMem);
+    VkImageCreateInfo outputInfo = createImage(device, physicalDevice, displayW, displayH, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, outputImage, outputMem);
 
     VkDeviceContext vkDeviceContext = { device, physicalDevice, vkGetDeviceProcAddr };
     std::cout << "\n[Trace] Allocating Backend Scratch Memory..." << std::flush;
@@ -334,7 +343,7 @@ int main() {
 
     FfxFsr1ContextDescription fsr1Desc = {};
     fsr1Desc.flags = FFX_FSR1_ENABLE_RCAS | FFX_FSR1_ENABLE_HIGH_DYNAMIC_RANGE; 
-    fsr1Desc.outputFormat = ffxGetSurfaceFormatVK(VK_FORMAT_R32G32B32A32_SFLOAT);
+    fsr1Desc.outputFormat = ffxGetSurfaceFormatVK(VK_FORMAT_R16G16B16A16_SFLOAT);
     fsr1Desc.maxRenderSize = { (uint32_t)renderW, (uint32_t)renderH };
     fsr1Desc.displaySize = { displayW, displayH };
     fsr1Desc.backendInterface = ffxInterface1;
@@ -492,6 +501,7 @@ int main() {
         dispatchDesc.cameraNear = 0.1f;
         dispatchDesc.cameraFar = 100.0f;
         dispatchDesc.cameraFovAngleVertical = 1.047f;
+        dispatchDesc.viewSpaceToMetersFactor = 1.0f;
 
         if (ffxFsr2ContextDispatch(fsr2Context, &dispatchDesc) != FFX_OK) return 1;
 
