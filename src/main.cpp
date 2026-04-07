@@ -18,23 +18,25 @@
 static FfxGetDeviceCapabilitiesFunc g_original_fpGetDeviceCapabilities = nullptr;
 static FfxCreateResourceFunc g_original_fpCreateResource = nullptr;
 
-FfxErrorCode CustomGetDeviceCapabilities(FfxDeviceCapabilities* outDeviceCapabilities, FfxDevice device) {
-    FfxErrorCode code = g_original_fpGetDeviceCapabilities(outDeviceCapabilities, device);
+FfxErrorCode CustomGetDeviceCapabilities(FfxInterface* backendInterface, FfxDeviceCapabilities* outDeviceCapabilities) {
+    FfxErrorCode code = g_original_fpGetDeviceCapabilities(backendInterface, outDeviceCapabilities);
     if (code == FFX_OK) {
         outDeviceCapabilities->fp16Supported = false; // KILL-SWITCH FOR SWIFTSHADER FP16 BUG
         std::cout << "[Trace-VK] Intercepted fpGetDeviceCapabilities! Forced fp16Supported = false\n";
+        std::cout.flush();
     }
     return code;
 }
 
-FfxErrorCode CustomCreateResource(const FfxCreateResourceDescription* desc, FfxResourceInternal* outTexture) {
+FfxErrorCode CustomCreateResource(FfxInterface* backendInterface, const FfxCreateResourceDescription* desc, FfxResourceInternal* outTexture) {
     FfxCreateResourceDescription modifiedDesc = *desc;
     // KILL-SWITCH FOR SWIFTSHADER R11G11B10 UAV DROP BUG
     if (modifiedDesc.resourceDescription.format == FFX_SURFACE_FORMAT_R11G11B10_FLOAT) {
         modifiedDesc.resourceDescription.format = FFX_SURFACE_FORMAT_R16G16B16A16_FLOAT;
         std::cout << "[Trace-VK] Intercepted fpCreateResource! Upgraded R11G11B10 to R16G16B16A16\n";
+        std::cout.flush();
     }
-    return g_original_fpCreateResource(&modifiedDesc, outTexture);
+    return g_original_fpCreateResource(backendInterface, &modifiedDesc, outTexture);
 }
 // =========================================================================
 
