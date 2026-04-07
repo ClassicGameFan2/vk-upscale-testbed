@@ -13,37 +13,46 @@
 #include "stb_image_write.h"
 
 // =========================================================================
-// AMD SDK C++ INTERCEPTORS (Guaranteed to bypass SwiftShader Emulator Bugs!)
+// PURE VULKAN API HOOKS (100% Guaranteed to bypass SDK Signature errors!)
 // =========================================================================
-static FfxGetDeviceCapabilitiesFunc g_original_fpGetDeviceCapabilities = nullptr;
-static FfxCreateResourceFunc g_original_fpCreateResource = nullptr;
-
-// 2 Arguments
-FfxErrorCode CustomGetDeviceCapabilities(FfxInterface* backendInterface, FfxDeviceCapabilities* outDeviceCapabilities) {
-    FfxErrorCode code = g_original_fpGetDeviceCapabilities(backendInterface, outDeviceCapabilities);
-    if (code == FFX_OK) {
-        outDeviceCapabilities->fp16Supported = false; // KILL-SWITCH FOR SWIFTSHADER FP16 BUG
-        std::cout << "[Trace-VK] Intercepted fpGetDeviceCapabilities! Forced fp16Supported = false\n";
-        std::cout.flush();
+static PFN_vkGetPhysicalDeviceFeatures2 original_vkGetPhysicalDeviceFeatures2 = nullptr;
+static VKAPI_ATTR void VKAPI_CALL Hooked_vkGetPhysicalDeviceFeatures2(VkPhysicalDevice physicalDevice, VkPhysicalDeviceFeatures2* pFeatures) {
+    original_vkGetPhysicalDeviceFeatures2(physicalDevice, pFeatures);
+    VkBaseOutStructure* current = (VkBaseOutStructure*)pFeatures->pNext;
+    while (current) {
+        if (current->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT16_INT8_FEATURES_KHR) {
+            VkPhysicalDeviceFloat16Int8FeaturesKHR* fp16 = (VkPhysicalDeviceFloat16Int8FeaturesKHR*)current;
+            fp16->shaderFloat16 = VK_FALSE; // KILL-SWITCH FOR SWIFTSHADER FP16 BUG
+            std::cout << "[Trace-VK] Intercepted Vulkan Features (KHR)! Forced shaderFloat16 = false\n";
+        }
+        if (current->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES) {
+            VkPhysicalDeviceVulkan12Features* v12 = (VkPhysicalDeviceVulkan12Features*)current;
+            v12->shaderFloat16 = VK_FALSE;
+            std::cout << "[Trace-VK] Intercepted Vulkan Features (V1.2)! Forced shaderFloat16 = false\n";
+        }
+        current = current->pNext;
     }
-    return code;
 }
 
-// 4 Arguments
-FfxErrorCode CustomCreateResource(
-    FfxInterface* backendInterface, 
-    const FfxCreateResourceDescription* desc, 
-    FfxEffect effectContextId, 
-    FfxResourceInternal* outTexture) 
-{
-    FfxCreateResourceDescription modifiedDesc = *desc;
+static PFN_vkCreateImage original_vkCreateImage = nullptr;
+static VKAPI_ATTR VkResult VKAPI_CALL Hooked_vkCreateImage(VkDevice device, const VkImageCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkImage* pImage) {
+    VkImageCreateInfo modifiedInfo = *pCreateInfo;
     // KILL-SWITCH FOR SWIFTSHADER R11G11B10 UAV DROP BUG
-    if (modifiedDesc.resourceDescription.format == FFX_SURFACE_FORMAT_R11G11B10_FLOAT) {
-        modifiedDesc.resourceDescription.format = FFX_SURFACE_FORMAT_R16G16B16A16_FLOAT;
-        std::cout << "[Trace-VK] Intercepted fpCreateResource! Upgraded R11G11B10 to R16G16B16A16\n";
-        std::cout.flush();
+    if (modifiedInfo.format == VK_FORMAT_B10G11R11_UFLOAT_PACK32) {
+        modifiedInfo.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+        std::cout << "[Trace-VK] Intercepted vkCreateImage! Upgraded B10G11R11 to R16G16B16A16\n";
     }
-    return g_original_fpCreateResource(backendInterface, &modifiedDesc, effectContextId, outTexture);
+    return original_vkCreateImage(device, &modifiedInfo, pAllocator, pImage);
+}
+
+static PFN_vkCreateImageView original_vkCreateImageView = nullptr;
+static VKAPI_ATTR VkResult VKAPI_CALL Hooked_vkCreateImageView(VkDevice device, const VkImageViewCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkImageView* pView) {
+    VkImageViewCreateInfo modifiedInfo = *pCreateInfo;
+    if (modifiedInfo.format == VK_FORMAT_B10G11R11_UFLOAT_PACK32) {
+        modifiedInfo.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+        std::cout << "[Trace-VK] Intercepted vkCreateImageView! Upgraded B10G11R11 to R16G16B16A16\n";
+    }
+    return original_vkCreateImageView(device, &modifiedInfo, pAllocator, pView);
 }
 // =========================================================================
 
@@ -257,6 +266,13 @@ int main() {
     vkCreateInstance(&instanceInfo, nullptr, &instance);
     volkLoadInstance(instance);
 
+    // =========================================================================
+    // INJECT VULKAN HOOKS EARLY (Before device creation and FSR initialization)
+    // =========================================================================
+    original_vkGetPhysicalDeviceFeatures2 = vkGetPhysicalDeviceFeatures2;
+    vkGetPhysicalDeviceFeatures2 = Hooked_vkGetPhysicalDeviceFeatures2;
+    // =========================================================================
+
     uint32_t deviceCount = 0;
     vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
     std::vector<VkPhysicalDevice> physicalDevices(deviceCount);
@@ -297,6 +313,16 @@ int main() {
     VkDevice device;
     vkCreateDevice(physicalDevice, &deviceInfo, nullptr, &device);
     volkLoadDevice(device);
+
+    // =========================================================================
+    // INJECT VULKAN IMAGE HOOKS (Intercept FSR Resource Creation)
+    // =========================================================================
+    original_vkCreateImage = vkCreateImage;
+    vkCreateImage = Hooked_vkCreateImage;
+    
+    original_vkCreateImageView = vkCreateImageView;
+    vkCreateImageView = Hooked_vkCreateImageView;
+    // =========================================================================
 
     VkQueue queue;
     vkGetDeviceQueue(device, queueFamilyIndex, 0, &queue);
@@ -446,14 +472,6 @@ int main() {
     FfxInterface ffxInterface2 = {};
     if (ffxGetInterfaceVK(&ffxInterface2, ffxGetDeviceVK(&vkDeviceContext), scratchBuffer, safeBufferSize, 4) != FFX_OK) return 1;
 
-    // --- APPLY OUR C++ INTERCEPTORS HERE ---
-    g_original_fpGetDeviceCapabilities = ffxInterface2.fpGetDeviceCapabilities;
-    ffxInterface2.fpGetDeviceCapabilities = CustomGetDeviceCapabilities;
-
-    g_original_fpCreateResource = ffxInterface2.fpCreateResource;
-    ffxInterface2.fpCreateResource = CustomCreateResource;
-    // ---------------------------------------
-
     FfxFsr2ContextDescription fsr2Desc = {};
     memset(&fsr2Desc, 0, sizeof(FfxFsr2ContextDescription));
     
@@ -589,7 +607,6 @@ int main() {
     vkDestroyCommandPool(device, commandPool, nullptr);
     vkDestroyDevice(device, nullptr);
     vkDestroyInstance(instance, nullptr);
-    _aligned_free(scratchBuffer);
 
     return 0;
 }
