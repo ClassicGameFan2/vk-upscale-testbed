@@ -66,15 +66,15 @@ if(NOT ffx_sdk_POPULATED)
         endif()
     endforeach()
 
-    # SWIFTSHADER MEMORY FIX, NULL POINTER BYPASS, & DEEP VULKAN TRACER
+    # SWIFTSHADER MEMORY FIX & DEEP VULKAN TRACER
     file(READ "${ffx_sdk_SOURCE_DIR}/sdk/src/backends/vk/ffx_vk.cpp" vk_backend_code)
     string(REPLACE "if (requestedProperties == VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT && (memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))" "if (false)" vk_backend_code "${vk_backend_code}")
     string(REPLACE "if (devCaps.dedicatedAllocationSupported)" "if (false)" vk_backend_code "${vk_backend_code}")
     string(PREPEND vk_backend_code "#include <stdio.h>\n")
     string(REPLACE "if (backendContext->vkFunctionTable.vkCreateDescriptorPool" "printf(\" [Trace-VK] vkCreateDescriptorPool...\\n\"); fflush(stdout); if (backendContext->vkFunctionTable.vkCreateDescriptorPool" vk_backend_code "${vk_backend_code}")
-    string(REPLACE "if (backendContext->vkFunctionTable.vkCreateBuffer" "printf(\" [Trace-VK] vkCreateBuffer...\\n\"); fflush(stdout); if (backendContext->vkFunctionTable.vkCreateBuffer" vk_backend_code "${vk_backend_code}")
     
     # --- CRITICAL FP16 MATH BYPASS ---
+    # Forces AMD to compile FSR 2 in Pure 32-Bit Float Mode, bypassing SwiftShader's math bugs!
     string(REPLACE "deviceCapabilities->fp16Supported = (bool)shaderFloat18Int8Features.shaderFloat16;" "deviceCapabilities->fp16Supported = false;" vk_backend_code "${vk_backend_code}")
     file(WRITE "${ffx_sdk_SOURCE_DIR}/sdk/src/backends/vk/ffx_vk.cpp" "${vk_backend_code}")
 
@@ -82,18 +82,8 @@ if(NOT ffx_sdk_POPULATED)
     file(READ "${ffx_sdk_SOURCE_DIR}/sdk/src/components/fsr1/ffx_fsr1.cpp" fsr1_code)
     string(PREPEND fsr1_code "#include <stdio.h>\n")
     string(REPLACE "FfxVersionNumber version = context->contextDescription.backendInterface.fpGetSDKVersion" "printf(\" [Trace-FSR1] fpGetSDKVersion...\\n\"); fflush(stdout); FfxVersionNumber version = context->contextDescription.backendInterface.fpGetSDKVersion" fsr1_code "${fsr1_code}")
-    string(REPLACE "FfxErrorCode errorCode =\n        context->contextDescription.backendInterface.fpCreateBackendContext" "printf(\" [Trace-FSR1] fpCreateBackendContext...\\n\"); fflush(stdout); FfxErrorCode errorCode =\n        context->contextDescription.backendInterface.fpCreateBackendContext" fsr1_code "${fsr1_code}")
-    string(REPLACE "errorCode = context->contextDescription.backendInterface.fpGetDeviceCapabilities" "printf(\" [Trace-FSR1] fpGetDeviceCapabilities...\\n\"); fflush(stdout); errorCode = context->contextDescription.backendInterface.fpGetDeviceCapabilities" fsr1_code "${fsr1_code}")
-    string(REPLACE "FFX_VALIDATE(context->contextDescription.backendInterface.fpCreateResource" "printf(\" [Trace-FSR1] fpCreateResource (RCAS Output)...\\n\"); fflush(stdout); FFX_VALIDATE(context->contextDescription.backendInterface.fpCreateResource" fsr1_code "${fsr1_code}")
     string(REPLACE "errorCode = createPipelineStates(context);" "printf(\" [Trace-FSR1] createPipelineStates...\\n\"); fflush(stdout); errorCode = createPipelineStates(context);" fsr1_code "${fsr1_code}")
     file(WRITE "${ffx_sdk_SOURCE_DIR}/sdk/src/components/fsr1/ffx_fsr1.cpp" "${fsr1_code}")
-
-    # --- CRITICAL FSR 2 HISTORY BUFFER BYPASS ---
-    # SwiftShader silently drops UAV writes to B10G11R11. 
-    # The FSR 2 HLSL shader packs this as a 32-bit uint anyway, so R32_UINT is a mathematically perfect, 100% safe replacement!
-    file(READ "${ffx_sdk_SOURCE_DIR}/sdk/src/components/fsr2/ffx_fsr2.cpp" fsr2_code)
-    string(REPLACE "FFX_SURFACE_FORMAT_R11G11B10_FLOAT" "FFX_SURFACE_FORMAT_R32_UINT" fsr2_code "${fsr2_code}")
-    file(WRITE "${ffx_sdk_SOURCE_DIR}/sdk/src/components/fsr2/ffx_fsr2.cpp" "${fsr2_code}")
 
     add_subdirectory(${ffx_sdk_SOURCE_DIR}/sdk ${ffx_sdk_BINARY_DIR}/sdk)
 endif()
