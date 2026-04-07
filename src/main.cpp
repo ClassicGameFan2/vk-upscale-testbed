@@ -408,7 +408,7 @@ int main() {
 
     FfxFsr2ContextDescription fsr2Desc = {};
     memset(&fsr2Desc, 0, sizeof(FfxFsr2ContextDescription));
-    // CRITICAL FIX: Enabled HDR & Auto-Exposure exactly like the official AMD sample!
+    // CRITICAL: We are using the standard AMD configuration!
     fsr2Desc.flags = FFX_FSR2_ENABLE_DEBUG_CHECKING | FFX_FSR2_ENABLE_DEPTH_INVERTED | FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE | FFX_FSR2_ENABLE_AUTO_EXPOSURE; 
     fsr2Desc.maxRenderSize = { (uint32_t)renderW, (uint32_t)renderH };
     fsr2Desc.displaySize = { displayW, displayH };
