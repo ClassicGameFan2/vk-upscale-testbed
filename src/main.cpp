@@ -310,24 +310,24 @@ int main() {
     VkImage colorImage, depthImage, mvImage, outputImage;
     VkDeviceMemory colorMem, depthMem, mvMem, outputMem;
 
-    // Use pure 32-bit floats for C++ memory alignment
     VkImageCreateInfo colorInfo = createImage(device, physicalDevice, renderW, renderH, VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, colorImage, colorMem);
     VkImageCreateInfo depthInfo = createImage(device, physicalDevice, renderW, renderH, VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, depthImage, depthMem);
     VkImageCreateInfo mvInfo = createImage(device, physicalDevice, renderW, renderH, VK_FORMAT_R32G32_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, mvImage, mvMem);
     VkImageCreateInfo outputInfo = createImage(device, physicalDevice, displayW, displayH, VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, outputImage, outputMem);
 
     // --- MANUAL NEUTRAL EXPOSURE TEXTURE ---
+    // FSR 2 requires R32G32 float format for exposure (as it stores previous and current exposure)
     VkBuffer expUploadBuffer; VkDeviceMemory expUploadMemory;
-    createBuffer(device, physicalDevice, sizeof(float), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, expUploadBuffer, expUploadMemory);
+    createBuffer(device, physicalDevice, sizeof(float) * 2, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, expUploadBuffer, expUploadMemory);
     
     void* expMapped;
-    vkMapMemory(device, expUploadMemory, 0, sizeof(float), 0, &expMapped);
-    float expVal = 1.0f; // Perfect, neutral exposure 
-    memcpy(expMapped, &expVal, sizeof(float));
+    vkMapMemory(device, expUploadMemory, 0, sizeof(float) * 2, 0, &expMapped);
+    float expVal[2] = { 1.0f, 1.0f }; // Perfect, neutral exposure for both current and previous frames
+    memcpy(expMapped, expVal, sizeof(float) * 2);
     vkUnmapMemory(device, expUploadMemory);
 
     VkImage expImage; VkDeviceMemory expImageMem;
-    VkImageCreateInfo expInfo = createImage(device, physicalDevice, 1, 1, VK_FORMAT_R32_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, expImage, expImageMem);
+    VkImageCreateInfo expInfo = createImage(device, physicalDevice, 1, 1, VK_FORMAT_R32G32_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, expImage, expImageMem);
 
     VkDeviceContext vkDeviceContext = { device, physicalDevice, vkGetDeviceProcAddr };
     std::cout << "\n[Trace] Allocating Backend Scratch Memory..." << std::flush;
@@ -446,8 +446,8 @@ int main() {
 
     FfxFsr2ContextDescription fsr2Desc = {};
     memset(&fsr2Desc, 0, sizeof(FfxFsr2ContextDescription));
-    // CRITICAL: We bypass the WaveSize=4 Bug by disabling Auto-Exposure!
-    fsr2Desc.flags = FFX_FSR2_ENABLE_DEBUG_CHECKING | FFX_FSR2_ENABLE_DEPTH_INVERTED | FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE; 
+    // CRITICAL: We include Jitter Cancellation because our 3D camera is perfectly still, preventing false temporal rejection!
+    fsr2Desc.flags = FFX_FSR2_ENABLE_DEBUG_CHECKING | FFX_FSR2_ENABLE_DEPTH_INVERTED | FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE | FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION; 
     fsr2Desc.maxRenderSize = { (uint32_t)renderW, (uint32_t)renderH };
     fsr2Desc.displaySize = { displayW, displayH };
     fsr2Desc.fpMessage = FfxMessageCallback;
@@ -468,7 +468,7 @@ int main() {
     std::cout << "Executing FSR 2.3.3 Temporal Engine (32 Frames)..." << std::endl; std::cout.flush();
 
     for (int i = 0; i < 32; i++) {
-        // CRITICAL: We restored True 3D Jitter exactly as you requested!
+        // We restore true 3D Jitter exactly as requested
         float jX = 0, jY = 0;
         ffxFsr2GetJitterOffset(&jX, &jY, i, phaseCount);
 
@@ -518,14 +518,13 @@ int main() {
         dispatchDesc.color = colorRes2;
         dispatchDesc.depth = depthRes2;
         dispatchDesc.motionVectors = mvRes2;
-        dispatchDesc.exposure = expRes2; // CRITICAL: Pass Manual 1.0f exposure to bypass WaveSize=4 crash
+        dispatchDesc.exposure = expRes2; // CRITICAL: Pass Manual 1.0f exposure correctly mapped
         dispatchDesc.output = outputRes2;
         dispatchDesc.jitterOffset.x = jX;
         dispatchDesc.jitterOffset.y = jY;
         dispatchDesc.motionVectorScale.x = (float)renderW; 
         dispatchDesc.motionVectorScale.y = (float)renderH;
         dispatchDesc.renderSize = { (uint32_t)renderW, (uint32_t)renderH };
-        // CRITICAL: We restored RCAS Sharpening exactly as you requested!
         dispatchDesc.enableSharpening = true;
         dispatchDesc.sharpness = 0.2f;
         dispatchDesc.frameTimeDelta = 16.6f;
