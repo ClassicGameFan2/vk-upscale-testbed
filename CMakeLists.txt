@@ -73,6 +73,11 @@ if(NOT ffx_sdk_POPULATED)
     string(PREPEND vk_backend_code "#include <stdio.h>\n")
     string(REPLACE "if (backendContext->vkFunctionTable.vkCreateDescriptorPool" "printf(\" [Trace-VK] vkCreateDescriptorPool...\\n\"); fflush(stdout); if (backendContext->vkFunctionTable.vkCreateDescriptorPool" vk_backend_code "${vk_backend_code}")
     string(REPLACE "if (backendContext->vkFunctionTable.vkCreateBuffer" "printf(\" [Trace-VK] vkCreateBuffer...\\n\"); fflush(stdout); if (backendContext->vkFunctionTable.vkCreateBuffer" vk_backend_code "${vk_backend_code}")
+    
+    # --- CRITICAL FP16 MATH BYPASS ---
+    # Forces AMD to compile FSR 2 in Pure 32-Bit Float Mode, bypassing SwiftShader's math bugs!
+    string(REPLACE "deviceCapabilities->fp16Supported = (bool)shaderFloat18Int8Features.shaderFloat16;" "deviceCapabilities->fp16Supported = false;" vk_backend_code "${vk_backend_code}")
+    
     file(WRITE "${ffx_sdk_SOURCE_DIR}/sdk/src/backends/vk/ffx_vk.cpp" "${vk_backend_code}")
 
     # DEEP FSR1 TRACER
@@ -84,13 +89,6 @@ if(NOT ffx_sdk_POPULATED)
     string(REPLACE "FFX_VALIDATE(context->contextDescription.backendInterface.fpCreateResource" "printf(\" [Trace-FSR1] fpCreateResource (RCAS Output)...\\n\"); fflush(stdout); FFX_VALIDATE(context->contextDescription.backendInterface.fpCreateResource" fsr1_code "${fsr1_code}")
     string(REPLACE "errorCode = createPipelineStates(context);" "printf(\" [Trace-FSR1] createPipelineStates...\\n\"); fflush(stdout); errorCode = createPipelineStates(context);" fsr1_code "${fsr1_code}")
     file(WRITE "${ffx_sdk_SOURCE_DIR}/sdk/src/components/fsr1/ffx_fsr1.cpp" "${fsr1_code}")
-
-    # --- CRITICAL FSR 2 HISTORY BUFFER FIX ---
-    # SwiftShader does not support UAV (Storage) writes to B10G11R11_UFLOAT textures, causing silent write drops.
-    # By upgrading FSR2's internal history buffers to R16G16B16A16_FLOAT, we ensure perfect compatibility!
-    file(READ "${ffx_sdk_SOURCE_DIR}/sdk/src/components/fsr2/ffx_fsr2.cpp" fsr2_code)
-    string(REPLACE "FFX_SURFACE_FORMAT_R11G11B10_FLOAT" "FFX_SURFACE_FORMAT_R16G16B16A16_FLOAT" fsr2_code "${fsr2_code}")
-    file(WRITE "${ffx_sdk_SOURCE_DIR}/sdk/src/components/fsr2/ffx_fsr2.cpp" "${fsr2_code}")
 
     add_subdirectory(${ffx_sdk_SOURCE_DIR}/sdk ${ffx_sdk_BINARY_DIR}/sdk)
 endif()
