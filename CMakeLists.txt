@@ -75,8 +75,8 @@ if(NOT ffx_sdk_POPULATED)
     string(REPLACE "if (backendContext->vkFunctionTable.vkCreateBuffer" "printf(\" [Trace-VK] vkCreateBuffer...\\n\"); fflush(stdout); if (backendContext->vkFunctionTable.vkCreateBuffer" vk_backend_code "${vk_backend_code}")
     
     # --- CRITICAL FP16 MATH BYPASS ---
-    # Forces AMD to compile FSR 2 in Pure 32-Bit Float Mode, bypassing SwiftShader's math bugs!
-    string(REPLACE "return FFX_OK;" "deviceCapabilities->fp16Supported = false; return FFX_OK;" vk_backend_code "${vk_backend_code}")
+    # Safely targets the exact line of AMD code to force FSR 2 to use the Pure 32-Bit SPIR-V shaders!
+    string(REPLACE "deviceCapabilities->fp16Supported = (bool)shaderFloat18Int8Features.shaderFloat16;" "deviceCapabilities->fp16Supported = false;" vk_backend_code "${vk_backend_code}")
     
     file(WRITE "${ffx_sdk_SOURCE_DIR}/sdk/src/backends/vk/ffx_vk.cpp" "${vk_backend_code}")
 
