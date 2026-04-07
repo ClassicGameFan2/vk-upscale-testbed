@@ -201,7 +201,7 @@ void transition(VkCommandBuffer cmd, VkImage image, VkImageLayout& currentLayout
 }
 
 int main() {
-    std::cout << "--- FSR 3D Ablation Study (Pure 128-Bit Float Pipeline) ---" << std::endl;
+    std::cout << "--- FSR 3D Ablation Study (128-Bit Float Pipeline) ---" << std::endl;
     std::cout.flush();
 
     ffxAssertSetPrintingCallback(AssertCallback);
@@ -301,7 +301,6 @@ int main() {
     VkImage colorImage, depthImage, mvImage, outputImage;
     VkDeviceMemory colorMem, depthMem, mvMem, outputMem;
 
-    // Output and Color formats are mathematically perfect 32-bit floats, immune to 8-bit conversions
     VkImageCreateInfo colorInfo = createImage(device, physicalDevice, renderW, renderH, VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, colorImage, colorMem);
     VkImageCreateInfo depthInfo = createImage(device, physicalDevice, renderW, renderH, VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, depthImage, depthMem);
     VkImageCreateInfo mvInfo = createImage(device, physicalDevice, renderW, renderH, VK_FORMAT_R16G16_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, mvImage, mvMem);
@@ -409,8 +408,8 @@ int main() {
 
     FfxFsr2ContextDescription fsr2Desc = {};
     memset(&fsr2Desc, 0, sizeof(FfxFsr2ContextDescription));
-    // CRITICAL FIX: Disabled HDR & Auto-Exposure to run FSR 2 in LDR Mode! No YCoCg math corruption!
-    fsr2Desc.flags = FFX_FSR2_ENABLE_DEBUG_CHECKING | FFX_FSR2_ENABLE_DEPTH_INVERTED; 
+    // CRITICAL FIX: Enabled HDR & Auto-Exposure exactly like the official AMD sample!
+    fsr2Desc.flags = FFX_FSR2_ENABLE_DEBUG_CHECKING | FFX_FSR2_ENABLE_DEPTH_INVERTED | FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE | FFX_FSR2_ENABLE_AUTO_EXPOSURE; 
     fsr2Desc.maxRenderSize = { (uint32_t)renderW, (uint32_t)renderH };
     fsr2Desc.displaySize = { displayW, displayH };
     fsr2Desc.fpMessage = FfxMessageCallback;
