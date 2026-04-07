@@ -10,7 +10,6 @@
 #include <string>
 #include <cmath>
 
-// Image libs (Implementation is compiled in stb_impl.cpp!)
 #include "stb_image_write.h"
 
 static void AssertCallback(const char* message) {
@@ -39,7 +38,7 @@ static uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFil
 // --- PROCEDURAL 3D RAYTRACER (HDR LINEAR FLOATS + INVERTED DEPTH) ---
 void renderScene(int w, int h, float jx, float jy, float* colorOut, float* depthOut) {
     float aspect = (float)w / (float)h;
-    float fovY = 1.04719755f; // 60 degrees
+    float fovY = 1.04719755f;
     float tanHalfFov = tanf(fovY / 2.0f);
     float zNear = 0.1f;
     float zFar = 100.0f;
@@ -56,7 +55,6 @@ void renderScene(int w, int h, float jx, float jy, float* colorOut, float* depth
 
             float hitZ = -1.0f;
             
-            // Linear Sky Blue
             float r = powf(135.0f/255.0f, 2.2f), g = powf(206.0f/255.0f, 2.2f), b = powf(235.0f/255.0f, 2.2f);
 
             float oc[3] = {ro[0] - 0.0f, ro[1] - 1.0f, ro[2] - 4.0f};
@@ -104,13 +102,12 @@ void renderScene(int w, int h, float jx, float jy, float* colorOut, float* depth
                 float depth = (zNear * (zFar - hitZ)) / (hitZ * (zFar - zNear));
                 depthOut[idx] = depth;
             } else {
-                depthOut[idx] = 0.0f; // Inverted Far
+                depthOut[idx] = 0.0f; 
             }
         }
     }
 }
 
-// Convert downloaded Float to sRGB 8-bit Image
 void saveFloatImage(const std::string& filename, int w, int h, const float* data) {
     std::vector<unsigned char> bytes(w * h * 4);
     int nanCount = 0;
@@ -124,10 +121,8 @@ void saveFloatImage(const std::string& filename, int w, int h, const float* data
             }
             if (v < 0.0f) v = 0.0f;
             if (v > 1.0f) v = 1.0f;
-            // Gamma correct back to sRGB for saving
             bytes[i+c] = (unsigned char)(powf(v, 1.0f / 2.2f) * 255.0f);
         }
-        // Force Alpha to 255 (Opaque)
         bytes[i+3] = 255; 
     }
     
@@ -285,7 +280,6 @@ int main() {
     VkCommandBuffer cmd;
     vkAllocateCommandBuffers(device, &allocInfo, &cmd);
 
-    // --- ABLATION BASELINES ---
     std::cout << "Rendering Native_1x.png (320x240)..." << std::endl;
     std::vector<float> native1x(renderW * renderH * 4);
     std::vector<float> depth1x(renderW * renderH);
@@ -298,7 +292,6 @@ int main() {
     renderScene(displayW, displayH, 0.0f, 0.0f, native2x.data(), depth2x.data());
     saveFloatImage("Native_2x.png", displayW, displayH, native2x.data());
 
-    // --- ALLOCATE VRAM BUFFERS ---
     VkDeviceSize uploadSize = (renderW * renderH * 4 * sizeof(float)) + (renderW * renderH * sizeof(float));
     VkBuffer uploadBuffer; VkDeviceMemory uploadMemory;
     createBuffer(device, physicalDevice, uploadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, uploadBuffer, uploadMemory);
@@ -315,7 +308,6 @@ int main() {
     VkImageCreateInfo mvInfo = createImage(device, physicalDevice, renderW, renderH, VK_FORMAT_R32G32_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, mvImage, mvMem);
     VkImageCreateInfo outputInfo = createImage(device, physicalDevice, displayW, displayH, VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, outputImage, outputMem);
 
-    // 1-CHANNEL R32 EXPOSURE TEXTURE
     VkImage expImage; VkDeviceMemory expImageMem;
     VkImageCreateInfo expInfo = createImage(device, physicalDevice, 1, 1, VK_FORMAT_R32_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, expImage, expImageMem);
 
@@ -422,7 +414,10 @@ int main() {
 
     FfxFsr2ContextDescription fsr2Desc = {};
     memset(&fsr2Desc, 0, sizeof(FfxFsr2ContextDescription));
-    fsr2Desc.flags = FFX_FSR2_ENABLE_DEBUG_CHECKING | FFX_FSR2_ENABLE_DEPTH_INVERTED | FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE | FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION; 
+    
+    // CRITICAL FIX: Removed Jitter Cancellation because our MVs are perfectly 0.0f
+    fsr2Desc.flags = FFX_FSR2_ENABLE_DEBUG_CHECKING | FFX_FSR2_ENABLE_DEPTH_INVERTED | FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE; 
+    
     fsr2Desc.maxRenderSize = { (uint32_t)renderW, (uint32_t)renderH };
     fsr2Desc.displaySize = { displayW, displayH };
     fsr2Desc.fpMessage = FfxMessageCallback;
@@ -458,7 +453,6 @@ int main() {
         vkResetCommandBuffer(cmd, 0);
         vkBeginCommandBuffer(cmd, &beginInfo);
 
-        // Transition ALL inputs
         transition(cmd, colorImage, colorLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
         transition(cmd, depthImage, depthLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
         transition(cmd, mvImage, mvLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
@@ -468,7 +462,6 @@ int main() {
             transition(cmd, outputImage, outputLayout, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
         }
 
-        // Upload Data
         VkBufferImageCopy cRegion2 = {};
         cRegion2.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         cRegion2.imageSubresource.layerCount = 1;
@@ -482,7 +475,6 @@ int main() {
         dRegion.imageExtent = { (uint32_t)renderW, (uint32_t)renderH, 1 };
         vkCmdCopyBufferToImage(cmd, uploadBuffer, depthImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &dRegion);
 
-        // Clear MV and Exposure directly on GPU (bypasses upload alignment bugs!)
         VkClearColorValue mvClear = {{0.0f, 0.0f, 0.0f, 0.0f}};
         VkImageSubresourceRange colorRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         vkCmdClearColorImage(cmd, mvImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &mvClear, 1, &colorRange);
@@ -490,7 +482,6 @@ int main() {
         VkClearColorValue expClear = {{1.0f, 0.0f, 0.0f, 0.0f}};
         vkCmdClearColorImage(cmd, expImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &expClear, 1, &colorRange);
 
-        // Transition back to Shader Read for FSR
         transition(cmd, colorImage, colorLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
         transition(cmd, depthImage, depthLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
         transition(cmd, mvImage, mvLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
@@ -509,8 +500,11 @@ int main() {
         dispatchDesc.motionVectorScale.x = (float)renderW; 
         dispatchDesc.motionVectorScale.y = (float)renderH;
         dispatchDesc.renderSize = { (uint32_t)renderW, (uint32_t)renderH };
-        dispatchDesc.enableSharpening = true;
-        dispatchDesc.sharpness = 0.2f;
+        
+        // CRITICAL FIX: Disabled RCAS completely to isolate the true output of the Temporal Accumulator!
+        dispatchDesc.enableSharpening = false;
+        dispatchDesc.sharpness = 0.0f;
+        
         dispatchDesc.frameTimeDelta = 16.6f;
         dispatchDesc.preExposure = 1.0f;
         dispatchDesc.reset = (i == 0); 
