@@ -52,7 +52,6 @@ if(NOT ffx_sdk_POPULATED)
     endif()
     FetchContent_Populate(ffx_sdk)
     
-    # --- DO PATCHES BEFORE ADD_SUBDIRECTORY SO GITHUB ACTIONS SEES THEM ---
     file(GLOB_RECURSE ffx_source_files "${ffx_sdk_SOURCE_DIR}/sdk/src/*.cpp" "${ffx_sdk_SOURCE_DIR}/sdk/src/*.h")
     foreach(ffx_file IN LISTS ffx_source_files)
         file(READ ${ffx_file} file_contents)
