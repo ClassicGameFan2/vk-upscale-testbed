@@ -71,11 +71,11 @@ if(NOT ffx_sdk_POPULATED)
     string(REPLACE "if (requestedProperties == VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT && (memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))" "if (false)" vk_backend_code "${vk_backend_code}")
     string(REPLACE "if (devCaps.dedicatedAllocationSupported)" "if (false)" vk_backend_code "${vk_backend_code}")
     
-    # FIX 1: PURE 32-BIT FLOAT MATH (Cures the Black and White YCoCg Bug!)
-    string(REPLACE "deviceCapabilities->fp16Supported = (bool)shaderFloat18Int8Features.shaderFloat16;" "deviceCapabilities->fp16Supported = false;" vk_backend_code "${vk_backend_code}")
+    # FIX 1: PURE 32-BIT FLOAT MATH (Typo Fixed: shaderFloat16Int8Features)
+    string(REPLACE "deviceCapabilities->fp16Supported = (bool)shaderFloat16Int8Features.shaderFloat16;" "deviceCapabilities->fp16Supported = false;" vk_backend_code "${vk_backend_code}")
     file(WRITE "${ffx_sdk_SOURCE_DIR}/sdk/src/backends/vk/ffx_vk.cpp" "${vk_backend_code}")
 
-    # FIX 2: HISTORY BUFFER WRITE FIX (Cures the Dark Silhouette Bug!)
+    # FIX 2: HISTORY BUFFER WRITE FIX
     file(READ "${ffx_sdk_SOURCE_DIR}/sdk/src/components/fsr2/ffx_fsr2.cpp" fsr2_code)
     string(REPLACE "FFX_SURFACE_FORMAT_R11G11B10_FLOAT" "FFX_SURFACE_FORMAT_R16G16B16A16_FLOAT" fsr2_code "${fsr2_code}")
     file(WRITE "${ffx_sdk_SOURCE_DIR}/sdk/src/components/fsr2/ffx_fsr2.cpp" "${fsr2_code}")
