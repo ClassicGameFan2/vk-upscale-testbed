@@ -28,7 +28,14 @@ FfxErrorCode CustomGetDeviceCapabilities(FfxInterface* backendInterface, FfxDevi
     return code;
 }
 
-FfxErrorCode CustomCreateResource(FfxInterface* backendInterface, const FfxCreateResourceDescription* desc, FfxResourceInternal* outTexture) {
+// SDK v1.1.4 requires the 5-argument signature for multi-effect contexts
+FfxErrorCode CustomCreateResource(
+    FfxInterface* backendInterface, 
+    const FfxCreateResourceDescription* desc, 
+    FfxEffect effect, 
+    FfxEffectInstanceId effectContextId, 
+    FfxResourceInternal* outTexture) 
+{
     FfxCreateResourceDescription modifiedDesc = *desc;
     // KILL-SWITCH FOR SWIFTSHADER R11G11B10 UAV DROP BUG
     if (modifiedDesc.resourceDescription.format == FFX_SURFACE_FORMAT_R11G11B10_FLOAT) {
@@ -36,7 +43,7 @@ FfxErrorCode CustomCreateResource(FfxInterface* backendInterface, const FfxCreat
         std::cout << "[Trace-VK] Intercepted fpCreateResource! Upgraded R11G11B10 to R16G16B16A16\n";
         std::cout.flush();
     }
-    return g_original_fpCreateResource(backendInterface, &modifiedDesc, outTexture);
+    return g_original_fpCreateResource(backendInterface, &modifiedDesc, effect, effectContextId, outTexture);
 }
 // =========================================================================
 
