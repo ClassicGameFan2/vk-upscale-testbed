@@ -73,6 +73,11 @@ if(NOT ffx_sdk_POPULATED)
     string(PREPEND vk_backend_code "#include <stdio.h>\n")
     string(REPLACE "if (backendContext->vkFunctionTable.vkCreateDescriptorPool" "printf(\" [Trace-VK] vkCreateDescriptorPool...\\n\"); fflush(stdout); if (backendContext->vkFunctionTable.vkCreateDescriptorPool" vk_backend_code "${vk_backend_code}")
     string(REPLACE "if (backendContext->vkFunctionTable.vkCreateBuffer" "printf(\" [Trace-VK] vkCreateBuffer...\\n\"); fflush(stdout); if (backendContext->vkFunctionTable.vkCreateBuffer" vk_backend_code "${vk_backend_code}")
+    
+    # --- CRITICAL FP16 MATH BYPASS ---
+    # Forces AMD to compile FSR 2 in Pure 32-Bit Float Mode, bypassing SwiftShader's math bugs!
+    string(REPLACE "return FFX_OK;" "deviceCapabilities->fp16Supported = false; return FFX_OK;" vk_backend_code "${vk_backend_code}")
+    
     file(WRITE "${ffx_sdk_SOURCE_DIR}/sdk/src/backends/vk/ffx_vk.cpp" "${vk_backend_code}")
 
     # DEEP FSR1 TRACER
