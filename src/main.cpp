@@ -18,8 +18,8 @@
 static FfxGetDeviceCapabilitiesFunc g_original_fpGetDeviceCapabilities = nullptr;
 static FfxCreateResourceFunc g_original_fpCreateResource = nullptr;
 
-FfxErrorCode CustomGetDeviceCapabilities(FfxInterface* backendInterface, FfxDeviceCapabilities* outDeviceCapabilities) {
-    FfxErrorCode code = g_original_fpGetDeviceCapabilities(backendInterface, outDeviceCapabilities);
+FfxErrorCode CustomGetDeviceCapabilities(FfxInterface* backendInterface, FfxDeviceCapabilities* outDeviceCapabilities, FfxDevice device) {
+    FfxErrorCode code = g_original_fpGetDeviceCapabilities(backendInterface, outDeviceCapabilities, device);
     if (code == FFX_OK) {
         outDeviceCapabilities->fp16Supported = false; // KILL-SWITCH FOR SWIFTSHADER FP16 BUG
         std::cout << "[Trace-VK] Intercepted fpGetDeviceCapabilities! Forced fp16Supported = false\n";
@@ -28,12 +28,12 @@ FfxErrorCode CustomGetDeviceCapabilities(FfxInterface* backendInterface, FfxDevi
     return code;
 }
 
-// SDK v1.1.4 requires the 5-argument signature for multi-effect contexts
+// SDK v1.1.4 requires the 5-argument signature for unified multi-effect contexts
 FfxErrorCode CustomCreateResource(
     FfxInterface* backendInterface, 
     const FfxCreateResourceDescription* desc, 
     FfxEffect effect, 
-    FfxEffectInstanceId effectContextId, 
+    FfxUInt32* effectContextId, 
     FfxResourceInternal* outTexture) 
 {
     FfxCreateResourceDescription modifiedDesc = *desc;
