@@ -12,6 +12,32 @@
 
 #include "stb_image_write.h"
 
+// =========================================================================
+// AMD SDK C++ INTERCEPTORS (Guaranteed to bypass SwiftShader Emulator Bugs!)
+// =========================================================================
+static FfxGetDeviceCapabilitiesFunc g_original_fpGetDeviceCapabilities = nullptr;
+static FfxCreateResourceFunc g_original_fpCreateResource = nullptr;
+
+FfxErrorCode CustomGetDeviceCapabilities(FfxDeviceCapabilities* outDeviceCapabilities, FfxDevice device) {
+    FfxErrorCode code = g_original_fpGetDeviceCapabilities(outDeviceCapabilities, device);
+    if (code == FFX_OK) {
+        outDeviceCapabilities->fp16Supported = false; // KILL-SWITCH FOR SWIFTSHADER FP16 BUG
+        std::cout << "[Trace-VK] Intercepted fpGetDeviceCapabilities! Forced fp16Supported = false\n";
+    }
+    return code;
+}
+
+FfxErrorCode CustomCreateResource(const FfxCreateResourceDescription* desc, FfxResourceInternal* outTexture) {
+    FfxCreateResourceDescription modifiedDesc = *desc;
+    // KILL-SWITCH FOR SWIFTSHADER R11G11B10 UAV DROP BUG
+    if (modifiedDesc.resourceDescription.format == FFX_SURFACE_FORMAT_R11G11B10_FLOAT) {
+        modifiedDesc.resourceDescription.format = FFX_SURFACE_FORMAT_R16G16B16A16_FLOAT;
+        std::cout << "[Trace-VK] Intercepted fpCreateResource! Upgraded R11G11B10 to R16G16B16A16\n";
+    }
+    return g_original_fpCreateResource(&modifiedDesc, outTexture);
+}
+// =========================================================================
+
 static void AssertCallback(const char* message) {
     std::cout << "\n[AMD SDK ASSERTION FAILED] " << message << std::endl;
 }
@@ -54,7 +80,6 @@ void renderScene(int w, int h, float jx, float jy, float* colorOut, float* depth
             rd[0]/=len; rd[1]/=len; rd[2]/=len;
 
             float hitZ = -1.0f;
-            
             float r = powf(135.0f/255.0f, 2.2f), g = powf(206.0f/255.0f, 2.2f), b = powf(235.0f/255.0f, 2.2f);
 
             float oc[3] = {ro[0] - 0.0f, ro[1] - 1.0f, ro[2] - 4.0f};
@@ -412,10 +437,17 @@ int main() {
     FfxInterface ffxInterface2 = {};
     if (ffxGetInterfaceVK(&ffxInterface2, ffxGetDeviceVK(&vkDeviceContext), scratchBuffer, safeBufferSize, 4) != FFX_OK) return 1;
 
+    // --- APPLY OUR C++ INTERCEPTORS HERE ---
+    g_original_fpGetDeviceCapabilities = ffxInterface2.fpGetDeviceCapabilities;
+    ffxInterface2.fpGetDeviceCapabilities = CustomGetDeviceCapabilities;
+
+    g_original_fpCreateResource = ffxInterface2.fpCreateResource;
+    ffxInterface2.fpCreateResource = CustomCreateResource;
+    // ---------------------------------------
+
     FfxFsr2ContextDescription fsr2Desc = {};
     memset(&fsr2Desc, 0, sizeof(FfxFsr2ContextDescription));
     
-    // CRITICAL FIX: Removed Jitter Cancellation because our MVs are perfectly 0.0f
     fsr2Desc.flags = FFX_FSR2_ENABLE_DEBUG_CHECKING | FFX_FSR2_ENABLE_DEPTH_INVERTED | FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE; 
     
     fsr2Desc.maxRenderSize = { (uint32_t)renderW, (uint32_t)renderH };
@@ -501,8 +533,7 @@ int main() {
         dispatchDesc.motionVectorScale.y = (float)renderH;
         dispatchDesc.renderSize = { (uint32_t)renderW, (uint32_t)renderH };
         
-        // CRITICAL FIX: Disabled RCAS completely to isolate the true output of the Temporal Accumulator!
-        dispatchDesc.enableSharpening = false;
+        dispatchDesc.enableSharpening = false; // Kept off per your request
         dispatchDesc.sharpness = 0.0f;
         
         dispatchDesc.frameTimeDelta = 16.6f;
