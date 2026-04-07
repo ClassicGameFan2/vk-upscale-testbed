@@ -316,18 +316,18 @@ int main() {
     VkImageCreateInfo outputInfo = createImage(device, physicalDevice, displayW, displayH, VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, outputImage, outputMem);
 
     // --- MANUAL NEUTRAL EXPOSURE TEXTURE ---
-    // FSR 2 requires R32G32 float format for exposure (as it stores previous and current exposure)
+    // CRITICAL FIX: FSR 2 requires specifically a 1-channel R32_FLOAT for exposure!
     VkBuffer expUploadBuffer; VkDeviceMemory expUploadMemory;
-    createBuffer(device, physicalDevice, sizeof(float) * 2, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, expUploadBuffer, expUploadMemory);
+    createBuffer(device, physicalDevice, sizeof(float), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, expUploadBuffer, expUploadMemory);
     
     void* expMapped;
-    vkMapMemory(device, expUploadMemory, 0, sizeof(float) * 2, 0, &expMapped);
-    float expVal[2] = { 1.0f, 1.0f }; // Perfect, neutral exposure for both current and previous frames
-    memcpy(expMapped, expVal, sizeof(float) * 2);
+    vkMapMemory(device, expUploadMemory, 0, sizeof(float), 0, &expMapped);
+    float expVal[1] = { 1.0f }; // Perfect, neutral exposure
+    memcpy(expMapped, expVal, sizeof(float));
     vkUnmapMemory(device, expUploadMemory);
 
     VkImage expImage; VkDeviceMemory expImageMem;
-    VkImageCreateInfo expInfo = createImage(device, physicalDevice, 1, 1, VK_FORMAT_R32G32_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, expImage, expImageMem);
+    VkImageCreateInfo expInfo = createImage(device, physicalDevice, 1, 1, VK_FORMAT_R32_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, expImage, expImageMem);
 
     VkDeviceContext vkDeviceContext = { device, physicalDevice, vkGetDeviceProcAddr };
     std::cout << "\n[Trace] Allocating Backend Scratch Memory..." << std::flush;
