@@ -48,11 +48,7 @@ FetchContent_Declare(ffx_sdk_v2
 )
 FetchContent_GetProperties(ffx_sdk_v2)
 
-# =============================================================================
-# FORCE RE-PATCH EVERY CMAKE RUN
-# Delete the FetchContent stamp file so our patch block always executes.
-# This prevents the cache from silently skipping our patches.
-# =============================================================================
+# Force re-patch every CMake run
 set(FFX_STAMP_FILE
     "${CMAKE_BINARY_DIR}/_deps/ffx_sdk_v2-subbuild/ffx_sdk_v2-populate-prefix/src/ffx_sdk_v2-populate-stamp/ffx_sdk_v2-populate-done"
 )
@@ -67,10 +63,7 @@ if(NOT ffx_sdk_v2_POPULATED)
     endif()
     FetchContent_Populate(ffx_sdk_v2)
 
-    # =========================================================================
-    # WIN7 COMPAT SCRUBBER
-    # Remove SetThreadDescription calls that don't exist on Windows 7
-    # =========================================================================
+    # Win7 Compat Scrubber
     file(GLOB_RECURSE ffx_source_files
         "${ffx_sdk_v2_SOURCE_DIR}/sdk/src/*.cpp"
         "${ffx_sdk_v2_SOURCE_DIR}/sdk/src/*.h"
@@ -88,150 +81,69 @@ if(NOT ffx_sdk_v2_POPULATED)
         endif()
     endforeach()
 
-    # =========================================================================
-    # PATCH: ffx_vk.cpp
-    # We apply three surgical patches to this single file.
-    # =========================================================================
     set(VK_BACKEND_FILE
         "${ffx_sdk_v2_SOURCE_DIR}/sdk/src/backends/vk/ffx_vk.cpp"
     )
     file(READ "${VK_BACKEND_FILE}" vk_code)
 
-    # -------------------------------------------------------------------------
-    # PATCH A: SwiftShader Memory Allocator Fix #1
-    # Disable the device-local memory preference that confuses SwiftShader.
-    # Search string is SHORT and UNIQUE - will not fail on whitespace.
-    # -------------------------------------------------------------------------
+    # Patch A
     set(PATCH_A_SEARCH
         "if (requestedProperties == VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT && (memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))"
     )
-    set(PATCH_A_REPLACE
-        "if (false) /* [SwiftShader-Fix-A] Device-local memory patch */"
-    )
     string(FIND "${vk_code}" "${PATCH_A_SEARCH}" PATCH_A_POS)
     if(PATCH_A_POS EQUAL -1)
-        message(STATUS
-            "[Patch-A] Search string not found - may already be patched, continuing."
-        )
+        message(STATUS "[Patch-A] Already patched or not found, skipping.")
     else()
-        string(REPLACE "${PATCH_A_SEARCH}" "${PATCH_A_REPLACE}" vk_code "${vk_code}")
-        message(STATUS "[Patch-A] SwiftShader memory fix #1 applied OK.")
+        string(REPLACE "${PATCH_A_SEARCH}"
+            "if (false) /* [SwiftShader-Fix-A] */"
+            vk_code "${vk_code}")
+        message(STATUS "[Patch-A] Applied OK.")
     endif()
 
-    # -------------------------------------------------------------------------
-    # PATCH B: SwiftShader Memory Allocator Fix #2
-    # Disable dedicated allocation that SwiftShader does not support properly.
-    # -------------------------------------------------------------------------
+    # Patch B
     set(PATCH_B_SEARCH
         "if (devCaps.dedicatedAllocationSupported)"
     )
-    set(PATCH_B_REPLACE
-        "if (false) /* [SwiftShader-Fix-B] Dedicated alloc patch */"
-    )
     string(FIND "${vk_code}" "${PATCH_B_SEARCH}" PATCH_B_POS)
     if(PATCH_B_POS EQUAL -1)
-        message(STATUS
-            "[Patch-B] Search string not found - may already be patched, continuing."
-        )
+        message(STATUS "[Patch-B] Already patched or not found, skipping.")
     else()
-        string(REPLACE "${PATCH_B_SEARCH}" "${PATCH_B_REPLACE}" vk_code "${vk_code}")
-        message(STATUS "[Patch-B] SwiftShader memory fix #2 applied OK.")
+        string(REPLACE "${PATCH_B_SEARCH}"
+            "if (false) /* [SwiftShader-Fix-B] */"
+            vk_code "${vk_code}")
+        message(STATUS "[Patch-B] Applied OK.")
     endif()
 
-    # -------------------------------------------------------------------------
-    # PATCH C: FP16 KILL SWITCH  <-- THIS IS THE KEY FIX FOR DARK SILHOUETTE
-    # Force fp16Supported = false so FSR2 uses pure FP32 math throughout.
-    # SwiftShader corrupts negative FP16 numbers (YCoCg color space needs them).
-    # Search string targets ONLY the assignment line - short and unique.
-    # -------------------------------------------------------------------------
-    set(PATCH_C_SEARCH
-        "deviceCapabilities->fp16Supported = true;"
-    )
-    set(PATCH_C_REPLACE
-        "deviceCapabilities->fp16Supported = false; /* [SwiftShader-Fix-C] FP16 kill switch */"
-    )
-    string(FIND "${vk_code}" "${PATCH_C_SEARCH}" PATCH_C_POS)
-    if(PATCH_C_POS EQUAL -1)
-        # Try alternate form in case SDK uses a different assignment
-        set(PATCH_C_SEARCH_ALT
-            "fp16Supported = true;"
-        )
-        string(FIND "${vk_code}" "${PATCH_C_SEARCH_ALT}" PATCH_C_ALT_POS)
-        if(PATCH_C_ALT_POS EQUAL -1)
-            message(FATAL_ERROR
-                "[Patch-C] CRITICAL FAILURE: FP16 kill switch search string not found!\n"
-                "The file '${VK_BACKEND_FILE}' does not contain the expected FP16 assignment.\n"
-                "Please check the SDK source and update PATCH_C_SEARCH in CMakeLists.txt.\n"
-                "Build CANNOT continue - FSR2 colors will be destroyed on SwiftShader!"
-            )
-        else()
-            string(REPLACE
-                "${PATCH_C_SEARCH_ALT}"
-                "fp16Supported = false; /* [SwiftShader-Fix-C-alt] FP16 kill switch */"
-                vk_code "${vk_code}"
-            )
-            message(STATUS "[Patch-C] FP16 kill switch applied via ALT search string OK.")
+    # =========================================================================
+    # DIAGNOSTIC: Print every line containing "fp16" from ffx_vk.cpp
+    # This tells us the EXACT text we need to search for Patch-C
+    # =========================================================================
+    message(STATUS "=== FP16 DIAGNOSTIC: Searching ffx_vk.cpp for fp16 ===")
+    string(REPLACE "\n" ";" vk_lines "${vk_code}")
+    set(line_num 0)
+    foreach(line IN LISTS vk_lines)
+        math(EXPR line_num "${line_num} + 1")
+        string(TOLOWER "${line}" line_lower)
+        if(line_lower MATCHES "fp16")
+            message(STATUS "  LINE ${line_num}: ${line}")
         endif()
-    else()
-        string(REPLACE "${PATCH_C_SEARCH}" "${PATCH_C_REPLACE}" vk_code "${vk_code}")
-        message(STATUS "[Patch-C] FP16 kill switch applied OK. FSR2 will use FP32 math.")
-    endif()
+    endforeach()
+    message(STATUS "=== END FP16 DIAGNOSTIC ===")
 
-    # -------------------------------------------------------------------------
-    # PATCH D: B10G11R11 FORMAT OVERRIDE
-    # SwiftShader cannot write UAVs in B10G11R11 format - silently drops them.
-    # We redirect to R16G16B16A16_SFLOAT which SwiftShader handles correctly.
-    # Search string is the Vulkan format enum - SHORT and UNIQUE in this context.
-    # -------------------------------------------------------------------------
-    set(PATCH_D_SEARCH
-        "VK_FORMAT_B10G11R11_UFLOAT_PACK32"
-    )
-    set(PATCH_D_REPLACE
-        "VK_FORMAT_R16G16B16A16_SFLOAT /* [SwiftShader-Fix-D] B10G11R11 override */"
-    )
+    # Patch D (B10G11R11 format - we know this one works)
+    set(PATCH_D_SEARCH "VK_FORMAT_B10G11R11_UFLOAT_PACK32")
     string(FIND "${vk_code}" "${PATCH_D_SEARCH}" PATCH_D_POS)
     if(PATCH_D_POS EQUAL -1)
-        message(STATUS
-            "[Patch-D] B10G11R11 search string not found - may already be patched, continuing."
-        )
+        message(STATUS "[Patch-D] Already patched or not found, skipping.")
     else()
-        string(REPLACE "${PATCH_D_SEARCH}" "${PATCH_D_REPLACE}" vk_code "${vk_code}")
-        message(STATUS "[Patch-D] B10G11R11->R16G16B16A16 format override applied OK.")
+        string(REPLACE "${PATCH_D_SEARCH}"
+            "VK_FORMAT_R16G16B16A16_SFLOAT /* [SwiftShader-Fix-D] */"
+            vk_code "${vk_code}")
+        message(STATUS "[Patch-D] B10G11R11->R16G16B16A16 applied OK.")
     endif()
 
-    # -------------------------------------------------------------------------
-    # Write all four patches back to the file in one operation
-    # -------------------------------------------------------------------------
     file(WRITE "${VK_BACKEND_FILE}" "${vk_code}")
-    message(STATUS "[Patch] All patches written to ffx_vk.cpp successfully.")
-
-    # =========================================================================
-    # VERIFICATION STEP
-    # Read the file back and verify each patch is actually present.
-    # This catches any silent write failures.
-    # =========================================================================
-    file(READ "${VK_BACKEND_FILE}" vk_code_verify)
-
-    string(FIND "${vk_code_verify}" "SwiftShader-Fix-C" VERIFY_C_POS)
-    if(VERIFY_C_POS EQUAL -1)
-        message(FATAL_ERROR
-            "[VERIFY FAILED] FP16 kill switch (Patch-C) is NOT present in the written file!\n"
-            "This is a critical error - FSR2 will produce corrupted colors on SwiftShader.\n"
-            "Please check file write permissions for: ${VK_BACKEND_FILE}"
-        )
-    else()
-        message(STATUS "[VERIFY] Patch-C (FP16 kill switch) confirmed present in file. OK!")
-    endif()
-
-    string(FIND "${vk_code_verify}" "SwiftShader-Fix-D" VERIFY_D_POS)
-    if(VERIFY_D_POS EQUAL -1)
-        message(STATUS
-            "[VERIFY] Warning: Patch-D (B10G11R11 override) marker not found."
-            " This may be OK if the format was not present in the SDK."
-        )
-    else()
-        message(STATUS "[VERIFY] Patch-D (B10G11R11 override) confirmed present in file. OK!")
-    endif()
+    message(STATUS "[Patch] Written to ffx_vk.cpp.")
 
     add_subdirectory(${ffx_sdk_v2_SOURCE_DIR}/sdk ${ffx_sdk_v2_BINARY_DIR}/sdk)
 endif()
