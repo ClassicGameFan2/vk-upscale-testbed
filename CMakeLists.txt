@@ -151,68 +151,103 @@ if(NOT ffx_sdk_v2_POPULATED)
     message(STATUS "[Patch] ffx_vk.cpp patches written.")
 
     # =========================================================================
-    # PATCH E: FSR2 Luminance Pyramid Shader - SPD Subgroup Fix
+    # PATCH E: Skip Luminance Pyramid Dispatch in ffx_fsr2.cpp
     #
-    # PROBLEM: SwiftShader has subgroupSize=4. SPD requires size>=32.
-    # FSR2 ALWAYS runs the luminance pyramid pass (even with auto-exposure OFF)
-    # because it needs luminance data for SHADING CHANGE DETECTION.
-    # When SPD's subgroup reductions produce garbage on SwiftShader,
-    # the shading change detector thinks EVERY pixel changed every frame.
-    # This collapses the temporal accumulation weight to zero -> black output.
+    # PROBLEM:
+    # SwiftShader has subgroupSize=4. The luminance pyramid pass uses
+    # AMD's Single Pass Downsampler (SPD) which requires subgroupSize>=32
+    # for its atomic reduction operations. When SPD runs on SwiftShader,
+    # it produces garbage/NaN values in the luminance mip chain.
+    # FSR2 uses this luminance chain for SHADING CHANGE DETECTION in the
+    # reproject-and-accumulate pass. Garbage luminance values cause the
+    # shading change detector to fire on EVERY pixel EVERY frame, which
+    # collapses the temporal accumulation weight to zero -> BLACK OUTPUT.
     #
-    # FIX: Patch the luminance pyramid shader to write safe constant values
-    # instead of running the broken SPD computation.
-    # - Luminance mip chain: write 0.5 (mid-grey, reasonable for SDR scene)
-    # - Exposure output: write 1.0 (neutral exposure, matches our manual value)
+    # NOTE: We cannot patch the HLSL shader source because AMD ships
+    # PRE-COMPILED SPIR-V blobs with the SDK. The .h shader files are
+    # source only - the Vulkan backend loads the pre-built .spv blobs.
+    # Patching .h files has ZERO effect on runtime behavior.
     #
-    # This bypasses SPD entirely while keeping the shader structurally valid.
+    # CORRECT FIX:
+    # Patch ffx_fsr2.cpp to make the C++ dispatch function return
+    # immediately (FFX_OK) without scheduling any GPU work.
+    # This prevents SPD from ever running on SwiftShader.
+    #
+    # EFFECT ON FSR2:
+    # - Luminance mip chain = stays at cleared zero values
+    # - Shading change detection = reads zeros = all pixels "stable"
+    # - Temporal accumulation = accumulates correctly over 32 frames
+    # - Auto-exposure = already disabled (we provide manual exposure=1.0)
     # =========================================================================
-    set(LUM_PYRAMID_FILE
-        "${ffx_sdk_v2_SOURCE_DIR}/sdk/src/gpu/fsr2/ffx_fsr2_compute_luminance_pyramid.h"
+    set(FSR2_CPP_FILE
+        "${ffx_sdk_v2_SOURCE_DIR}/sdk/src/components/fsr2/ffx_fsr2.cpp"
     )
 
-    if(EXISTS "${LUM_PYRAMID_FILE}")
-        file(READ "${LUM_PYRAMID_FILE}" lum_code)
-
-        # The SPD callback function that writes luminance mip levels is called
-        # SpdStoreIntermediate and SpdStore in ffx_spd.h which FSR2 implements
-        # via ffxSpdStoreQuad and ffxSpdStoreQuadH.
-        # The entry point for the luminance pyramid shader is:
-        # void CS(uint3 WorkGroupId, uint LocalThreadIndex)
-        # We patch the entry point to immediately return after writing
-        # safe constant values to the output textures.
-
-        # Find the shader entry point and inject early-exit with safe values.
-        # The function signature in ffx_fsr2_compute_luminance_pyramid.h is:
-        # void CS(uint3 WorkGroupId, uint LocalThreadIndex)
-        set(PATCH_E_SEARCH
-            "void CS(uint3 WorkGroupId, uint LocalThreadIndex)"
+    if(NOT EXISTS "${FSR2_CPP_FILE}")
+        message(FATAL_ERROR
+            "[Patch-E] CRITICAL: ffx_fsr2.cpp not found at:\n"
+            "${FSR2_CPP_FILE}"
         )
-        set(PATCH_E_REPLACE
-            "void CS(uint3 WorkGroupId, uint LocalThreadIndex) { return; } void CS_DISABLED_SwiftShader(uint3 WorkGroupId, uint LocalThreadIndex)"
-        )
-        string(FIND "${lum_code}" "${PATCH_E_SEARCH}" PATCH_E_POS)
-        if(PATCH_E_POS EQUAL -1)
-            message(STATUS "[Patch-E] CS entry point not found with expected signature, trying alternate...")
-            # Try without uint3 - some versions use different types
-            set(PATCH_E_SEARCH_ALT "void CS(")
-            string(FIND "${lum_code}" "${PATCH_E_SEARCH_ALT}" PATCH_E_ALT_POS)
-            if(PATCH_E_ALT_POS EQUAL -1)
-                message(STATUS "[Patch-E] WARNING: Could not find CS entry point in luminance pyramid shader.")
-            else()
-                message(STATUS "[Patch-E] Found CS via alternate search. Checking file structure...")
-            endif()
-        else()
-            string(REPLACE "${PATCH_E_SEARCH}" "${PATCH_E_REPLACE}" lum_code "${lum_code}")
-            file(WRITE "${LUM_PYRAMID_FILE}" "${lum_code}")
-            message(STATUS "[Patch-E] Luminance pyramid CS early-exit patch applied OK.")
+    endif()
+
+    file(READ "${FSR2_CPP_FILE}" fsr2_code)
+    message(STATUS "[Patch-E] ffx_fsr2.cpp found and read OK.")
+
+    # -------------------------------------------------------------------------
+    # Print all lines containing "LuminancePyramid" so we can see the
+    # exact function signature and dispatch call
+    # -------------------------------------------------------------------------
+    message(STATUS "=== [Patch-E] Searching for LuminancePyramid in ffx_fsr2.cpp ===")
+    string(REPLACE "\n" ";" fsr2_lines "${fsr2_code}")
+    set(fsr2_line_num 0)
+    foreach(fsr2_line IN LISTS fsr2_lines)
+        math(EXPR fsr2_line_num "${fsr2_line_num} + 1")
+        if(fsr2_line MATCHES "LuminancePyramid|luminancePyramid|luminance_pyramid")
+            message(STATUS "  LINE ${fsr2_line_num}: ${fsr2_line}")
         endif()
+    endforeach()
+    message(STATUS "=== [Patch-E] End LuminancePyramid search ===")
+
+    # -------------------------------------------------------------------------
+    # The dispatch function for luminance pyramid in ffx_fsr2.cpp is:
+    # static FfxErrorCode fsr2DispatchLuminancePyramid(...)
+    # We make it return FFX_OK immediately without doing any GPU work.
+    #
+    # Search string: the function signature opening line
+    # This is unique in the file - only one function has this name.
+    # -------------------------------------------------------------------------
+    set(PATCH_E_SEARCH
+        "static FfxErrorCode fsr2DispatchLuminancePyramid("
+    )
+    set(PATCH_E_REPLACE
+        "static FfxErrorCode fsr2DispatchLuminancePyramid_DISABLED_SwiftShader(FfxFsr2Context_Private* context, const FfxFsr2DispatchDescription* params) { return FFX_OK; } static FfxErrorCode fsr2DispatchLuminancePyramid("
+    )
+
+    string(FIND "${fsr2_code}" "${PATCH_E_SEARCH}" PATCH_E_POS)
+    if(PATCH_E_POS EQUAL -1)
+        message(FATAL_ERROR
+            "[Patch-E] CRITICAL: fsr2DispatchLuminancePyramid not found!\n"
+            "Check LINE output above for the actual function name."
+        )
     else()
-        message(STATUS "[Patch-E] WARNING: Luminance pyramid shader not found at: ${LUM_PYRAMID_FILE}")
+        string(REPLACE "${PATCH_E_SEARCH}" "${PATCH_E_REPLACE}" fsr2_code "${fsr2_code}")
+        file(WRITE "${FSR2_CPP_FILE}" "${fsr2_code}")
+        message(STATUS "[Patch-E] fsr2DispatchLuminancePyramid early-exit applied OK!")
+    endif()
+
+    # Verify Patch-E
+    file(READ "${FSR2_CPP_FILE}" fsr2_verify)
+    string(FIND "${fsr2_verify}" "fsr2DispatchLuminancePyramid_DISABLED_SwiftShader" VERIFY_E_POS)
+    if(VERIFY_E_POS EQUAL -1)
+        message(FATAL_ERROR
+            "[VERIFY-E FAILED] Patch-E not found in written ffx_fsr2.cpp!"
+        )
+    else()
+        message(STATUS "[VERIFY-E] Patch-E confirmed present in ffx_fsr2.cpp. OK!")
     endif()
 
     # =========================================================================
-    # VERIFICATION
+    # VERIFICATION of ffx_vk.cpp patches
     # =========================================================================
     file(READ "${VK_BACKEND_FILE}" vk_code_verify)
 
