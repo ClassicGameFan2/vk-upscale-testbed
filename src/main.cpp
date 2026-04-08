@@ -35,7 +35,7 @@ static uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFil
     return 0; 
 }
 
-// --- PROCEDURAL 3D RAYTRACER (HDR LINEAR FLOATS + INVERTED DEPTH) ---
+// --- PROCEDURAL 3D RAYTRACER (SDR sRGB FLOATS + INVERTED DEPTH) ---
 void renderScene(int w, int h, float jx, float jy, float* colorOut, float* depthOut) {
     float aspect = (float)w / (float)h;
     float fovY = 1.04719755f;
@@ -55,8 +55,10 @@ void renderScene(int w, int h, float jx, float jy, float* colorOut, float* depth
 
             float hitZ = -1.0f;
             
-            // Linear Sky Blue
-            float r = powf(135.0f/255.0f, 2.2f), g = powf(206.0f/255.0f, 2.2f), b = powf(235.0f/255.0f, 2.2f);
+            // Standard SDR Sky Blue (Linearized)
+            float r = powf(135.0f/255.0f, 2.2f);
+            float g = powf(206.0f/255.0f, 2.2f);
+            float b = powf(235.0f/255.0f, 2.2f);
 
             float oc[3] = {ro[0] - 0.0f, ro[1] - 1.0f, ro[2] - 4.0f};
             float b_dot = rd[0]*oc[0] + rd[1]*oc[1] + rd[2]*oc[2];
@@ -75,6 +77,8 @@ void renderScene(int w, int h, float jx, float jy, float* colorOut, float* depth
 
                     float light[3] = {0.577f, 0.577f, -0.577f};
                     float ndotl = fmax(0.2f, -(nx*light[0] + ny*light[1] + nz*light[2]));
+                    
+                    // SDR Shaded Sphere (Linearized)
                     r = powf(200.0f/255.0f, 2.2f) * ndotl;
                     g = powf(50.0f/255.0f, 2.2f) * ndotl;
                     b = powf(50.0f/255.0f, 2.2f) * ndotl;
@@ -123,7 +127,7 @@ void saveFloatImage(const std::string& filename, int w, int h, const float* data
             if (v < 0.0f) v = 0.0f;
             if (v > 1.0f) v = 1.0f;
             
-            // Re-apply correct gamma curve for HDR output visualization!
+            // Re-apply gamma correction so the SDR Linear floats display correctly
             bytes[i+c] = (unsigned char)(powf(v, 1.0f / 2.2f) * 255.0f);
         }
         bytes[i+3] = 255; 
@@ -208,7 +212,7 @@ void transition(VkCommandBuffer cmd, VkImage image, VkImageLayout& currentLayout
 }
 
 int main() {
-    std::cout << "--- FSR 3D Ablation Study (HDR Float Pipeline) ---" << std::endl;
+    std::cout << "--- FSR 3D Ablation Study (SDR Float Pipeline) ---" << std::endl;
     std::cout.flush();
 
     ffxAssertSetPrintingCallback(AssertCallback);
@@ -380,4 +384,178 @@ int main() {
     dispatchDesc1.commandList = ffxGetCommandListVK(cmd);
     dispatchDesc1.color = colorRes1;
     dispatchDesc1.output = outputRes1;
-    dispatchDesc1.renderSize = { (uint32_t)renderW, (uint32_t)renderH 
+    dispatchDesc1.renderSize = { (uint32_t)renderW, (uint32_t)renderH };
+    dispatchDesc1.enableSharpening = true;
+    dispatchDesc1.sharpness = 0.2f;
+    ffxFsr1ContextDispatch(fsr1Context, &dispatchDesc1);
+
+    transition(cmd, outputImage, outputLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+
+    VkBufferImageCopy outRegion = {};
+    outRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    outRegion.imageSubresource.layerCount = 1;
+    outRegion.imageExtent = { displayW, displayH, 1 };
+    vkCmdCopyImageToBuffer(cmd, outputImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, downloadBuffer, 1, &outRegion);
+
+    vkEndCommandBuffer(cmd);
+    vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
+    vkQueueWaitIdle(queue);
+
+    void* outData;
+    vkMapMemory(device, downloadMemory, 0, outSize, 0, &outData);
+    saveFloatImage("FSR_1.2_2x.png", displayW, displayH, (float*)outData);
+    vkUnmapMemory(device, downloadMemory);
+
+    ffxFsr1ContextDestroy(fsr1Context);
+    _aligned_free(fsr1Context);
+
+    // =========================================================================
+    // FSR 2.3.3 TEST
+    // =========================================================================
+    std::cout << "\n=== FSR 2.3.3 TEST ===" << std::endl; std::cout.flush();
+    std::cout << "Initializing FSR 2.3.3 Context..." << std::endl; std::cout.flush();
+    memset(scratchBuffer, 0, safeBufferSize);
+
+    FfxInterface ffxInterface2 = {};
+    if (ffxGetInterfaceVK(&ffxInterface2, ffxGetDeviceVK(&vkDeviceContext), scratchBuffer, safeBufferSize, 4) != FFX_OK) return 1;
+
+    FfxFsr2ContextDescription fsr2Desc = {};
+    memset(&fsr2Desc, 0, sizeof(FfxFsr2ContextDescription));
+    
+    // HDR IS OFF: FSR 2 is now in perfect SDR Mode!
+    fsr2Desc.flags = FFX_FSR2_ENABLE_DEBUG_CHECKING | FFX_FSR2_ENABLE_DEPTH_INVERTED; 
+    
+    fsr2Desc.maxRenderSize = { (uint32_t)renderW, (uint32_t)renderH };
+    fsr2Desc.displaySize = { displayW, displayH };
+    fsr2Desc.fpMessage = FfxMessageCallback;
+    fsr2Desc.backendInterface = ffxInterface2;
+
+    FfxFsr2Context* fsr2Context = (FfxFsr2Context*)_aligned_malloc(sizeof(FfxFsr2Context), 64);
+    memset(fsr2Context, 0, sizeof(FfxFsr2Context));
+    if (ffxFsr2ContextCreate(fsr2Context, &fsr2Desc) != FFX_OK) return 1;
+
+    FfxResource colorRes2 = ffxGetResourceVK(colorImage, ffxGetImageResourceDescriptionVK(colorImage, colorInfo, FFX_RESOURCE_USAGE_READ_ONLY), L"Color", FFX_RESOURCE_STATE_COMPUTE_READ);
+    FfxResource depthRes2 = ffxGetResourceVK(depthImage, ffxGetImageResourceDescriptionVK(depthImage, depthInfo, FFX_RESOURCE_USAGE_READ_ONLY), L"Depth", FFX_RESOURCE_STATE_COMPUTE_READ);
+    FfxResource mvRes2 = ffxGetResourceVK(mvImage, ffxGetImageResourceDescriptionVK(mvImage, mvInfo, FFX_RESOURCE_USAGE_READ_ONLY), L"MVs", FFX_RESOURCE_STATE_COMPUTE_READ);
+    FfxResource outputRes2 = ffxGetResourceVK(outputImage, ffxGetImageResourceDescriptionVK(outputImage, outputInfo, FFX_RESOURCE_USAGE_UAV), L"Output", FFX_RESOURCE_STATE_UNORDERED_ACCESS);
+    FfxResource expRes2 = ffxGetResourceVK(expImage, ffxGetImageResourceDescriptionVK(expImage, expInfo, FFX_RESOURCE_USAGE_READ_ONLY), L"Exposure", FFX_RESOURCE_STATE_COMPUTE_READ);
+
+    int32_t phaseCount = ffxFsr2GetJitterPhaseCount(renderW, displayW);
+
+    std::cout << "Executing FSR 2.3.3 Temporal Engine (32 Frames)..." << std::endl; std::cout.flush();
+
+    for (int i = 0; i < 32; i++) {
+        float jX = 0, jY = 0;
+        ffxFsr2GetJitterOffset(&jX, &jY, i, phaseCount);
+
+        std::vector<float> fColor(renderW * renderH * 4);
+        std::vector<float> fDepth(renderW * renderH);
+        renderScene(renderW, renderH, jX, jY, fColor.data(), fDepth.data());
+
+        vkMapMemory(device, uploadMemory, 0, uploadSize, 0, &mappedData);
+        memcpy(mappedData, fColor.data(), fColor.size() * sizeof(float));
+        memcpy((uint8_t*)mappedData + (fColor.size() * sizeof(float)), fDepth.data(), fDepth.size() * sizeof(float));
+        vkUnmapMemory(device, uploadMemory);
+
+        vkResetCommandBuffer(cmd, 0);
+        vkBeginCommandBuffer(cmd, &beginInfo);
+
+        transition(cmd, colorImage, colorLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+        transition(cmd, depthImage, depthLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+        transition(cmd, mvImage, mvLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+        transition(cmd, expImage, expLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+        
+        if (i == 0) {
+            transition(cmd, outputImage, outputLayout, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
+        }
+
+        VkBufferImageCopy cRegion2 = {};
+        cRegion2.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        cRegion2.imageSubresource.layerCount = 1;
+        cRegion2.imageExtent = { (uint32_t)renderW, (uint32_t)renderH, 1 };
+        vkCmdCopyBufferToImage(cmd, uploadBuffer, colorImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cRegion2);
+
+        VkBufferImageCopy dRegion = {};
+        dRegion.bufferOffset = fColor.size() * sizeof(float);
+        dRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        dRegion.imageSubresource.layerCount = 1;
+        dRegion.imageExtent = { (uint32_t)renderW, (uint32_t)renderH, 1 };
+        vkCmdCopyBufferToImage(cmd, uploadBuffer, depthImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &dRegion);
+
+        VkClearColorValue mvClear = {{0.0f, 0.0f, 0.0f, 0.0f}};
+        VkImageSubresourceRange colorRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCmdClearColorImage(cmd, mvImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &mvClear, 1, &colorRange);
+
+        VkClearColorValue expClear = {{1.0f, 0.0f, 0.0f, 0.0f}};
+        vkCmdClearColorImage(cmd, expImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &expClear, 1, &colorRange);
+
+        transition(cmd, colorImage, colorLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+        transition(cmd, depthImage, depthLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+        transition(cmd, mvImage, mvLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+        transition(cmd, expImage, expLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+
+        FfxFsr2DispatchDescription dispatchDesc = {};
+        memset(&dispatchDesc, 0, sizeof(FfxFsr2DispatchDescription)); 
+        dispatchDesc.commandList = ffxGetCommandListVK(cmd);
+        dispatchDesc.color = colorRes2;
+        dispatchDesc.depth = depthRes2;
+        dispatchDesc.motionVectors = mvRes2;
+        dispatchDesc.exposure = expRes2; 
+        dispatchDesc.output = outputRes2;
+        dispatchDesc.jitterOffset.x = jX;
+        dispatchDesc.jitterOffset.y = jY;
+        dispatchDesc.motionVectorScale.x = (float)renderW; 
+        dispatchDesc.motionVectorScale.y = (float)renderH;
+        dispatchDesc.renderSize = { (uint32_t)renderW, (uint32_t)renderH };
+        
+        dispatchDesc.enableSharpening = false; // Kept off to isolate
+        dispatchDesc.sharpness = 0.0f;
+        
+        dispatchDesc.frameTimeDelta = 16.6f;
+        dispatchDesc.preExposure = 1.0f;
+        dispatchDesc.reset = (i == 0); 
+        dispatchDesc.cameraNear = 0.1f;
+        dispatchDesc.cameraFar = 100.0f;
+        dispatchDesc.cameraFovAngleVertical = 1.047f;
+        dispatchDesc.viewSpaceToMetersFactor = 1.0f;
+
+        if (ffxFsr2ContextDispatch(fsr2Context, &dispatchDesc) != FFX_OK) return 1;
+
+        vkEndCommandBuffer(cmd);
+        vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
+        vkQueueWaitIdle(queue);
+
+        if ((i + 1) % 8 == 0) std::cout << " -> Completed Pass " << (i + 1) << "/32" << std::endl;
+    }
+
+    std::cout << "Downloading FSR_2.3.3_2x.png..." << std::endl;
+    vkResetCommandBuffer(cmd, 0);
+    vkBeginCommandBuffer(cmd, &beginInfo);
+    transition(cmd, outputImage, outputLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+    vkCmdCopyImageToBuffer(cmd, outputImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, downloadBuffer, 1, &outRegion);
+    vkEndCommandBuffer(cmd);
+    
+    vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
+    vkQueueWaitIdle(queue);
+
+    vkMapMemory(device, downloadMemory, 0, outSize, 0, &outData);
+    saveFloatImage("FSR_2.3.3_2x.png", displayW, displayH, (float*)outData);
+    vkUnmapMemory(device, downloadMemory);
+
+    ffxFsr2ContextDestroy(fsr2Context);
+    _aligned_free(fsr2Context);
+
+    vkDestroyImage(device, colorImage, nullptr); vkFreeMemory(device, colorMem, nullptr);
+    vkDestroyImage(device, depthImage, nullptr); vkFreeMemory(device, depthMem, nullptr);
+    vkDestroyImage(device, mvImage, nullptr); vkFreeMemory(device, mvMem, nullptr);
+    vkDestroyImage(device, outputImage, nullptr); vkFreeMemory(device, outputMem, nullptr);
+    vkDestroyImage(device, expImage, nullptr); vkFreeMemory(device, expImageMem, nullptr);
+    vkDestroyBuffer(device, uploadBuffer, nullptr); vkFreeMemory(device, uploadMemory, nullptr);
+    vkDestroyBuffer(device, downloadBuffer, nullptr); vkFreeMemory(device, downloadMemory, nullptr);
+    vkDestroyCommandPool(device, commandPool, nullptr);
+    vkDestroyDevice(device, nullptr);
+    vkDestroyInstance(instance, nullptr);
+    _aligned_free(scratchBuffer);
+
+    return 0;
+}
