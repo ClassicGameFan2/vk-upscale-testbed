@@ -151,33 +151,22 @@ if(NOT ffx_sdk_v2_POPULATED)
     message(STATUS "[Patch] ffx_vk.cpp patches written.")
 
     # =========================================================================
-    # PATCH E: Skip Luminance Pyramid Dispatch in ffx_fsr2.cpp
+    # PATCH E: Skip Luminance Pyramid dispatch in ffx_fsr2.cpp
     #
-    # PROBLEM:
-    # SwiftShader has subgroupSize=4. The luminance pyramid pass uses
-    # AMD's Single Pass Downsampler (SPD) which requires subgroupSize>=32
-    # for its atomic reduction operations. When SPD runs on SwiftShader,
-    # it produces garbage/NaN values in the luminance mip chain.
-    # FSR2 uses this luminance chain for SHADING CHANGE DETECTION in the
-    # reproject-and-accumulate pass. Garbage luminance values cause the
-    # shading change detector to fire on EVERY pixel EVERY frame, which
-    # collapses the temporal accumulation weight to zero -> BLACK OUTPUT.
+    # From the diagnostic output, the luminance pyramid is dispatched at
+    # LINE 1710 inside ffx_fsr2.cpp:
+    #   scheduleDispatch(context, params,
+    #       &context->pipelineComputeLuminancePyramid,
+    #       dispatchThreadGroupCountXY[0],
+    #       dispatchThreadGroupCountXY[1])
     #
-    # NOTE: We cannot patch the HLSL shader source because AMD ships
-    # PRE-COMPILED SPIR-V blobs with the SDK. The .h shader files are
-    # source only - the Vulkan backend loads the pre-built .spv blobs.
-    # Patching .h files has ZERO effect on runtime behavior.
+    # There is NO dedicated fsr2DispatchLuminancePyramid function.
+    # The dispatch is inline inside a larger function.
     #
-    # CORRECT FIX:
-    # Patch ffx_fsr2.cpp to make the C++ dispatch function return
-    # immediately (FFX_OK) without scheduling any GPU work.
-    # This prevents SPD from ever running on SwiftShader.
-    #
-    # EFFECT ON FSR2:
-    # - Luminance mip chain = stays at cleared zero values
-    # - Shading change detection = reads zeros = all pixels "stable"
-    # - Temporal accumulation = accumulates correctly over 32 frames
-    # - Auto-exposure = already disabled (we provide manual exposure=1.0)
+    # FIX: Replace the scheduleDispatch call that references
+    # pipelineComputeLuminancePyramid with a no-op comment.
+    # This is the ONLY scheduleDispatch that references this pipeline,
+    # so our search string is unique in the file.
     # =========================================================================
     set(FSR2_CPP_FILE
         "${ffx_sdk_v2_SOURCE_DIR}/sdk/src/components/fsr2/ffx_fsr2.cpp"
@@ -193,51 +182,51 @@ if(NOT ffx_sdk_v2_POPULATED)
     file(READ "${FSR2_CPP_FILE}" fsr2_code)
     message(STATUS "[Patch-E] ffx_fsr2.cpp found and read OK.")
 
-    # -------------------------------------------------------------------------
-    # Print all lines containing "LuminancePyramid" so we can see the
-    # exact function signature and dispatch call
-    # -------------------------------------------------------------------------
-    message(STATUS "=== [Patch-E] Searching for LuminancePyramid in ffx_fsr2.cpp ===")
-    string(REPLACE "\n" ";" fsr2_lines "${fsr2_code}")
-    set(fsr2_line_num 0)
-    foreach(fsr2_line IN LISTS fsr2_lines)
-        math(EXPR fsr2_line_num "${fsr2_line_num} + 1")
-        if(fsr2_line MATCHES "LuminancePyramid|luminancePyramid|luminance_pyramid")
-            message(STATUS "  LINE ${fsr2_line_num}: ${fsr2_line}")
-        endif()
-    endforeach()
-    message(STATUS "=== [Patch-E] End LuminancePyramid search ===")
-
-    # -------------------------------------------------------------------------
-    # The dispatch function for luminance pyramid in ffx_fsr2.cpp is:
-    # static FfxErrorCode fsr2DispatchLuminancePyramid(...)
-    # We make it return FFX_OK immediately without doing any GPU work.
-    #
-    # Search string: the function signature opening line
-    # This is unique in the file - only one function has this name.
-    # -------------------------------------------------------------------------
+    # The unique search string is the pipeline name inside scheduleDispatch.
+    # From diagnostic LINE 1710, the exact text is:
+    # scheduleDispatch(context, params, &context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1])
+    # We search for the unique pipeline reference inside scheduleDispatch.
     set(PATCH_E_SEARCH
-        "static FfxErrorCode fsr2DispatchLuminancePyramid("
+        "scheduleDispatch(context, params, &context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1])"
     )
     set(PATCH_E_REPLACE
-        "static FfxErrorCode fsr2DispatchLuminancePyramid_DISABLED_SwiftShader(FfxFsr2Context_Private* context, const FfxFsr2DispatchDescription* params) { return FFX_OK; } static FfxErrorCode fsr2DispatchLuminancePyramid("
+        "/* [SwiftShader-Fix-E] Luminance pyramid dispatch SKIPPED - SPD requires subgroupSize>=32 but SwiftShader has size=4. Skipping prevents NaN cascade in shading change detection. */"
     )
 
     string(FIND "${fsr2_code}" "${PATCH_E_SEARCH}" PATCH_E_POS)
     if(PATCH_E_POS EQUAL -1)
-        message(FATAL_ERROR
-            "[Patch-E] CRITICAL: fsr2DispatchLuminancePyramid not found!\n"
-            "Check LINE output above for the actual function name."
+        # The diagnostic showed the line without leading whitespace in cmake.
+        # Try searching for just the unique pipeline reference part
+        # which cannot appear anywhere else in the file.
+        set(PATCH_E_SEARCH_ALT
+            "&context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0]"
         )
+        string(FIND "${fsr2_code}" "${PATCH_E_SEARCH_ALT}" PATCH_E_ALT_POS)
+        if(PATCH_E_ALT_POS EQUAL -1)
+            message(FATAL_ERROR
+                "[Patch-E] CRITICAL: pipelineComputeLuminancePyramid dispatch not found!\n"
+                "Neither full nor short search string matched ffx_fsr2.cpp."
+            )
+        else()
+            # For the alt search, we need to replace the entire scheduleDispatch
+            # statement. We find it by replacing the unique middle portion.
+            # We wrap with if(false) to neutralize it while keeping valid C++.
+            string(REPLACE
+                "${PATCH_E_SEARCH_ALT}"
+                "&context->pipelineComputeLuminancePyramid, 0 /* [SwiftShader-Fix-E] dispatch count zeroed - SPD subgroup fix */"
+                fsr2_code "${fsr2_code}")
+            message(STATUS "[Patch-E] Applied via ALT search (zeroed dispatch counts). OK!")
+        endif()
     else()
         string(REPLACE "${PATCH_E_SEARCH}" "${PATCH_E_REPLACE}" fsr2_code "${fsr2_code}")
-        file(WRITE "${FSR2_CPP_FILE}" "${fsr2_code}")
-        message(STATUS "[Patch-E] fsr2DispatchLuminancePyramid early-exit applied OK!")
+        message(STATUS "[Patch-E] Luminance pyramid dispatch skipped. OK!")
     endif()
+
+    file(WRITE "${FSR2_CPP_FILE}" "${fsr2_code}")
 
     # Verify Patch-E
     file(READ "${FSR2_CPP_FILE}" fsr2_verify)
-    string(FIND "${fsr2_verify}" "fsr2DispatchLuminancePyramid_DISABLED_SwiftShader" VERIFY_E_POS)
+    string(FIND "${fsr2_verify}" "SwiftShader-Fix-E" VERIFY_E_POS)
     if(VERIFY_E_POS EQUAL -1)
         message(FATAL_ERROR
             "[VERIFY-E FAILED] Patch-E not found in written ffx_fsr2.cpp!"
