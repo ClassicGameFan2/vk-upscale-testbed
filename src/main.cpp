@@ -45,7 +45,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL Hooked_vkCreateImageView(VkDevice device, 
     } else if (mod.format == VK_FORMAT_R16G16_SFLOAT) {
         mod.format = VK_FORMAT_R32G32_SFLOAT;
     } else if (mod.format == VK_FORMAT_R16_SFLOAT) {
-        mod.format = VK_FORMAT_R32_SFLOAT;
+        mod.format = VK_FORMAT_R32G32_SFLOAT;
     }
     return real_vkCreateImageView(device, &mod, pAllocator, pView);
 }
@@ -479,6 +479,8 @@ int main() {
     fsr2Desc.fpMessage = FfxMessageCallback;
     fsr2Desc.backendInterface = ffxInterface2;
 
+    FfxFsr2Context* fsr2Context = (FfxFsr2Context*)_aligned_malloc(sizeof(FfxFsr2Context), 64);
+    memset(fsr2Context, 0, sizeof(FfxFsr2Context));
     if (ffxFsr2ContextCreate(fsr2Context, &fsr2Desc) != FFX_OK) return 1;
 
     FfxResource colorRes2 = ffxGetResourceVK(colorImage, ffxGetImageResourceDescriptionVK(colorImage, colorInfo, FFX_RESOURCE_USAGE_READ_ONLY), L"Color", FFX_RESOURCE_STATE_COMPUTE_READ);
