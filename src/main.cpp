@@ -35,7 +35,7 @@ static uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFil
     return 0; 
 }
 
-// --- PROCEDURAL 3D RAYTRACER (HDR LINEAR FLOATS + INVERTED DEPTH) ---
+// --- PROCEDURAL 3D RAYTRACER (SDR sRGB FLOATS + INVERTED DEPTH) ---
 void renderScene(int w, int h, float jx, float jy, float* colorOut, float* depthOut) {
     float aspect = (float)w / (float)h;
     float fovY = 1.04719755f;
@@ -54,7 +54,9 @@ void renderScene(int w, int h, float jx, float jy, float* colorOut, float* depth
             rd[0]/=len; rd[1]/=len; rd[2]/=len;
 
             float hitZ = -1.0f;
-            float r = powf(135.0f/255.0f, 2.2f), g = powf(206.0f/255.0f, 2.2f), b = powf(235.0f/255.0f, 2.2f);
+            
+            // Standard SDR Sky Blue
+            float r = 135.0f/255.0f, g = 206.0f/255.0f, b = 235.0f/255.0f;
 
             float oc[3] = {ro[0] - 0.0f, ro[1] - 1.0f, ro[2] - 4.0f};
             float b_dot = rd[0]*oc[0] + rd[1]*oc[1] + rd[2]*oc[2];
@@ -73,9 +75,11 @@ void renderScene(int w, int h, float jx, float jy, float* colorOut, float* depth
 
                     float light[3] = {0.577f, 0.577f, -0.577f};
                     float ndotl = fmax(0.2f, -(nx*light[0] + ny*light[1] + nz*light[2]));
-                    r = powf(200.0f/255.0f, 2.2f) * ndotl;
-                    g = powf(50.0f/255.0f, 2.2f) * ndotl;
-                    b = powf(50.0f/255.0f, 2.2f) * ndotl;
+                    
+                    // SDR Shaded Sphere
+                    r = (200.0f/255.0f) * ndotl;
+                    g = (50.0f/255.0f) * ndotl;
+                    b = (50.0f/255.0f) * ndotl;
                 }
             }
 
@@ -86,8 +90,8 @@ void renderScene(int w, int h, float jx, float jy, float* colorOut, float* depth
                     float px = ro[0] + rd[0]*t;
                     float pz = ro[2] + rd[2]*t;
                     int chk = ((int)floorf(px) + (int)floorf(pz)) % 2;
-                    if (chk == 0) { r = powf(220.0f/255.0f, 2.2f); g = r; b = r; }
-                    else          { r = powf(80.0f/255.0f, 2.2f);  g = r; b = r; }
+                    if (chk == 0) { r = 220.0f/255.0f; g = r; b = r; }
+                    else          { r = 80.0f/255.0f;  g = r; b = r; }
                 }
             }
 
@@ -120,7 +124,9 @@ void saveFloatImage(const std::string& filename, int w, int h, const float* data
             }
             if (v < 0.0f) v = 0.0f;
             if (v > 1.0f) v = 1.0f;
-            bytes[i+c] = (unsigned char)(powf(v, 1.0f / 2.2f) * 255.0f);
+            
+            // FSR outputs SDR data natively now! No double-gamma warping needed.
+            bytes[i+c] = (unsigned char)(v * 255.0f);
         }
         bytes[i+3] = 255; 
     }
@@ -204,7 +210,7 @@ void transition(VkCommandBuffer cmd, VkImage image, VkImageLayout& currentLayout
 }
 
 int main() {
-    std::cout << "--- FSR 3D Ablation Study (128-Bit Float Pipeline) ---" << std::endl;
+    std::cout << "--- FSR 3D Ablation Study (SDR Float Pipeline) ---" << std::endl;
     std::cout.flush();
 
     ffxAssertSetPrintingCallback(AssertCallback);
@@ -338,7 +344,10 @@ int main() {
     if (ffxGetInterfaceVK(&ffxInterface1, ffxGetDeviceVK(&vkDeviceContext), scratchBuffer, safeBufferSize, 4) != FFX_OK) return 1;
 
     FfxFsr1ContextDescription fsr1Desc = {};
-    fsr1Desc.flags = FFX_FSR1_ENABLE_RCAS | FFX_FSR1_ENABLE_HIGH_DYNAMIC_RANGE; 
+    
+    // HDR IS OFF: FSR 1 will process SDR inputs perfectly!
+    fsr1Desc.flags = FFX_FSR1_ENABLE_RCAS; 
+    
     fsr1Desc.outputFormat = ffxGetSurfaceFormatVK(VK_FORMAT_R32G32B32A32_SFLOAT);
     fsr1Desc.maxRenderSize = { (uint32_t)renderW, (uint32_t)renderH };
     fsr1Desc.displaySize = { displayW, displayH };
@@ -414,7 +423,8 @@ int main() {
     FfxFsr2ContextDescription fsr2Desc = {};
     memset(&fsr2Desc, 0, sizeof(FfxFsr2ContextDescription));
     
-    fsr2Desc.flags = FFX_FSR2_ENABLE_DEBUG_CHECKING | FFX_FSR2_ENABLE_DEPTH_INVERTED | FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE; 
+    // HDR IS OFF: FSR 2 is now in perfect SDR Mode!
+    fsr2Desc.flags = FFX_FSR2_ENABLE_DEBUG_CHECKING | FFX_FSR2_ENABLE_DEPTH_INVERTED; 
     
     fsr2Desc.maxRenderSize = { (uint32_t)renderW, (uint32_t)renderH };
     fsr2Desc.displaySize = { displayW, displayH };
@@ -499,7 +509,7 @@ int main() {
         dispatchDesc.motionVectorScale.y = (float)renderH;
         dispatchDesc.renderSize = { (uint32_t)renderW, (uint32_t)renderH };
         
-        dispatchDesc.enableSharpening = false; // Kept off per your request
+        dispatchDesc.enableSharpening = false; // Kept off to isolate
         dispatchDesc.sharpness = 0.0f;
         
         dispatchDesc.frameTimeDelta = 16.6f;
@@ -546,6 +556,7 @@ int main() {
     vkDestroyCommandPool(device, commandPool, nullptr);
     vkDestroyDevice(device, nullptr);
     vkDestroyInstance(instance, nullptr);
+    _aligned_free(scratchBuffer);
 
     return 0;
 }
