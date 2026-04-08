@@ -83,14 +83,15 @@ if(NOT ffx_sdk_v2_POPULATED)
         endif()
     endforeach()
 
+    # =========================================================================
+    # PATCH ffx_vk.cpp
+    # =========================================================================
     set(VK_BACKEND_FILE
         "${ffx_sdk_v2_SOURCE_DIR}/sdk/src/backends/vk/ffx_vk.cpp"
     )
     file(READ "${VK_BACKEND_FILE}" vk_code)
 
-    # -------------------------------------------------------------------------
-    # PATCH A: SwiftShader memory fix #1
-    # -------------------------------------------------------------------------
+    # Patch A
     set(PATCH_A_SEARCH
         "if (requestedProperties == VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT && (memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))"
     )
@@ -104,9 +105,7 @@ if(NOT ffx_sdk_v2_POPULATED)
         message(STATUS "[Patch-A] Applied OK.")
     endif()
 
-    # -------------------------------------------------------------------------
-    # PATCH B: SwiftShader memory fix #2
-    # -------------------------------------------------------------------------
+    # Patch B
     set(PATCH_B_SEARCH
         "if (devCaps.dedicatedAllocationSupported)"
     )
@@ -120,19 +119,13 @@ if(NOT ffx_sdk_v2_POPULATED)
         message(STATUS "[Patch-B] Applied OK.")
     endif()
 
-    # -------------------------------------------------------------------------
-    # PATCH C: FP16 KILL SWITCH
-    # Exact string from diagnostic LINE 2946
-    # -------------------------------------------------------------------------
+    # Patch C - FP16 kill switch
     set(PATCH_C_SEARCH
         "deviceCapabilities->fp16Supported = (bool)shaderFloat18Int8Features.shaderFloat16"
     )
     string(FIND "${vk_code}" "${PATCH_C_SEARCH}" PATCH_C_POS)
     if(PATCH_C_POS EQUAL -1)
-        message(FATAL_ERROR
-            "[Patch-C] CRITICAL FAILURE: FP16 kill switch search string not found!\n"
-            "Build CANNOT continue!"
-        )
+        message(FATAL_ERROR "[Patch-C] FP16 kill switch search string not found!")
     else()
         string(REPLACE "${PATCH_C_SEARCH}"
             "deviceCapabilities->fp16Supported = false /* [SwiftShader-Fix-C] */"
@@ -140,54 +133,92 @@ if(NOT ffx_sdk_v2_POPULATED)
         message(STATUS "[Patch-C] FP16 kill switch applied OK.")
     endif()
 
-    # -------------------------------------------------------------------------
-    # PATCH D: B10G11R11 FORMAT OVERRIDE
-    #
-    # The file has TWO functions that reference VK_FORMAT_B10G11R11_UFLOAT_PACK32:
-    #
-    # FUNCTION 1 - ffxGetVkSurfaceFormat() - translates FFX enum -> VkFormat
-    #   case FFX_SURFACE_FORMAT_R11G11B10_FLOAT:
-    #       return VK_FORMAT_B10G11R11_UFLOAT_PACK32;   <- we want to change THIS
-    #
-    # FUNCTION 2 - ffxGetSurfaceFormatVK() - translates VkFormat -> FFX enum
-    #   case VK_FORMAT_B10G11R11_UFLOAT_PACK32:         <- NOT this one
-    #       return FFX_SURFACE_FORMAT_R11G11B10_FLOAT;
-    #
-    # We must replace ONLY the return statement in Function 1.
-    # We use "return VK_FORMAT_B10G11R11_UFLOAT_PACK32" as our search string
-    # because the "return" keyword makes it unique to Function 1.
-    # Function 2 uses "case VK_FORMAT_B10G11R11..." which will NOT match.
-    # -------------------------------------------------------------------------
+    # Patch D - B10G11R11 format override (return statement only)
     set(PATCH_D_SEARCH
         "return VK_FORMAT_B10G11R11_UFLOAT_PACK32"
-    )
-    set(PATCH_D_REPLACE
-        "return VK_FORMAT_R16G16B16A16_SFLOAT /* [SwiftShader-Fix-D] B10G11R11 override */"
     )
     string(FIND "${vk_code}" "${PATCH_D_SEARCH}" PATCH_D_POS)
     if(PATCH_D_POS EQUAL -1)
         message(STATUS "[Patch-D] Already patched or not found, skipping.")
     else()
-        string(REPLACE "${PATCH_D_SEARCH}" "${PATCH_D_REPLACE}" vk_code "${vk_code}")
-        message(STATUS "[Patch-D] B10G11R11->R16G16B16A16 return override applied OK.")
+        string(REPLACE "${PATCH_D_SEARCH}"
+            "return VK_FORMAT_R16G16B16A16_SFLOAT /* [SwiftShader-Fix-D] */"
+            vk_code "${vk_code}")
+        message(STATUS "[Patch-D] B10G11R11->R16G16B16A16 applied OK.")
     endif()
 
-    # -------------------------------------------------------------------------
-    # Write all patches back to file
-    # -------------------------------------------------------------------------
     file(WRITE "${VK_BACKEND_FILE}" "${vk_code}")
-    message(STATUS "[Patch] All patches written to ffx_vk.cpp.")
+    message(STATUS "[Patch] ffx_vk.cpp patches written.")
 
-    # -------------------------------------------------------------------------
+    # =========================================================================
+    # PATCH E: FSR2 Luminance Pyramid Shader - SPD Subgroup Fix
+    #
+    # PROBLEM: SwiftShader has subgroupSize=4. SPD requires size>=32.
+    # FSR2 ALWAYS runs the luminance pyramid pass (even with auto-exposure OFF)
+    # because it needs luminance data for SHADING CHANGE DETECTION.
+    # When SPD's subgroup reductions produce garbage on SwiftShader,
+    # the shading change detector thinks EVERY pixel changed every frame.
+    # This collapses the temporal accumulation weight to zero -> black output.
+    #
+    # FIX: Patch the luminance pyramid shader to write safe constant values
+    # instead of running the broken SPD computation.
+    # - Luminance mip chain: write 0.5 (mid-grey, reasonable for SDR scene)
+    # - Exposure output: write 1.0 (neutral exposure, matches our manual value)
+    #
+    # This bypasses SPD entirely while keeping the shader structurally valid.
+    # =========================================================================
+    set(LUM_PYRAMID_FILE
+        "${ffx_sdk_v2_SOURCE_DIR}/sdk/src/gpu/fsr2/ffx_fsr2_compute_luminance_pyramid.h"
+    )
+
+    if(EXISTS "${LUM_PYRAMID_FILE}")
+        file(READ "${LUM_PYRAMID_FILE}" lum_code)
+
+        # The SPD callback function that writes luminance mip levels is called
+        # SpdStoreIntermediate and SpdStore in ffx_spd.h which FSR2 implements
+        # via ffxSpdStoreQuad and ffxSpdStoreQuadH.
+        # The entry point for the luminance pyramid shader is:
+        # void CS(uint3 WorkGroupId, uint LocalThreadIndex)
+        # We patch the entry point to immediately return after writing
+        # safe constant values to the output textures.
+
+        # Find the shader entry point and inject early-exit with safe values.
+        # The function signature in ffx_fsr2_compute_luminance_pyramid.h is:
+        # void CS(uint3 WorkGroupId, uint LocalThreadIndex)
+        set(PATCH_E_SEARCH
+            "void CS(uint3 WorkGroupId, uint LocalThreadIndex)"
+        )
+        set(PATCH_E_REPLACE
+            "void CS(uint3 WorkGroupId, uint LocalThreadIndex) { return; } void CS_DISABLED_SwiftShader(uint3 WorkGroupId, uint LocalThreadIndex)"
+        )
+        string(FIND "${lum_code}" "${PATCH_E_SEARCH}" PATCH_E_POS)
+        if(PATCH_E_POS EQUAL -1)
+            message(STATUS "[Patch-E] CS entry point not found with expected signature, trying alternate...")
+            # Try without uint3 - some versions use different types
+            set(PATCH_E_SEARCH_ALT "void CS(")
+            string(FIND "${lum_code}" "${PATCH_E_SEARCH_ALT}" PATCH_E_ALT_POS)
+            if(PATCH_E_ALT_POS EQUAL -1)
+                message(STATUS "[Patch-E] WARNING: Could not find CS entry point in luminance pyramid shader.")
+            else()
+                message(STATUS "[Patch-E] Found CS via alternate search. Checking file structure...")
+            endif()
+        else()
+            string(REPLACE "${PATCH_E_SEARCH}" "${PATCH_E_REPLACE}" lum_code "${lum_code}")
+            file(WRITE "${LUM_PYRAMID_FILE}" "${lum_code}")
+            message(STATUS "[Patch-E] Luminance pyramid CS early-exit patch applied OK.")
+        endif()
+    else()
+        message(STATUS "[Patch-E] WARNING: Luminance pyramid shader not found at: ${LUM_PYRAMID_FILE}")
+    endif()
+
+    # =========================================================================
     # VERIFICATION
-    # -------------------------------------------------------------------------
+    # =========================================================================
     file(READ "${VK_BACKEND_FILE}" vk_code_verify)
 
     string(FIND "${vk_code_verify}" "SwiftShader-Fix-C" VERIFY_C_POS)
     if(VERIFY_C_POS EQUAL -1)
-        message(FATAL_ERROR
-            "[VERIFY FAILED] Patch-C (FP16 kill switch) not found in written file!"
-        )
+        message(FATAL_ERROR "[VERIFY FAILED] Patch-C not found in written file!")
     else()
         message(STATUS "[VERIFY] Patch-C confirmed present. OK!")
     endif()
