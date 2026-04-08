@@ -15,44 +15,52 @@
 // =========================================================================
 // PURE VULKAN API HOOKS (100% Guaranteed to bypass SDK Signature errors!)
 // =========================================================================
-static PFN_vkGetPhysicalDeviceFeatures2 original_vkGetPhysicalDeviceFeatures2 = nullptr;
-static VKAPI_ATTR void VKAPI_CALL Hooked_vkGetPhysicalDeviceFeatures2(VkPhysicalDevice physicalDevice, VkPhysicalDeviceFeatures2* pFeatures) {
-    original_vkGetPhysicalDeviceFeatures2(physicalDevice, pFeatures);
-    VkBaseOutStructure* current = (VkBaseOutStructure*)pFeatures->pNext;
-    while (current) {
-        if (current->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT16_INT8_FEATURES_KHR) {
-            VkPhysicalDeviceFloat16Int8FeaturesKHR* fp16 = (VkPhysicalDeviceFloat16Int8FeaturesKHR*)current;
-            fp16->shaderFloat16 = VK_FALSE; // KILL-SWITCH FOR SWIFTSHADER FP16 BUG
-            std::cout << "[Trace-VK] Intercepted Vulkan Features (KHR)! Forced shaderFloat16 = false\n";
-        }
-        if (current->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES) {
-            VkPhysicalDeviceVulkan12Features* v12 = (VkPhysicalDeviceVulkan12Features*)current;
-            v12->shaderFloat16 = VK_FALSE;
-            std::cout << "[Trace-VK] Intercepted Vulkan Features (V1.2)! Forced shaderFloat16 = false\n";
-        }
-        current = current->pNext;
-    }
-}
+static PFN_vkGetDeviceProcAddr real_vkGetDeviceProcAddr = nullptr;
+static PFN_vkCreateImage real_vkCreateImage = nullptr;
+static PFN_vkCreateImageView real_vkCreateImageView = nullptr;
 
-static PFN_vkCreateImage original_vkCreateImage = nullptr;
 static VKAPI_ATTR VkResult VKAPI_CALL Hooked_vkCreateImage(VkDevice device, const VkImageCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkImage* pImage) {
-    VkImageCreateInfo modifiedInfo = *pCreateInfo;
-    // KILL-SWITCH FOR SWIFTSHADER R11G11B10 UAV DROP BUG
-    if (modifiedInfo.format == VK_FORMAT_B10G11R11_UFLOAT_PACK32) {
-        modifiedInfo.format = VK_FORMAT_R16G16B16A16_SFLOAT;
-        std::cout << "[Trace-VK] Intercepted vkCreateImage! Upgraded B10G11R11 to R16G16B16A16\n";
+    VkImageCreateInfo mod = *pCreateInfo;
+    // NUKE ALL 16-BIT FLOAT TEXTURES! SwiftShader corrupts negative numbers when writing to 16-bit memory.
+    if (mod.format == VK_FORMAT_B10G11R11_UFLOAT_PACK32) {
+        mod.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+        std::cout << "[Trace-VK] vkCreateImage: Upgraded B10G11R11 -> R32G32B32A32_SFLOAT\n";
+    } else if (mod.format == VK_FORMAT_R16G16B16A16_SFLOAT) {
+        mod.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+        std::cout << "[Trace-VK] vkCreateImage: Upgraded R16G16B16A16 -> R32G32B32A32_SFLOAT\n";
+    } else if (mod.format == VK_FORMAT_R16G16_SFLOAT) {
+        mod.format = VK_FORMAT_R32G32_SFLOAT;
+        std::cout << "[Trace-VK] vkCreateImage: Upgraded R16G16 -> R32G32_SFLOAT\n";
+    } else if (mod.format == VK_FORMAT_R16_SFLOAT) {
+        mod.format = VK_FORMAT_R32_SFLOAT;
+        std::cout << "[Trace-VK] vkCreateImage: Upgraded R16 -> R32_SFLOAT\n";
     }
-    return original_vkCreateImage(device, &modifiedInfo, pAllocator, pImage);
+    return real_vkCreateImage(device, &mod, pAllocator, pImage);
 }
 
-static PFN_vkCreateImageView original_vkCreateImageView = nullptr;
 static VKAPI_ATTR VkResult VKAPI_CALL Hooked_vkCreateImageView(VkDevice device, const VkImageViewCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkImageView* pView) {
-    VkImageViewCreateInfo modifiedInfo = *pCreateInfo;
-    if (modifiedInfo.format == VK_FORMAT_B10G11R11_UFLOAT_PACK32) {
-        modifiedInfo.format = VK_FORMAT_R16G16B16A16_SFLOAT;
-        std::cout << "[Trace-VK] Intercepted vkCreateImageView! Upgraded B10G11R11 to R16G16B16A16\n";
+    VkImageViewCreateInfo mod = *pCreateInfo;
+    if (mod.format == VK_FORMAT_B10G11R11_UFLOAT_PACK32 || mod.format == VK_FORMAT_R16G16B16A16_SFLOAT) {
+        mod.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    } else if (mod.format == VK_FORMAT_R16G16_SFLOAT) {
+        mod.format = VK_FORMAT_R32G32_SFLOAT;
+    } else if (mod.format == VK_FORMAT_R16_SFLOAT) {
+        mod.format = VK_FORMAT_R32_SFLOAT;
     }
-    return original_vkCreateImageView(device, &modifiedInfo, pAllocator, pView);
+    return real_vkCreateImageView(device, &mod, pAllocator, pView);
+}
+
+// FSR 2 routes all its Vulkan calls through here. We silently swap the pointers!
+static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL Hooked_vkGetDeviceProcAddr(VkDevice device, const char* pName) {
+    if (strcmp(pName, "vkCreateImage") == 0) {
+        if (!real_vkCreateImage) real_vkCreateImage = (PFN_vkCreateImage)real_vkGetDeviceProcAddr(device, pName);
+        return (PFN_vkVoidFunction)Hooked_vkCreateImage;
+    }
+    if (strcmp(pName, "vkCreateImageView") == 0) {
+        if (!real_vkCreateImageView) real_vkCreateImageView = (PFN_vkCreateImageView)real_vkGetDeviceProcAddr(device, pName);
+        return (PFN_vkVoidFunction)Hooked_vkCreateImageView;
+    }
+    return real_vkGetDeviceProcAddr(device, pName);
 }
 // =========================================================================
 
@@ -266,13 +274,6 @@ int main() {
     vkCreateInstance(&instanceInfo, nullptr, &instance);
     volkLoadInstance(instance);
 
-    // =========================================================================
-    // INJECT VULKAN HOOKS EARLY (Before device creation and FSR initialization)
-    // =========================================================================
-    original_vkGetPhysicalDeviceFeatures2 = vkGetPhysicalDeviceFeatures2;
-    vkGetPhysicalDeviceFeatures2 = Hooked_vkGetPhysicalDeviceFeatures2;
-    // =========================================================================
-
     uint32_t deviceCount = 0;
     vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
     std::vector<VkPhysicalDevice> physicalDevices(deviceCount);
@@ -313,16 +314,6 @@ int main() {
     VkDevice device;
     vkCreateDevice(physicalDevice, &deviceInfo, nullptr, &device);
     volkLoadDevice(device);
-
-    // =========================================================================
-    // INJECT VULKAN IMAGE HOOKS (Intercept FSR Resource Creation)
-    // =========================================================================
-    original_vkCreateImage = vkCreateImage;
-    vkCreateImage = Hooked_vkCreateImage;
-    
-    original_vkCreateImageView = vkCreateImageView;
-    vkCreateImageView = Hooked_vkCreateImageView;
-    // =========================================================================
 
     VkQueue queue;
     vkGetDeviceQueue(device, queueFamilyIndex, 0, &queue);
@@ -371,7 +362,13 @@ int main() {
     VkImage expImage; VkDeviceMemory expImageMem;
     VkImageCreateInfo expInfo = createImage(device, physicalDevice, 1, 1, VK_FORMAT_R32_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, expImage, expImageMem);
 
-    VkDeviceContext vkDeviceContext = { device, physicalDevice, vkGetDeviceProcAddr };
+    // =========================================================================
+    // INJECT VULKAN DEVICE HOOKS (Ensures all FSR calls route through our fixes)
+    // =========================================================================
+    real_vkGetDeviceProcAddr = vkGetDeviceProcAddr; // From Volk global
+    VkDeviceContext vkDeviceContext = { device, physicalDevice, Hooked_vkGetDeviceProcAddr };
+    // =========================================================================
+
     std::cout << "\n[Trace] Allocating Backend Scratch Memory..." << std::flush;
     size_t safeBufferSize = ffxGetScratchMemorySizeVK(physicalDevice, 4) * 2;
     void* scratchBuffer = _aligned_malloc(safeBufferSize, 64);
@@ -482,8 +479,6 @@ int main() {
     fsr2Desc.fpMessage = FfxMessageCallback;
     fsr2Desc.backendInterface = ffxInterface2;
 
-    FfxFsr2Context* fsr2Context = (FfxFsr2Context*)_aligned_malloc(sizeof(FfxFsr2Context), 64);
-    memset(fsr2Context, 0, sizeof(FfxFsr2Context));
     if (ffxFsr2ContextCreate(fsr2Context, &fsr2Desc) != FFX_OK) return 1;
 
     FfxResource colorRes2 = ffxGetResourceVK(colorImage, ffxGetImageResourceDescriptionVK(colorImage, colorInfo, FFX_RESOURCE_USAGE_READ_ONLY), L"Color", FFX_RESOURCE_STATE_COMPUTE_READ);
@@ -607,6 +602,7 @@ int main() {
     vkDestroyCommandPool(device, commandPool, nullptr);
     vkDestroyDevice(device, nullptr);
     vkDestroyInstance(instance, nullptr);
+    _aligned_free(scratchBuffer);
 
     return 0;
 }
