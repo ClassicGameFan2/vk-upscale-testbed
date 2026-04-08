@@ -35,7 +35,7 @@ static uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFil
     return 0; 
 }
 
-// --- PROCEDURAL 3D RAYTRACER (SDR sRGB FLOATS + INVERTED DEPTH) ---
+// --- PROCEDURAL 3D RAYTRACER (HDR LINEAR FLOATS + INVERTED DEPTH) ---
 void renderScene(int w, int h, float jx, float jy, float* colorOut, float* depthOut) {
     float aspect = (float)w / (float)h;
     float fovY = 1.04719755f;
@@ -54,11 +54,7 @@ void renderScene(int w, int h, float jx, float jy, float* colorOut, float* depth
             rd[0]/=len; rd[1]/=len; rd[2]/=len;
 
             float hitZ = -1.0f;
-            
-            // Standard SDR Sky Blue (Linearized)
-            float r = powf(135.0f/255.0f, 2.2f);
-            float g = powf(206.0f/255.0f, 2.2f);
-            float b = powf(235.0f/255.0f, 2.2f);
+            float r = powf(135.0f/255.0f, 2.2f), g = powf(206.0f/255.0f, 2.2f), b = powf(235.0f/255.0f, 2.2f);
 
             float oc[3] = {ro[0] - 0.0f, ro[1] - 1.0f, ro[2] - 4.0f};
             float b_dot = rd[0]*oc[0] + rd[1]*oc[1] + rd[2]*oc[2];
@@ -77,8 +73,6 @@ void renderScene(int w, int h, float jx, float jy, float* colorOut, float* depth
 
                     float light[3] = {0.577f, 0.577f, -0.577f};
                     float ndotl = fmax(0.2f, -(nx*light[0] + ny*light[1] + nz*light[2]));
-                    
-                    // SDR Shaded Sphere (Linearized)
                     r = powf(200.0f/255.0f, 2.2f) * ndotl;
                     g = powf(50.0f/255.0f, 2.2f) * ndotl;
                     b = powf(50.0f/255.0f, 2.2f) * ndotl;
@@ -126,8 +120,6 @@ void saveFloatImage(const std::string& filename, int w, int h, const float* data
             }
             if (v < 0.0f) v = 0.0f;
             if (v > 1.0f) v = 1.0f;
-            
-            // Re-apply gamma correction so the SDR Linear floats display correctly
             bytes[i+c] = (unsigned char)(powf(v, 1.0f / 2.2f) * 255.0f);
         }
         bytes[i+3] = 255; 
@@ -212,7 +204,7 @@ void transition(VkCommandBuffer cmd, VkImage image, VkImageLayout& currentLayout
 }
 
 int main() {
-    std::cout << "--- FSR 3D Ablation Study (SDR Float Pipeline) ---" << std::endl;
+    std::cout << "--- FSR 3D Ablation Study (128-Bit Float Pipeline) ---" << std::endl;
     std::cout.flush();
 
     ffxAssertSetPrintingCallback(AssertCallback);
@@ -422,8 +414,7 @@ int main() {
     FfxFsr2ContextDescription fsr2Desc = {};
     memset(&fsr2Desc, 0, sizeof(FfxFsr2ContextDescription));
     
-    // HDR IS OFF: FSR 2 is now in perfect SDR Mode!
-    fsr2Desc.flags = FFX_FSR2_ENABLE_DEBUG_CHECKING | FFX_FSR2_ENABLE_DEPTH_INVERTED; 
+    fsr2Desc.flags = FFX_FSR2_ENABLE_DEBUG_CHECKING | FFX_FSR2_ENABLE_DEPTH_INVERTED | FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE; 
     
     fsr2Desc.maxRenderSize = { (uint32_t)renderW, (uint32_t)renderH };
     fsr2Desc.displaySize = { displayW, displayH };
@@ -507,10 +498,8 @@ int main() {
         dispatchDesc.motionVectorScale.x = (float)renderW; 
         dispatchDesc.motionVectorScale.y = (float)renderH;
         dispatchDesc.renderSize = { (uint32_t)renderW, (uint32_t)renderH };
-        
-        dispatchDesc.enableSharpening = false; // Kept off to isolate
+        dispatchDesc.enableSharpening = false;
         dispatchDesc.sharpness = 0.0f;
-        
         dispatchDesc.frameTimeDelta = 16.6f;
         dispatchDesc.preExposure = 1.0f;
         dispatchDesc.reset = (i == 0); 
