@@ -48,9 +48,7 @@ FetchContent_Declare(ffx_sdk_v2
 )
 FetchContent_GetProperties(ffx_sdk_v2)
 
-# =============================================================================
-# FORCE RE-PATCH EVERY CMAKE RUN
-# =============================================================================
+# Force re-patch every CMake run
 set(FFX_STAMP_FILE
     "${CMAKE_BINARY_DIR}/_deps/ffx_sdk_v2-subbuild/ffx_sdk_v2-populate-prefix/src/ffx_sdk_v2-populate-stamp/ffx_sdk_v2-populate-done"
 )
@@ -85,9 +83,6 @@ if(NOT ffx_sdk_v2_POPULATED)
         endif()
     endforeach()
 
-    # =========================================================================
-    # PATCH ffx_vk.cpp
-    # =========================================================================
     set(VK_BACKEND_FILE
         "${ffx_sdk_v2_SOURCE_DIR}/sdk/src/backends/vk/ffx_vk.cpp"
     )
@@ -127,57 +122,54 @@ if(NOT ffx_sdk_v2_POPULATED)
 
     # -------------------------------------------------------------------------
     # PATCH C: FP16 KILL SWITCH
-    #
-    # From diagnostic output, the REAL assignment is on LINE 2946:
-    #   deviceCapabilities->fp16Supported = (bool)shaderFloat18Int8Features.shaderFloat16
-    # Note: "shaderFloat18Int8Features" is the exact AMD variable name
-    # (the "18" is not a typo - it is how AMD named it in v1.1.4)
-    #
-    # We force this to = false so FSR2 uses pure FP32 math.
-    # SwiftShader corrupts negative FP16 values (needed for YCoCg).
+    # Exact string from diagnostic LINE 2946
     # -------------------------------------------------------------------------
     set(PATCH_C_SEARCH
         "deviceCapabilities->fp16Supported = (bool)shaderFloat18Int8Features.shaderFloat16"
-    )
-    set(PATCH_C_REPLACE
-        "deviceCapabilities->fp16Supported = false /* [SwiftShader-Fix-C] FP16 kill switch */"
     )
     string(FIND "${vk_code}" "${PATCH_C_SEARCH}" PATCH_C_POS)
     if(PATCH_C_POS EQUAL -1)
         message(FATAL_ERROR
             "[Patch-C] CRITICAL FAILURE: FP16 kill switch search string not found!\n"
-            "Expected to find: '${PATCH_C_SEARCH}'\n"
-            "in file: ${VK_BACKEND_FILE}\n"
-            "Build CANNOT continue - FSR2 colors will be destroyed on SwiftShader!"
+            "Build CANNOT continue!"
         )
     else()
-        string(REPLACE "${PATCH_C_SEARCH}" "${PATCH_C_REPLACE}" vk_code "${vk_code}")
-        message(STATUS "[Patch-C] FP16 kill switch applied OK. FSR2 will use FP32 math.")
+        string(REPLACE "${PATCH_C_SEARCH}"
+            "deviceCapabilities->fp16Supported = false /* [SwiftShader-Fix-C] */"
+            vk_code "${vk_code}")
+        message(STATUS "[Patch-C] FP16 kill switch applied OK.")
     endif()
 
     # -------------------------------------------------------------------------
     # PATCH D: B10G11R11 FORMAT OVERRIDE
     #
-    # SwiftShader cannot write UAVs to B10G11R11 format.
-    # We redirect to R32G32B32A32_SFLOAT (128-bit full float).
+    # The file has TWO functions that reference VK_FORMAT_B10G11R11_UFLOAT_PACK32:
     #
-    # IMPORTANT: We CANNOT use R16G16B16A16_SFLOAT here because that
-    # format already has its own case in the same switch statement.
-    # Using it would cause C2196 "case value already used" error.
-    # R32G32B32A32_SFLOAT does NOT appear elsewhere in the switch.
+    # FUNCTION 1 - ffxGetVkSurfaceFormat() - translates FFX enum -> VkFormat
+    #   case FFX_SURFACE_FORMAT_R11G11B10_FLOAT:
+    #       return VK_FORMAT_B10G11R11_UFLOAT_PACK32;   <- we want to change THIS
+    #
+    # FUNCTION 2 - ffxGetSurfaceFormatVK() - translates VkFormat -> FFX enum
+    #   case VK_FORMAT_B10G11R11_UFLOAT_PACK32:         <- NOT this one
+    #       return FFX_SURFACE_FORMAT_R11G11B10_FLOAT;
+    #
+    # We must replace ONLY the return statement in Function 1.
+    # We use "return VK_FORMAT_B10G11R11_UFLOAT_PACK32" as our search string
+    # because the "return" keyword makes it unique to Function 1.
+    # Function 2 uses "case VK_FORMAT_B10G11R11..." which will NOT match.
     # -------------------------------------------------------------------------
     set(PATCH_D_SEARCH
-        "VK_FORMAT_B10G11R11_UFLOAT_PACK32"
+        "return VK_FORMAT_B10G11R11_UFLOAT_PACK32"
     )
     set(PATCH_D_REPLACE
-        "VK_FORMAT_R32G32B32A32_SFLOAT /* [SwiftShader-Fix-D] B10G11R11 override */"
+        "return VK_FORMAT_R16G16B16A16_SFLOAT /* [SwiftShader-Fix-D] B10G11R11 override */"
     )
     string(FIND "${vk_code}" "${PATCH_D_SEARCH}" PATCH_D_POS)
     if(PATCH_D_POS EQUAL -1)
         message(STATUS "[Patch-D] Already patched or not found, skipping.")
     else()
         string(REPLACE "${PATCH_D_SEARCH}" "${PATCH_D_REPLACE}" vk_code "${vk_code}")
-        message(STATUS "[Patch-D] B10G11R11->R32G32B32A32 format override applied OK.")
+        message(STATUS "[Patch-D] B10G11R11->R16G16B16A16 return override applied OK.")
     endif()
 
     # -------------------------------------------------------------------------
@@ -187,25 +179,24 @@ if(NOT ffx_sdk_v2_POPULATED)
     message(STATUS "[Patch] All patches written to ffx_vk.cpp.")
 
     # -------------------------------------------------------------------------
-    # VERIFICATION: Read file back and confirm patches are present
+    # VERIFICATION
     # -------------------------------------------------------------------------
     file(READ "${VK_BACKEND_FILE}" vk_code_verify)
 
     string(FIND "${vk_code_verify}" "SwiftShader-Fix-C" VERIFY_C_POS)
     if(VERIFY_C_POS EQUAL -1)
         message(FATAL_ERROR
-            "[VERIFY FAILED] Patch-C (FP16 kill switch) not found in written file!\n"
-            "Check write permissions for: ${VK_BACKEND_FILE}"
+            "[VERIFY FAILED] Patch-C (FP16 kill switch) not found in written file!"
         )
     else()
-        message(STATUS "[VERIFY] Patch-C confirmed present in file. OK!")
+        message(STATUS "[VERIFY] Patch-C confirmed present. OK!")
     endif()
 
     string(FIND "${vk_code_verify}" "SwiftShader-Fix-D" VERIFY_D_POS)
     if(VERIFY_D_POS EQUAL -1)
         message(STATUS "[VERIFY] Warning: Patch-D marker not found.")
     else()
-        message(STATUS "[VERIFY] Patch-D confirmed present in file. OK!")
+        message(STATUS "[VERIFY] Patch-D confirmed present. OK!")
     endif()
 
     add_subdirectory(${ffx_sdk_v2_SOURCE_DIR}/sdk ${ffx_sdk_v2_BINARY_DIR}/sdk)
