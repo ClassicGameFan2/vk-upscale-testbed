@@ -9,44 +9,61 @@
 #include <malloc.h>
 #include <string>
 #include <cmath>
+#include <unordered_map>
 
 #include "stb_image_write.h"
 
 // =========================================================================
-// PURE VULKAN API HOOKS (100% Guaranteed to bypass SDK Signature errors!)
+// PURE VULKAN API HOOKS (Surgically bypasses SwiftShader Emulator Bugs!)
 // =========================================================================
 static PFN_vkGetDeviceProcAddr real_vkGetDeviceProcAddr = nullptr;
 static PFN_vkCreateImage real_vkCreateImage = nullptr;
 static PFN_vkCreateImageView real_vkCreateImageView = nullptr;
 
+// We use a map to ensure ImageViews perfectly match the upgraded Image formats!
+static std::unordered_map<VkImage, VkFormat> g_UpgradedImages;
+
 static VKAPI_ATTR VkResult VKAPI_CALL Hooked_vkCreateImage(VkDevice device, const VkImageCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkImage* pImage) {
     VkImageCreateInfo mod = *pCreateInfo;
-    // NUKE ALL 16-BIT FLOAT TEXTURES! SwiftShader corrupts negative numbers when writing to 16-bit memory.
-    if (mod.format == VK_FORMAT_B10G11R11_UFLOAT_PACK32) {
-        mod.format = VK_FORMAT_R32G32B32A32_SFLOAT;
-        std::cout << "[Trace-VK] vkCreateImage: Upgraded B10G11R11 -> R32G32B32A32_SFLOAT\n";
-    } else if (mod.format == VK_FORMAT_R16G16B16A16_SFLOAT) {
-        mod.format = VK_FORMAT_R32G32B32A32_SFLOAT;
-        std::cout << "[Trace-VK] vkCreateImage: Upgraded R16G16B16A16 -> R32G32B32A32_SFLOAT\n";
-    } else if (mod.format == VK_FORMAT_R16G16_SFLOAT) {
-        mod.format = VK_FORMAT_R32G32_SFLOAT;
-        std::cout << "[Trace-VK] vkCreateImage: Upgraded R16G16 -> R32G32_SFLOAT\n";
-    } else if (mod.format == VK_FORMAT_R16_SFLOAT) {
-        mod.format = VK_FORMAT_R32_SFLOAT;
-        std::cout << "[Trace-VK] vkCreateImage: Upgraded R16 -> R32_SFLOAT\n";
+    bool upgraded = false;
+
+    // ONLY upgrade textures that the Compute Shader writes to (STORAGE_BIT).
+    // This perfectly protects CPU-uploaded LUTs (like Lanczos) from memory misalignment and NaNs!
+    if (mod.usage & VK_IMAGE_USAGE_STORAGE_BIT) {
+        if (mod.format == VK_FORMAT_B10G11R11_UFLOAT_PACK32) {
+            mod.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+            upgraded = true;
+            std::cout << "[Trace-VK] vkCreateImage: Upgraded B10G11R11 -> R32G32B32A32_SFLOAT (Storage)\n";
+        } else if (mod.format == VK_FORMAT_R16G16B16A16_SFLOAT) {
+            mod.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+            upgraded = true;
+            std::cout << "[Trace-VK] vkCreateImage: Upgraded R16G16B16A16 -> R32G32B32A32_SFLOAT (Storage)\n";
+        } else if (mod.format == VK_FORMAT_R16G16_SFLOAT) {
+            mod.format = VK_FORMAT_R32G32_SFLOAT;
+            upgraded = true;
+            std::cout << "[Trace-VK] vkCreateImage: Upgraded R16G16 -> R32G32_SFLOAT (Storage)\n";
+        } else if (mod.format == VK_FORMAT_R16_SFLOAT) {
+            mod.format = VK_FORMAT_R32_SFLOAT;
+            upgraded = true;
+            std::cout << "[Trace-VK] vkCreateImage: Upgraded R16 -> R32_SFLOAT (Storage)\n";
+        }
     }
-    return real_vkCreateImage(device, &mod, pAllocator, pImage);
+
+    VkResult res = real_vkCreateImage(device, &mod, pAllocator, pImage);
+    if (res == VK_SUCCESS && upgraded) {
+        g_UpgradedImages[*pImage] = mod.format;
+    }
+    return res;
 }
 
 static VKAPI_ATTR VkResult VKAPI_CALL Hooked_vkCreateImageView(VkDevice device, const VkImageViewCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkImageView* pView) {
     VkImageViewCreateInfo mod = *pCreateInfo;
-    if (mod.format == VK_FORMAT_B10G11R11_UFLOAT_PACK32 || mod.format == VK_FORMAT_R16G16B16A16_SFLOAT) {
-        mod.format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    } else if (mod.format == VK_FORMAT_R16G16_SFLOAT) {
-        mod.format = VK_FORMAT_R32G32_SFLOAT;
-    } else if (mod.format == VK_FORMAT_R16_SFLOAT) {
-        mod.format = VK_FORMAT_R32G32_SFLOAT;
+    
+    // Automatically apply the upgraded format if this image was modified
+    if (g_UpgradedImages.count(mod.image)) {
+        mod.format = g_UpgradedImages[mod.image];
     }
+    
     return real_vkCreateImageView(device, &mod, pAllocator, pView);
 }
 
