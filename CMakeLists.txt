@@ -40,20 +40,20 @@ set(FFX_FSR2 ON CACHE BOOL "" FORCE)
 set(FFX_API_BACKEND "VK_X64" CACHE STRING "" FORCE)
 set(FFX_API_DX12 OFF CACHE BOOL "" FORCE)
 
-# BUST CACHE: Download a fresh uncorrupted SDK
-FetchContent_Declare(ffx_sdk_hdr
+FetchContent_Declare(ffx_sdk_v2
     GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git
     GIT_TAG        v1.1.4 
 )
-FetchContent_GetProperties(ffx_sdk_hdr)
+FetchContent_GetProperties(ffx_sdk_v2)
 
-if(NOT ffx_sdk_hdr_POPULATED)
+if(NOT ffx_sdk_v2_POPULATED)
     if(POLICY CMP0169)
         cmake_policy(SET CMP0169 OLD)
     endif()
-    FetchContent_Populate(ffx_sdk_hdr)
+    FetchContent_Populate(ffx_sdk_v2)
     
-    file(GLOB_RECURSE ffx_source_files "${ffx_sdk_hdr_SOURCE_DIR}/sdk/src/*.cpp" "${ffx_sdk_hdr_SOURCE_DIR}/sdk/src/*.h")
+    # Win7 Compat Scrubber
+    file(GLOB_RECURSE ffx_source_files "${ffx_sdk_v2_SOURCE_DIR}/sdk/src/*.cpp" "${ffx_sdk_v2_SOURCE_DIR}/sdk/src/*.h")
     foreach(ffx_file IN LISTS ffx_source_files)
         file(READ ${ffx_file} file_contents)
         if(file_contents MATCHES "SetThreadDescription")
@@ -63,28 +63,20 @@ if(NOT ffx_sdk_hdr_POPULATED)
     endforeach()
 
     # SwiftShader Memory Fixes
-    file(READ "${ffx_sdk_hdr_SOURCE_DIR}/sdk/src/backends/vk/ffx_vk.cpp" vk_backend_code)
+    file(READ "${ffx_sdk_v2_SOURCE_DIR}/sdk/src/backends/vk/ffx_vk.cpp" vk_backend_code)
     string(REPLACE "if (requestedProperties == VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT && (memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))" "if (false)" vk_backend_code "${vk_backend_code}")
     string(REPLACE "if (devCaps.dedicatedAllocationSupported)" "if (false)" vk_backend_code "${vk_backend_code}")
-    string(REPLACE "deviceCapabilities->fp16Supported = (bool)shaderFloat16Int8Features.shaderFloat16;" "deviceCapabilities->fp16Supported = false; printf(\" [Trace-VK] Patched SwiftShader FP16!\\\\n\"); fflush(stdout);" vk_backend_code "${vk_backend_code}")
-    file(WRITE "${ffx_sdk_hdr_SOURCE_DIR}/sdk/src/backends/vk/ffx_vk.cpp" "${vk_backend_code}")
 
     # =========================================================================
-    # THE ULTIMATE 32-BIT FORMAT UPGRADE (Bypasses all SwiftShader UAV Drops & 16-bit negative clamping!)
+    # SURGICAL FORMAT OVERRIDE: Fix only the Vulkan format translation layer.
+    # The FSR internal enum stays the same (shaders bind correctly).
+    # Only the Vulkan memory allocation gets a SwiftShader-compatible format.
     # =========================================================================
-    file(READ "${ffx_sdk_hdr_SOURCE_DIR}/sdk/src/components/fsr2/ffx_fsr2.cpp" fsr2_code)
-    
-    # 1. Upgrades B10G11R11 to pure 128-bit Float to stop the UAV dropping.
-    string(REPLACE "FFX_SURFACE_FORMAT_R11G11B10_FLOAT" "FFX_SURFACE_FORMAT_R32G32B32A32_FLOAT" fsr2_code "${fsr2_code}")
-    
-    # 2. Upgrades ALL 16-bit Float formats to 32-bit Float formats to stop negative number clamping.
-    string(REPLACE "FFX_SURFACE_FORMAT_R16G16B16A16_FLOAT" "FFX_SURFACE_FORMAT_R32G32B32A32_FLOAT" fsr2_code "${fsr2_code}")
-    string(REPLACE "FFX_SURFACE_FORMAT_R16G16_FLOAT" "FFX_SURFACE_FORMAT_R32G32_FLOAT" fsr2_code "${fsr2_code}")
-    string(REPLACE "FFX_SURFACE_FORMAT_R16_FLOAT" "FFX_SURFACE_FORMAT_R32_FLOAT" fsr2_code "${fsr2_code}")
-    
-    file(WRITE "${ffx_sdk_hdr_SOURCE_DIR}/sdk/src/components/fsr2/ffx_fsr2.cpp" "${fsr2_code}")
+    string(REPLACE "case FFX_SURFACE_FORMAT_R11G11B10_FLOAT:\n        return VK_FORMAT_B10G11R11_UFLOAT_PACK32;" "case FFX_SURFACE_FORMAT_R11G11B10_FLOAT:\n        printf(\" [Trace-VK] R11G11B10 -> R16G16B16A16 override!\\\\n\"); return VK_FORMAT_R16G16B16A16_SFLOAT;" vk_backend_code "${vk_backend_code}")
 
-    add_subdirectory(${ffx_sdk_hdr_SOURCE_DIR}/sdk ${ffx_sdk_hdr_BINARY_DIR}/sdk)
+    file(WRITE "${ffx_sdk_v2_SOURCE_DIR}/sdk/src/backends/vk/ffx_vk.cpp" "${vk_backend_code}")
+
+    add_subdirectory(${ffx_sdk_v2_SOURCE_DIR}/sdk ${ffx_sdk_v2_BINARY_DIR}/sdk)
 endif()
 
 file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/stb_impl.cpp "
@@ -97,8 +89,8 @@ add_executable(vk-upscale-testbed src/main.cpp ${CMAKE_CURRENT_BINARY_DIR}/stb_i
 
 target_include_directories(vk-upscale-testbed PRIVATE 
     ${stb_SOURCE_DIR}
-    ${ffx_sdk_hdr_SOURCE_DIR}/sdk/include
-    ${ffx_sdk_hdr_SOURCE_DIR}/sdk/include/FidelityFX/host/backends
+    ${ffx_sdk_v2_SOURCE_DIR}/sdk/include
+    ${ffx_sdk_v2_SOURCE_DIR}/sdk/include/FidelityFX/host/backends
 )
 
 target_link_libraries(vk-upscale-testbed PRIVATE 
