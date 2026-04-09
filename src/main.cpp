@@ -171,21 +171,53 @@ void renderScene(int w, int h, float jx, float jy,
 
 void saveFloatImage(const std::string& filename, int w, int h,
     const float* data) {
+    std::cout << "[saveFloat] START " << filename
+              << " size=" << w << "x" << h << std::endl;
+    std::cout.flush();
+
+    // Step A: allocate output buffer
+    std::cout << "[saveFloat] A: allocating bytes buffer..." << std::endl;
+    std::cout.flush();
     std::vector<unsigned char> bytes(w * h * 4);
+
+    // Step B: pixel conversion loop
+    std::cout << "[saveFloat] B: pixel conversion loop..." << std::endl;
+    std::cout.flush();
     int nanCount = 0;
+    int infCount = 0;
     for (int i = 0; i < w*h*4; i+=4) {
         for (int c = 0; c < 3; c++) {
             float v = data[i+c];
-            if (std::isnan(v)) { v = 0.0f; nanCount++; }
+            if (std::isnan(v))  { v = 0.0f; nanCount++; }
+            if (std::isinf(v))  { v = 1.0f; infCount++; }
             v = fmaxf(0.0f, fminf(1.0f, v));
             bytes[i+c] = (unsigned char)(powf(v, 1.0f/2.2f) * 255.0f);
         }
         bytes[i+3] = 255;
     }
-    if (nanCount > 0)
-        std::cout << "[WARNING] " << nanCount << " NaNs in "
-                  << filename << std::endl;
-    stbi_write_png(filename.c_str(), w, h, 4, bytes.data(), w*4);
+    std::cout << "[saveFloat] B: done. NaNs=" << nanCount
+              << " Infs=" << infCount << std::endl;
+    std::cout.flush();
+
+    // Step C: stbi write
+    std::cout << "[saveFloat] C: calling stbi_write_png..." << std::endl;
+    std::cout.flush();
+    int stbi_result = stbi_write_png(
+        filename.c_str(), w, h, 4, bytes.data(), w*4);
+    std::cout << "[saveFloat] C: stbi_write_png returned " 
+              << stbi_result << std::endl;
+    std::cout.flush();
+
+    // Step D: cleanup (vector destructor runs here at end of scope)
+    std::cout << "[saveFloat] D: about to destruct bytes vector..." << std::endl;
+    std::cout.flush();
+
+    // Force early scope exit to test vector destructor
+    { std::vector<unsigned char> tmp; bytes.swap(tmp); }
+
+    std::cout << "[saveFloat] D: bytes vector destructed OK." << std::endl;
+    std::cout.flush();
+
     std::cout << "Saved: " << filename << std::endl;
     std::cout.flush();
 }
