@@ -7,18 +7,19 @@ include(FetchContent)
 # =============================================================================
 # PATCH CONTROL SWITCHES
 # =============================================================================
-# Current configuration: Phase 2 - Test HLSL shader patch
-#   Now that we compile shaders from source, patching HLSL actually works!
-#   Patch-E OFF: SPD dispatch runs (not bypassed at C++ level)
-#   Patch-F ON:  HLSL shader early return (new - bypasses at shader level)
+# Current configuration: Phase 2 - Test HLSL shader patch via source compile
+#   Patch-E OFF: C++ SPD dispatch bypass disabled
+#   Patch-F ON:  HLSL ComputeAutoExposure early return
 #
-#   If Lavapipe stops crashing with Patch-F ON:
-#   → Crash is in shader CODE, not dispatch setup
-#   → We implement proper SPD fix in HLSL
+#   ComputeAutoExposure() is the function that calls SpdDownsample()
+#   which crashes Lavapipe. We patch it to return immediately.
 #
-#   If Lavapipe still crashes with Patch-F ON:
-#   → Crash is in dispatch SETUP (atomic counter, barriers, etc.)
-#   → We investigate C++ dispatch code
+#   If Lavapipe stops crashing:
+#     Crash is inside SpdDownsample shader code
+#     Next: implement proper SPD fix
+#   If Lavapipe still crashes:
+#     Crash is in dispatch setup before shader even runs
+#     Next: investigate atomic counter / descriptor setup
 # =============================================================================
 
 set(PATCH_A_ENABLED ON)  # Required for BOTH (confirmed)
@@ -26,13 +27,10 @@ set(PATCH_B_ENABLED OFF) # Not required for either (confirmed)
 set(PATCH_C_ENABLED OFF) # Not needed (confirmed)
 set(PATCH_D_ENABLED OFF) # Not needed (confirmed)
 set(PATCH_E_ENABLED OFF) # C++ SPD bypass - OFF (testing HLSL patch instead)
-set(PATCH_F_ENABLED ON)  # HLSL shader early return - NEW
+set(PATCH_F_ENABLED ON)  # HLSL ComputeAutoExposure early return - NEW
 
-# =============================================================================
-# SHADER COMPILATION MODE
-# OFF = compile from HLSL source using DXC (required for Patch-F to work)
-# ON  = use precompiled SPIR-V blobs (Patch-F has no effect when ON)
-# =============================================================================
+# OFF = compile shaders from HLSL source (required for Patch-F to work)
+# ON  = use precompiled blobs (Patch-F has no effect)
 set(FFX_USE_PRECOMPILED_SHADERS OFF)
 
 # =============================================================================
@@ -52,7 +50,7 @@ FetchContent_MakeAvailable(volk)
 
 FetchContent_Declare(stb
     GIT_REPOSITORY https://github.com/nothings/stb.git
-    GIT_Tag        master
+    GIT_TAG        master
 )
 FetchContent_MakeAvailable(stb)
 
@@ -247,7 +245,6 @@ if(NOT ffx_sdk_v2_POPULATED)
                 "printf(\"[SPD-DIAG] CP1: Before SPD constants\\n\"); fflush(stdout); Fsr2SpdConstants luminancePyramidConstants"
                 fsr2_code "${fsr2_code}")
         endif()
-
         set(CP2_3_SEARCH
             "scheduleDispatch(context, params, &context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1])"
         )
@@ -257,35 +254,29 @@ if(NOT ffx_sdk_v2_POPULATED)
                 "printf(\"[SPD-DIAG] CP2: Before scheduleDispatch Groups=[%u,%u]\\n\", dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1]); fflush(stdout); scheduleDispatch(context, params, &context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1]); printf(\"[SPD-DIAG] CP3: After scheduleDispatch OK\\n\"); fflush(stdout)"
                 fsr2_code "${fsr2_code}")
         endif()
-
         file(WRITE "${FSR2_CPP_FILE}" "${fsr2_code}")
         message(STATUS "[Patch-E] DISABLED - SPD runs with diagnostics.")
     endif()
 
     # =========================================================================
-    # PATCH F: HLSL shader early return for SPD luminance pyramid
+    # PATCH F: HLSL ComputeAutoExposure early return
     #
-    # This patch only works when FFX_USE_PRECOMPILED_SHADERS is OFF.
-    # When compiling from source, patching the HLSL file takes effect.
-    # When using precompiled blobs, this patch is silently ignored.
+    # From the SDK source file we can see the call chain:
+    #   ComputeAutoExposure()
+    #     -> SpdDownsample() / SpdDownsampleH()  <- crashes Lavapipe
     #
-    # PURPOSE: Test whether the crash is in shader CODE or dispatch SETUP.
-    #   If Lavapipe stops crashing with this patch ON:
-    #     → Crash is inside the shader instructions themselves
-    #     → We implement proper SPD fix in HLSL next
-    #   If Lavapipe still crashes with this patch ON:
-    #     → Crash is in dispatch setup (atomic counter, barriers, formats)
-    #     → We investigate C++ dispatch code instead
+    # We patch ComputeAutoExposure() to return immediately.
+    # This is better than patching the CS entry point because:
+    #   1. ComputeAutoExposure is defined in the .h file we can see
+    #   2. The search string is short and unique
+    #   3. No HLSL semantic syntax to worry about
     #
-    # The HLSL entry point is in:
-    #   sdk/include/FidelityFX/gpu/fsr2/ffx_fsr2_compute_luminance_pyramid.h
+    # Only works when FFX_USE_PRECOMPILED_SHADERS is OFF.
     # =========================================================================
     if(PATCH_F_ENABLED)
         if(FFX_USE_PRECOMPILED_SHADERS)
             message(STATUS
-                "[Patch-F] WARNING: FFX_USE_PRECOMPILED_SHADERS is ON."
-                " Patch-F patches HLSL source but precompiled blobs are used."
-                " Patch-F has NO EFFECT. Set FFX_USE_PRECOMPILED_SHADERS OFF."
+                "[Patch-F] WARNING: Has no effect with precompiled shaders ON."
             )
         else()
             set(LUM_PYRAMID_HLSL
@@ -301,36 +292,28 @@ if(NOT ffx_sdk_v2_POPULATED)
             file(READ "${LUM_PYRAMID_HLSL}" hlsl_code)
             message(STATUS "[Patch-F] HLSL luminance pyramid file read OK.")
 
-            # Print all void CS lines so we can see the exact signature
-            message(STATUS "=== [Patch-F] Searching for CS entry point ===")
-            string(REPLACE "\n" ";" hlsl_lines "${hlsl_code}")
-            set(hlsl_line_num 0)
-            foreach(hlsl_line IN LISTS hlsl_lines)
-                math(EXPR hlsl_line_num "${hlsl_line_num} + 1")
-                if(hlsl_line MATCHES "void CS")
-                    message(STATUS "  LINE ${hlsl_line_num}: ${hlsl_line}")
-                endif()
-            endforeach()
-            message(STATUS "=== [Patch-F] End CS search ===")
-
-            # Patch the CS entry point to return immediately.
-            # From the PDF the exact signature is:
-            # void CS(uint3 WorkGroupId : SV_GroupID,
-            #         uint LocalThreadIndex : SV_GroupIndex)
-            # We insert an immediate return as the first statement.
-            # This produces a valid empty shader that does nothing.
+            # From the source file we can see ComputeAutoExposure is defined as:
+            # void ComputeAutoExposure(FfxUInt32x3 WorkGroupId, FfxUInt32 LocalThreadIndex)
+            # {
+            #     ...SpdDownsample... <- crashes Lavapipe
+            # }
+            #
+            # We replace the opening of the function body to add
+            # an immediate return as the very first statement.
+            # Search string: the unique function signature + opening brace.
+            # This is guaranteed unique in the entire file.
             set(PATCH_F_SEARCH
-                "void CS(uint3 WorkGroupId : SV_GroupID, uint LocalThreadIndex : SV_GroupIndex)"
+                "void ComputeAutoExposure(FfxUInt32x3 WorkGroupId, FfxUInt32 LocalThreadIndex)"
             )
             set(PATCH_F_REPLACE
-                "void CS(uint3 WorkGroupId : SV_GroupID, uint LocalThreadIndex : SV_GroupIndex) { return; } void CS_OriginalDisabled(uint3 WorkGroupId : SV_GroupID, uint LocalThreadIndex : SV_GroupIndex)"
+                "void ComputeAutoExposure(FfxUInt32x3 WorkGroupId, FfxUInt32 LocalThreadIndex) { return; } void ComputeAutoExposure_OriginalDisabled(FfxUInt32x3 WorkGroupId, FfxUInt32 LocalThreadIndex)"
             )
 
             string(FIND "${hlsl_code}" "${PATCH_F_SEARCH}" PATCH_F_POS)
             if(PATCH_F_POS EQUAL -1)
                 message(FATAL_ERROR
-                    "[Patch-F] CS entry point not found!\n"
-                    "Check LINE output above for exact signature."
+                    "[Patch-F] ComputeAutoExposure signature not found!\n"
+                    "Expected: '${PATCH_F_SEARCH}'"
                 )
             else()
                 string(REPLACE
@@ -339,17 +322,20 @@ if(NOT ffx_sdk_v2_POPULATED)
                     hlsl_code "${hlsl_code}")
                 file(WRITE "${LUM_PYRAMID_HLSL}" "${hlsl_code}")
                 message(STATUS
-                    "[Patch-F] HLSL CS early return applied OK.")
+                    "[Patch-F] ComputeAutoExposure early return applied OK.")
             endif()
 
             # Verify
             file(READ "${LUM_PYRAMID_HLSL}" hlsl_verify)
-            string(FIND "${hlsl_verify}" "CS_OriginalDisabled" VERIFY_F_POS)
+            string(FIND "${hlsl_verify}"
+                "ComputeAutoExposure_OriginalDisabled" VERIFY_F_POS)
             if(VERIFY_F_POS EQUAL -1)
                 message(FATAL_ERROR
-                    "[VERIFY-F] Patch-F not confirmed in HLSL file!")
+                    "[VERIFY-F] Patch-F not confirmed in HLSL file!"
+                )
             else()
-                message(STATUS "[VERIFY-F] Patch-F confirmed in HLSL file. OK!")
+                message(STATUS
+                    "[VERIFY-F] Patch-F confirmed in HLSL file. OK!")
             endif()
         endif()
     else()
@@ -368,9 +354,7 @@ if(NOT ffx_sdk_v2_POPULATED)
             HINTS
                 "C:/Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Tools/MSVC"
                 "C:/Program Files (x86)/Windows Kits/10/bin"
-            PATH_SUFFIXES
-                "x64"
-                "bin/Hostx64/x64"
+            PATH_SUFFIXES "x64" "bin/Hostx64/x64"
             DOC "Path to DXC shader compiler"
         )
 
@@ -385,10 +369,7 @@ if(NOT ffx_sdk_v2_POPULATED)
                 list(GET DXC_CANDIDATES 0 DXC_PATH)
                 message(STATUS "[Shader] DXC found via glob: ${DXC_PATH}")
             else()
-                message(FATAL_ERROR
-                    "[Shader] DXC compiler not found!\n"
-                    "Set FFX_USE_PRECOMPILED_SHADERS ON to use blobs."
-                )
+                message(FATAL_ERROR "[Shader] DXC compiler not found!")
             endif()
         else()
             message(STATUS "[Shader] DXC found: ${DXC_PATH}")
