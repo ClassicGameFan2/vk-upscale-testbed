@@ -24,7 +24,7 @@ set(PATCH_A_ENABLED ON)
 # Patch-B: SwiftShader memory allocator fix #2
 # Disables dedicated allocation that SwiftShader does not support properly.
 # Required for: SWIFTSHADER (confirmed) / Lavapipe: unknown, keep ON for safety
-set(PATCH_B_ENABLED ON)
+set(PATCH_B_ENABLED OFF)
 
 # Patch-C: FP16 kill switch
 # Forces fp16Supported=false in ffx_vk.cpp so FSR2 uses pure FP32 math.
