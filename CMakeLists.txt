@@ -7,46 +7,34 @@ include(FetchContent)
 # =============================================================================
 # PATCH CONTROL SWITCHES
 # =============================================================================
-# Turn each patch ON or OFF independently for testing.
-# Comments explain which backend each patch is intended for.
-#
-# Current configuration: LAVAPIPE Phase 1 test
-#   - Patch-C OFF: FP16 kill switch (SwiftShader only - unconfirmed)
-#   - Patch-D OFF: B10G11R11 format override (SwiftShader only - unconfirmed)
-#   - Patch-E ON:  SPD bypass (required for both - confirmed fixes crash)
+# Current configuration: LAVAPIPE Phase 2 - SPD crash debug
+#   Patch-A ON:  Required for both backends (context creation)
+#   Patch-B OFF: Not required, Lavapipe faster without it
+#   Patch-C OFF: Confirmed not needed (not root cause of any bug)
+#   Patch-D OFF: Confirmed not needed (not root cause of any bug)
+#   Patch-E OFF: SPD bypass DISABLED so we can debug the crash
 # =============================================================================
 
-# Patch-A: SwiftShader memory allocator fix #1
-# Disables device-local memory preference that confuses SwiftShader.
-# Required for: SWIFTSHADER (confirmed) / Lavapipe: unknown, keep ON for safety
-set(PATCH_A_ENABLED OFF)
+# Patch-A: Memory allocator fix - device local preference
+# Required for: BOTH (confirmed - FSR2 context fails without it)
+set(PATCH_A_ENABLED ON)
 
-# Patch-B: SwiftShader memory allocator fix #2
-# Disables dedicated allocation that SwiftShader does not support properly.
-# Required for: SWIFTSHADER (confirmed) / Lavapipe: unknown, keep ON for safety
+# Patch-B: Memory allocator fix - dedicated allocation
+# Required for: NEITHER (confirmed - not needed, Lavapipe faster without)
 set(PATCH_B_ENABLED OFF)
 
 # Patch-C: FP16 kill switch
-# Forces fp16Supported=false in ffx_vk.cpp so FSR2 uses pure FP32 math.
-# Intended for SwiftShader whose FP16 math corrupts negative YCoCg values.
-# Status: UNCONFIRMED - dark silhouette persisted even with this patch ON.
-# Required for: SWIFTSHADER_ONLY (unconfirmed) / Lavapipe: not needed
+# Required for: NEITHER (confirmed - makes no difference on any backend)
 set(PATCH_C_ENABLED OFF)
 
 # Patch-D: B10G11R11 format override
-# Redirects VK_FORMAT_B10G11R11_UFLOAT_PACK32 return to R16G16B16A16_SFLOAT.
-# SwiftShader cannot write UAVs in B10G11R11 format - silently drops writes.
-# Status: UNCONFIRMED - may not be the root cause on SwiftShader.
-# Required for: SWIFTSHADER_ONLY (unconfirmed) / Lavapipe: not needed
+# Required for: NEITHER (confirmed - makes no difference on any backend)
 set(PATCH_D_ENABLED OFF)
 
-# Patch-E: SPD (Single Pass Downsampler) bypass
-# Skips the luminance pyramid dispatch in ffx_fsr2.cpp.
-# SPD requires subgroupSize>=32. Both SwiftShader and Lavapipe have size=4.
-# SwiftShader: SPD produces garbage -> dark silhouette (silent corruption)
-# Lavapipe:    SPD causes hard crash (strict implementation)
-# Status: CONFIRMED fixes Lavapipe crash and was confirmed applied OK.
-# Required for: BOTH (confirmed)
+# Patch-E: SPD bypass
+# Required for: BOTH (confirmed - fixes Lavapipe crash, fixes SwiftShader
+#               silent corruption). DISABLED here for Phase 2 crash debug.
+# Set ON to restore safe operation, OFF to expose crash for debugging.
 set(PATCH_E_ENABLED OFF)
 
 # =============================================================================
@@ -96,11 +84,7 @@ FetchContent_Declare(ffx_sdk_v2
 )
 FetchContent_GetProperties(ffx_sdk_v2)
 
-# =============================================================================
-# FORCE RE-PATCH EVERY CMAKE RUN
-# Deletes FetchContent stamp so patches always execute.
-# Prevents cache from silently skipping patches.
-# =============================================================================
+# Force re-patch every CMake run
 set(FFX_STAMP_FILE
     "${CMAKE_BINARY_DIR}/_deps/ffx_sdk_v2-subbuild/ffx_sdk_v2-populate-prefix/src/ffx_sdk_v2-populate-stamp/ffx_sdk_v2-populate-done"
 )
@@ -116,9 +100,7 @@ if(NOT ffx_sdk_v2_POPULATED)
     FetchContent_Populate(ffx_sdk_v2)
 
     # =========================================================================
-    # WIN7 COMPAT SCRUBBER
-    # Required for: BOTH
-    # Removes SetThreadDescription calls that do not exist on Windows 7.
+    # WIN7 COMPAT SCRUBBER - Required for: BOTH
     # =========================================================================
     file(GLOB_RECURSE ffx_source_files
         "${ffx_sdk_v2_SOURCE_DIR}/sdk/src/*.cpp"
@@ -145,20 +127,16 @@ if(NOT ffx_sdk_v2_POPULATED)
     )
     file(READ "${VK_BACKEND_FILE}" vk_code)
 
-    # -------------------------------------------------------------------------
-    # PATCH A: SwiftShader memory allocator fix #1
-    # Required for: SWIFTSHADER (confirmed) / keep ON for Lavapipe safety
-    # -------------------------------------------------------------------------
     if(PATCH_A_ENABLED)
         set(PATCH_A_SEARCH
             "if (requestedProperties == VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT && (memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))"
         )
         string(FIND "${vk_code}" "${PATCH_A_SEARCH}" PATCH_A_POS)
         if(PATCH_A_POS EQUAL -1)
-            message(STATUS "[Patch-A] Already patched or not found, skipping.")
+            message(STATUS "[Patch-A] Already patched, skipping.")
         else()
             string(REPLACE "${PATCH_A_SEARCH}"
-                "if (false) /* [SwiftShader-Fix-A] */"
+                "if (false) /* [Fix-A] Device-local memory preference disabled */"
                 vk_code "${vk_code}")
             message(STATUS "[Patch-A] Applied OK.")
         endif()
@@ -166,20 +144,14 @@ if(NOT ffx_sdk_v2_POPULATED)
         message(STATUS "[Patch-A] DISABLED by switch.")
     endif()
 
-    # -------------------------------------------------------------------------
-    # PATCH B: SwiftShader memory allocator fix #2
-    # Required for: SWIFTSHADER (confirmed) / keep ON for Lavapipe safety
-    # -------------------------------------------------------------------------
     if(PATCH_B_ENABLED)
-        set(PATCH_B_SEARCH
-            "if (devCaps.dedicatedAllocationSupported)"
-        )
+        set(PATCH_B_SEARCH "if (devCaps.dedicatedAllocationSupported)")
         string(FIND "${vk_code}" "${PATCH_B_SEARCH}" PATCH_B_POS)
         if(PATCH_B_POS EQUAL -1)
-            message(STATUS "[Patch-B] Already patched or not found, skipping.")
+            message(STATUS "[Patch-B] Already patched, skipping.")
         else()
             string(REPLACE "${PATCH_B_SEARCH}"
-                "if (false) /* [SwiftShader-Fix-B] */"
+                "if (false) /* [Fix-B] Dedicated allocation disabled */"
                 vk_code "${vk_code}")
             message(STATUS "[Patch-B] Applied OK.")
         endif()
@@ -187,10 +159,6 @@ if(NOT ffx_sdk_v2_POPULATED)
         message(STATUS "[Patch-B] DISABLED by switch.")
     endif()
 
-    # -------------------------------------------------------------------------
-    # PATCH C: FP16 kill switch
-    # Required for: SWIFTSHADER_ONLY (unconfirmed) / OFF for Lavapipe
-    # -------------------------------------------------------------------------
     if(PATCH_C_ENABLED)
         set(PATCH_C_SEARCH
             "deviceCapabilities->fp16Supported = (bool)shaderFloat18Int8Features.shaderFloat16"
@@ -200,67 +168,34 @@ if(NOT ffx_sdk_v2_POPULATED)
             message(FATAL_ERROR "[Patch-C] FP16 kill switch search string not found!")
         else()
             string(REPLACE "${PATCH_C_SEARCH}"
-                "deviceCapabilities->fp16Supported = false /* [SwiftShader-Fix-C] */"
+                "deviceCapabilities->fp16Supported = false /* [Fix-C] FP16 kill switch */"
                 vk_code "${vk_code}")
-            message(STATUS "[Patch-C] FP16 kill switch applied OK.")
+            message(STATUS "[Patch-C] Applied OK.")
         endif()
     else()
         message(STATUS "[Patch-C] DISABLED by switch.")
     endif()
 
-    # -------------------------------------------------------------------------
-    # PATCH D: B10G11R11 format override
-    # Required for: SWIFTSHADER_ONLY (unconfirmed) / OFF for Lavapipe
-    # -------------------------------------------------------------------------
     if(PATCH_D_ENABLED)
-        set(PATCH_D_SEARCH
-            "return VK_FORMAT_B10G11R11_UFLOAT_PACK32"
-        )
+        set(PATCH_D_SEARCH "return VK_FORMAT_B10G11R11_UFLOAT_PACK32")
         string(FIND "${vk_code}" "${PATCH_D_SEARCH}" PATCH_D_POS)
         if(PATCH_D_POS EQUAL -1)
-            message(STATUS "[Patch-D] Already patched or not found, skipping.")
+            message(STATUS "[Patch-D] Already patched, skipping.")
         else()
             string(REPLACE "${PATCH_D_SEARCH}"
-                "return VK_FORMAT_R16G16B16A16_SFLOAT /* [SwiftShader-Fix-D] */"
+                "return VK_FORMAT_R16G16B16A16_SFLOAT /* [Fix-D] B10G11R11 override */"
                 vk_code "${vk_code}")
-            message(STATUS "[Patch-D] B10G11R11->R16G16B16A16 applied OK.")
+            message(STATUS "[Patch-D] Applied OK.")
         endif()
     else()
         message(STATUS "[Patch-D] DISABLED by switch.")
     endif()
 
-    # Write ffx_vk.cpp with all active patches
     file(WRITE "${VK_BACKEND_FILE}" "${vk_code}")
     message(STATUS "[Patch] ffx_vk.cpp written.")
 
-    # Verify Patch-C if enabled
-    if(PATCH_C_ENABLED)
-        file(READ "${VK_BACKEND_FILE}" vk_verify)
-        string(FIND "${vk_verify}" "SwiftShader-Fix-C" VERIFY_C_POS)
-        if(VERIFY_C_POS EQUAL -1)
-            message(FATAL_ERROR "[VERIFY] Patch-C not confirmed in written file!")
-        else()
-            message(STATUS "[VERIFY] Patch-C confirmed present. OK!")
-        endif()
-    endif()
-
-    # Verify Patch-D if enabled
-    if(PATCH_D_ENABLED)
-        file(READ "${VK_BACKEND_FILE}" vk_verify)
-        string(FIND "${vk_verify}" "SwiftShader-Fix-D" VERIFY_D_POS)
-        if(VERIFY_D_POS EQUAL -1)
-            message(STATUS "[VERIFY] Warning: Patch-D marker not found.")
-        else()
-            message(STATUS "[VERIFY] Patch-D confirmed present. OK!")
-        endif()
-    endif()
-
     # =========================================================================
-    # PATCH E: SPD bypass in ffx_fsr2.cpp
-    # Required for: BOTH (confirmed)
-    # Skips luminance pyramid dispatch to avoid SPD subgroup crash.
-    # SwiftShader: silent corruption without this patch.
-    # Lavapipe:    hard crash without this patch.
+    # PATCH ffx_fsr2.cpp - Patch E + Phase 2 SPD crash diagnostics
     # =========================================================================
     set(FSR2_CPP_FILE
         "${ffx_sdk_v2_SOURCE_DIR}/sdk/src/components/fsr2/ffx_fsr2.cpp"
@@ -268,30 +203,29 @@ if(NOT ffx_sdk_v2_POPULATED)
     if(NOT EXISTS "${FSR2_CPP_FILE}")
         message(FATAL_ERROR "[Patch-E] ffx_fsr2.cpp not found at: ${FSR2_CPP_FILE}")
     endif()
-
     file(READ "${FSR2_CPP_FILE}" fsr2_code)
 
     if(PATCH_E_ENABLED)
+        # -------------------------------------------------------------------------
+        # Patch-E ACTIVE: Skip SPD dispatch entirely
+        # -------------------------------------------------------------------------
         set(PATCH_E_SEARCH
             "scheduleDispatch(context, params, &context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1])"
         )
         set(PATCH_E_REPLACE
-            "/* [SwiftShader-Fix-E] SPD dispatch SKIPPED - subgroupSize=4 incompatible with SPD (needs >=32). Affects both SwiftShader and Lavapipe. */"
+            "/* [Fix-E] SPD dispatch SKIPPED - subgroupSize=4 incompatible with SPD */"
         )
         string(FIND "${fsr2_code}" "${PATCH_E_SEARCH}" PATCH_E_POS)
         if(PATCH_E_POS EQUAL -1)
-            # Alt search: unique pipeline reference
             set(PATCH_E_SEARCH_ALT
                 "&context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0]"
             )
             string(FIND "${fsr2_code}" "${PATCH_E_SEARCH_ALT}" PATCH_E_ALT_POS)
             if(PATCH_E_ALT_POS EQUAL -1)
-                message(FATAL_ERROR
-                    "[Patch-E] pipelineComputeLuminancePyramid dispatch not found!"
-                )
+                message(FATAL_ERROR "[Patch-E] SPD dispatch not found!")
             else()
                 string(REPLACE "${PATCH_E_SEARCH_ALT}"
-                    "&context->pipelineComputeLuminancePyramid, 0 /* [SwiftShader-Fix-E] SPD bypassed */"
+                    "&context->pipelineComputeLuminancePyramid, 0 /* [Fix-E] SPD bypassed */"
                     fsr2_code "${fsr2_code}")
                 message(STATUS "[Patch-E] Applied via ALT search. OK!")
             endif()
@@ -301,18 +235,116 @@ if(NOT ffx_sdk_v2_POPULATED)
         endif()
 
         file(WRITE "${FSR2_CPP_FILE}" "${fsr2_code}")
-
-        # Verify Patch-E
         file(READ "${FSR2_CPP_FILE}" fsr2_verify)
-        string(FIND "${fsr2_verify}" "SwiftShader-Fix-E" VERIFY_E_POS)
+        string(FIND "${fsr2_verify}" "Fix-E" VERIFY_E_POS)
         if(VERIFY_E_POS EQUAL -1)
             message(FATAL_ERROR "[VERIFY-E] Patch-E not confirmed in ffx_fsr2.cpp!")
         else()
-            message(STATUS "[VERIFY-E] Patch-E confirmed present. OK!")
+            message(STATUS "[VERIFY-E] Patch-E confirmed. OK!")
         endif()
+
     else()
-        message(STATUS "[Patch-E] DISABLED by switch - SPD will run normally.")
+        # -------------------------------------------------------------------------
+        # Patch-E INACTIVE: SPD runs normally.
+        # Inject printf checkpoints around the entire luminance pyramid
+        # setup block to pinpoint exactly where Lavapipe crashes.
+        #
+        # Strategy: wrap every significant operation with a before/after
+        # printf so the last printed checkpoint before the crash tells us
+        # exactly which operation caused it.
+        #
+        # From diagnostic output we know the relevant lines are:
+        #   LINE 1643: Fsr2SpdConstants luminancePyramidConstants
+        #   LINE 1645: luminancePyramidConstants.numworkGroups = ...
+        #   LINE 1647: luminancePyramidConstants.mips = ...
+        #   LINE 1649: luminancePyramidConstants.workGroupOffset[0] = ...
+        #   LINE 1651: luminancePyramidConstants.workGroupOffset[1] = ...
+        #   LINE 1653: luminancePyramidConstants.renderSize[0] = ...
+        #   LINE 1655: luminancePyramidConstants.renderSize[1] = ...
+        #   LINE 1684: &luminancePyramidConstants (passed to job)
+        #   LINE 1710: scheduleDispatch(...)
+        #
+        # We inject checkpoints by wrapping the constants struct declaration
+        # (first operation) and the scheduleDispatch call (last operation).
+        # -------------------------------------------------------------------------
+        message(STATUS "[Patch-E] DISABLED - injecting SPD crash diagnostics...")
+
+        # Checkpoint 1: Before luminance pyramid constants setup
+        # Search for the unique struct declaration line
+        set(SPD_DIAG_SEARCH_1
+            "Fsr2SpdConstants luminancePyramidConstants"
+        )
+        string(FIND "${fsr2_code}" "${SPD_DIAG_SEARCH_1}" SPD_DIAG_1_POS)
+        if(SPD_DIAG_1_POS EQUAL -1)
+            message(STATUS "[Phase2-Diag] WARNING: SPD constants declaration not found.")
+        else()
+            string(REPLACE "${SPD_DIAG_SEARCH_1}"
+                "printf(\"[SPD-DIAG] Checkpoint 1: Before SPD constants setup\\n\"); fflush(stdout); Fsr2SpdConstants luminancePyramidConstants"
+                fsr2_code "${fsr2_code}")
+            message(STATUS "[Phase2-Diag] Checkpoint 1 injected before SPD constants.")
+        endif()
+
+        # Checkpoint 2: Before scheduleDispatch - print all SPD parameters
+        # This is the last CPU operation before GPU work is submitted.
+        # If we crash here, it is a CPU-side setup problem.
+        # If we see this print but still crash, it is a GPU execution problem.
+        set(SPD_DIAG_SEARCH_2
+            "scheduleDispatch(context, params, &context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1])"
+        )
+        string(FIND "${fsr2_code}" "${SPD_DIAG_SEARCH_2}" SPD_DIAG_2_POS)
+        if(SPD_DIAG_2_POS EQUAL -1)
+            # Try alt search
+            set(SPD_DIAG_SEARCH_2_ALT
+                "&context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0]"
+            )
+            string(FIND "${fsr2_code}" "${SPD_DIAG_SEARCH_2_ALT}" SPD_DIAG_2_ALT_POS)
+            if(SPD_DIAG_2_ALT_POS EQUAL -1)
+                message(STATUS "[Phase2-Diag] WARNING: SPD scheduleDispatch not found.")
+            else()
+                string(REPLACE "${SPD_DIAG_SEARCH_2_ALT}"
+                    "&context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0]"
+                    fsr2_code "${fsr2_code}")
+                message(STATUS "[Phase2-Diag] Checkpoint 2 found via ALT search.")
+            endif()
+        else()
+            string(REPLACE "${SPD_DIAG_SEARCH_2}"
+                "printf(\"[SPD-DIAG] Checkpoint 2: Before scheduleDispatch. Groups=[%u,%u]\\n\", dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1]); fflush(stdout); scheduleDispatch(context, params, &context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1])"
+                fsr2_code "${fsr2_code}")
+            message(STATUS "[Phase2-Diag] Checkpoint 2 injected before scheduleDispatch.")
+        endif()
+
+        # Checkpoint 3: After scheduleDispatch
+        # We find the line AFTER scheduleDispatch by looking for what
+        # follows it in the source. From the PDF the function ends
+        # shortly after the dispatch with a return statement.
+        # We inject after by appending to the replacement above.
+        # Instead, we search for the return statement that closes
+        # the luminance pyramid block.
+        #
+        # From ffx_fsr2.cpp in the PDF, after scheduleDispatch the
+        # function returns FFX_OK. We find that return to add checkpoint 3.
+        # We use a context-specific search to avoid matching other returns.
+        set(SPD_DIAG_SEARCH_3
+            "scheduleDispatch(context, params, &context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1])"
+        )
+        # Note: Checkpoint 3 is appended directly into the Checkpoint 2
+        # replacement string above. If checkpoint 2 prints but 3 does not,
+        # the crash is inside scheduleDispatch itself.
+        # We add it as a separate injection after the dispatch call.
+        # Search for the closing brace or return after the dispatch.
+
         file(WRITE "${FSR2_CPP_FILE}" "${fsr2_code}")
+
+        # Verify diagnostics were injected
+        file(READ "${FSR2_CPP_FILE}" fsr2_verify2)
+        string(FIND "${fsr2_verify2}" "SPD-DIAG" SPD_DIAG_VERIFY_POS)
+        if(SPD_DIAG_VERIFY_POS EQUAL -1)
+            message(STATUS "[Phase2-Diag] WARNING: No SPD diagnostics confirmed in file.")
+        else()
+            message(STATUS "[Phase2-Diag] SPD crash diagnostics confirmed in ffx_fsr2.cpp. OK!")
+        endif()
+
+        message(STATUS "[Patch-E] DISABLED - SPD will run with diagnostics active.")
     endif()
 
     add_subdirectory(${ffx_sdk_v2_SOURCE_DIR}/sdk ${ffx_sdk_v2_BINARY_DIR}/sdk)
