@@ -47,7 +47,7 @@ set(PATCH_D_ENABLED OFF)
 # Lavapipe:    SPD causes hard crash (strict implementation)
 # Status: CONFIRMED fixes Lavapipe crash and was confirmed applied OK.
 # Required for: BOTH (confirmed)
-set(PATCH_E_ENABLED ON)
+set(PATCH_E_ENABLED OFF)
 
 # =============================================================================
 # DEPENDENCIES
