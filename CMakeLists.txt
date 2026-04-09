@@ -7,43 +7,31 @@ include(FetchContent)
 # =============================================================================
 # PATCH CONTROL SWITCHES
 # =============================================================================
-# Current configuration: Phase 2 conclusion / Pre-Phase 3
-#   Proof of concept: compile shaders from source instead of precompiled blobs
-#   Patch-E OFF: SPD will run (and crash Lavapipe) - expected for this test
-#   Goal: confirm shader compilation from source works before patching shaders
+# Current configuration: Phase 2 - Test HLSL shader patch
+#   Now that we compile shaders from source, patching HLSL actually works!
+#   Patch-E OFF: SPD dispatch runs (not bypassed at C++ level)
+#   Patch-F ON:  HLSL shader early return (new - bypasses at shader level)
 #
-# Confirmed findings so far:
-#   Patch-A: REQUIRED for BOTH (FSR2 context creation fails without it)
-#   Patch-B: NOT required for either (Lavapipe faster without it)
-#   Patch-C: NOT needed (confirmed not root cause of any bug)
-#   Patch-D: NOT needed (confirmed not root cause of any bug)
-#   Patch-E: REQUIRED for BOTH (SPD SPIR-V blob crashes Lavapipe on GPU,
-#            causes silent corruption on SwiftShader)
-#            Set OFF here intentionally to test shader recompilation path.
-#            Lavapipe WILL crash - this is expected and confirms SPD runs.
+#   If Lavapipe stops crashing with Patch-F ON:
+#   → Crash is in shader CODE, not dispatch setup
+#   → We implement proper SPD fix in HLSL
+#
+#   If Lavapipe still crashes with Patch-F ON:
+#   → Crash is in dispatch SETUP (atomic counter, barriers, etc.)
+#   → We investigate C++ dispatch code
 # =============================================================================
 
 set(PATCH_A_ENABLED ON)  # Required for BOTH (confirmed)
 set(PATCH_B_ENABLED OFF) # Not required for either (confirmed)
 set(PATCH_C_ENABLED OFF) # Not needed (confirmed)
 set(PATCH_D_ENABLED OFF) # Not needed (confirmed)
-set(PATCH_E_ENABLED OFF) # SPD bypass - OFF to test shader recompilation
+set(PATCH_E_ENABLED OFF) # C++ SPD bypass - OFF (testing HLSL patch instead)
+set(PATCH_F_ENABLED ON)  # HLSL shader early return - NEW
 
 # =============================================================================
 # SHADER COMPILATION MODE
-# =============================================================================
-# FFX_USE_PRECOMPILED_SHADERS controls whether the AMD SDK uses its
-# pre-built SPIR-V blob files or recompiles shaders from HLSL source.
-#
-# ON  = Use precompiled SPIR-V blobs (default AMD behavior)
-#       Fast build. Cannot patch shader source.
-#       SPD blob crashes Lavapipe during GPU execution (confirmed).
-#
-# OFF = Recompile shaders from HLSL source using DXC at build time.
-#       Slower build. We CAN patch HLSL source and it takes effect.
-#       This is required to fix the SPD crash properly.
-#       Requires DXC (DirectX Shader Compiler) on the build machine.
-#       DXC is included with Visual Studio 2022 on GitHub Actions.
+# OFF = compile from HLSL source using DXC (required for Patch-F to work)
+# ON  = use precompiled SPIR-V blobs (Patch-F has no effect when ON)
 # =============================================================================
 set(FFX_USE_PRECOMPILED_SHADERS OFF)
 
@@ -64,7 +52,7 @@ FetchContent_MakeAvailable(volk)
 
 FetchContent_Declare(stb
     GIT_REPOSITORY https://github.com/nothings/stb.git
-    GIT_TAG        master
+    GIT_Tag        master
 )
 FetchContent_MakeAvailable(stb)
 
@@ -87,8 +75,6 @@ set(FFX_FSR1 ON CACHE BOOL "" FORCE)
 set(FFX_FSR2 ON CACHE BOOL "" FORCE)
 set(FFX_API_BACKEND "VK_X64" CACHE STRING "" FORCE)
 set(FFX_API_DX12 OFF CACHE BOOL "" FORCE)
-
-# Pass shader compilation mode to AMD SDK
 set(FFX_USE_PRECOMPILED_SHADERS ${FFX_USE_PRECOMPILED_SHADERS}
     CACHE BOOL "" FORCE)
 
@@ -159,9 +145,7 @@ if(NOT ffx_sdk_v2_POPULATED)
     endif()
 
     if(PATCH_B_ENABLED)
-        set(PATCH_B_SEARCH
-            "if (devCaps.dedicatedAllocationSupported)"
-        )
+        set(PATCH_B_SEARCH "if (devCaps.dedicatedAllocationSupported)")
         string(FIND "${vk_code}" "${PATCH_B_SEARCH}" PATCH_B_POS)
         if(PATCH_B_POS EQUAL -1)
             message(STATUS "[Patch-B] Already patched, skipping.")
@@ -193,9 +177,7 @@ if(NOT ffx_sdk_v2_POPULATED)
     endif()
 
     if(PATCH_D_ENABLED)
-        set(PATCH_D_SEARCH
-            "return VK_FORMAT_B10G11R11_UFLOAT_PACK32"
-        )
+        set(PATCH_D_SEARCH "return VK_FORMAT_B10G11R11_UFLOAT_PACK32")
         string(FIND "${vk_code}" "${PATCH_D_SEARCH}" PATCH_D_POS)
         if(PATCH_D_POS EQUAL -1)
             message(STATUS "[Patch-D] Already patched, skipping.")
@@ -213,7 +195,7 @@ if(NOT ffx_sdk_v2_POPULATED)
     message(STATUS "[Patch] ffx_vk.cpp written.")
 
     # =========================================================================
-    # PATCH ffx_fsr2.cpp - Patch E + diagnostics
+    # PATCH E: C++ SPD dispatch bypass in ffx_fsr2.cpp
     # =========================================================================
     set(FSR2_CPP_FILE
         "${ffx_sdk_v2_SOURCE_DIR}/sdk/src/components/fsr2/ffx_fsr2.cpp"
@@ -224,7 +206,6 @@ if(NOT ffx_sdk_v2_POPULATED)
     file(READ "${FSR2_CPP_FILE}" fsr2_code)
 
     if(PATCH_E_ENABLED)
-        # Patch-E ACTIVE: Skip SPD dispatch entirely
         set(PATCH_E_SEARCH
             "scheduleDispatch(context, params, &context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1])"
         )
@@ -244,7 +225,7 @@ if(NOT ffx_sdk_v2_POPULATED)
             endif()
         else()
             string(REPLACE "${PATCH_E_SEARCH}"
-                "/* [Fix-E] SPD dispatch SKIPPED - subgroupSize incompatible */"
+                "/* [Fix-E] SPD dispatch SKIPPED */"
                 fsr2_code "${fsr2_code}")
             message(STATUS "[Patch-E] SPD dispatch skipped. OK!")
         endif()
@@ -257,33 +238,24 @@ if(NOT ffx_sdk_v2_POPULATED)
         else()
             message(STATUS "[VERIFY-E] Patch-E confirmed. OK!")
         endif()
-
     else()
-        # Patch-E INACTIVE: inject diagnostics for crash debugging
-        set(CP1_SEARCH
-            "Fsr2SpdConstants luminancePyramidConstants"
-        )
+        # Patch-E inactive - inject diagnostics
+        set(CP1_SEARCH "Fsr2SpdConstants luminancePyramidConstants")
         string(FIND "${fsr2_code}" "${CP1_SEARCH}" CP1_POS)
-        if(CP1_POS EQUAL -1)
-            message(STATUS "[Diag] CP1 search string not found.")
-        else()
+        if(NOT CP1_POS EQUAL -1)
             string(REPLACE "${CP1_SEARCH}"
-                "printf(\"[SPD-DIAG] Checkpoint 1: Before SPD constants setup\\n\"); fflush(stdout); Fsr2SpdConstants luminancePyramidConstants"
+                "printf(\"[SPD-DIAG] CP1: Before SPD constants\\n\"); fflush(stdout); Fsr2SpdConstants luminancePyramidConstants"
                 fsr2_code "${fsr2_code}")
-            message(STATUS "[Diag] Checkpoint 1 injected.")
         endif()
 
         set(CP2_3_SEARCH
             "scheduleDispatch(context, params, &context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1])"
         )
         string(FIND "${fsr2_code}" "${CP2_3_SEARCH}" CP2_3_POS)
-        if(CP2_3_POS EQUAL -1)
-            message(STATUS "[Diag] CP2/3 search string not found.")
-        else()
+        if(NOT CP2_3_POS EQUAL -1)
             string(REPLACE "${CP2_3_SEARCH}"
-                "printf(\"[SPD-DIAG] Checkpoint 2: Before scheduleDispatch. Groups=[%u,%u]\\n\", dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1]); fflush(stdout); scheduleDispatch(context, params, &context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1]); printf(\"[SPD-DIAG] Checkpoint 3: After scheduleDispatch - CPU call returned OK\\n\"); fflush(stdout)"
+                "printf(\"[SPD-DIAG] CP2: Before scheduleDispatch Groups=[%u,%u]\\n\", dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1]); fflush(stdout); scheduleDispatch(context, params, &context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1]); printf(\"[SPD-DIAG] CP3: After scheduleDispatch OK\\n\"); fflush(stdout)"
                 fsr2_code "${fsr2_code}")
-            message(STATUS "[Diag] Checkpoints 2 and 3 injected.")
         endif()
 
         file(WRITE "${FSR2_CPP_FILE}" "${fsr2_code}")
@@ -291,25 +263,111 @@ if(NOT ffx_sdk_v2_POPULATED)
     endif()
 
     # =========================================================================
-    # SHADER COMPILATION SETUP
-    # When FFX_USE_PRECOMPILED_SHADERS is OFF, the AMD SDK needs DXC.
-    # DXC is included with Visual Studio 2022 on GitHub Actions runners.
-    # We search for it in standard VS2022 and Windows SDK locations.
+    # PATCH F: HLSL shader early return for SPD luminance pyramid
+    #
+    # This patch only works when FFX_USE_PRECOMPILED_SHADERS is OFF.
+    # When compiling from source, patching the HLSL file takes effect.
+    # When using precompiled blobs, this patch is silently ignored.
+    #
+    # PURPOSE: Test whether the crash is in shader CODE or dispatch SETUP.
+    #   If Lavapipe stops crashing with this patch ON:
+    #     → Crash is inside the shader instructions themselves
+    #     → We implement proper SPD fix in HLSL next
+    #   If Lavapipe still crashes with this patch ON:
+    #     → Crash is in dispatch setup (atomic counter, barriers, formats)
+    #     → We investigate C++ dispatch code instead
+    #
+    # The HLSL entry point is in:
+    #   sdk/include/FidelityFX/gpu/fsr2/ffx_fsr2_compute_luminance_pyramid.h
+    # =========================================================================
+    if(PATCH_F_ENABLED)
+        if(FFX_USE_PRECOMPILED_SHADERS)
+            message(STATUS
+                "[Patch-F] WARNING: FFX_USE_PRECOMPILED_SHADERS is ON."
+                " Patch-F patches HLSL source but precompiled blobs are used."
+                " Patch-F has NO EFFECT. Set FFX_USE_PRECOMPILED_SHADERS OFF."
+            )
+        else()
+            set(LUM_PYRAMID_HLSL
+                "${ffx_sdk_v2_SOURCE_DIR}/sdk/include/FidelityFX/gpu/fsr2/ffx_fsr2_compute_luminance_pyramid.h"
+            )
+
+            if(NOT EXISTS "${LUM_PYRAMID_HLSL}")
+                message(FATAL_ERROR
+                    "[Patch-F] HLSL file not found at:\n${LUM_PYRAMID_HLSL}"
+                )
+            endif()
+
+            file(READ "${LUM_PYRAMID_HLSL}" hlsl_code)
+            message(STATUS "[Patch-F] HLSL luminance pyramid file read OK.")
+
+            # Print all void CS lines so we can see the exact signature
+            message(STATUS "=== [Patch-F] Searching for CS entry point ===")
+            string(REPLACE "\n" ";" hlsl_lines "${hlsl_code}")
+            set(hlsl_line_num 0)
+            foreach(hlsl_line IN LISTS hlsl_lines)
+                math(EXPR hlsl_line_num "${hlsl_line_num} + 1")
+                if(hlsl_line MATCHES "void CS")
+                    message(STATUS "  LINE ${hlsl_line_num}: ${hlsl_line}")
+                endif()
+            endforeach()
+            message(STATUS "=== [Patch-F] End CS search ===")
+
+            # Patch the CS entry point to return immediately.
+            # From the PDF the exact signature is:
+            # void CS(uint3 WorkGroupId : SV_GroupID,
+            #         uint LocalThreadIndex : SV_GroupIndex)
+            # We insert an immediate return as the first statement.
+            # This produces a valid empty shader that does nothing.
+            set(PATCH_F_SEARCH
+                "void CS(uint3 WorkGroupId : SV_GroupID, uint LocalThreadIndex : SV_GroupIndex)"
+            )
+            set(PATCH_F_REPLACE
+                "void CS(uint3 WorkGroupId : SV_GroupID, uint LocalThreadIndex : SV_GroupIndex) { return; } void CS_OriginalDisabled(uint3 WorkGroupId : SV_GroupID, uint LocalThreadIndex : SV_GroupIndex)"
+            )
+
+            string(FIND "${hlsl_code}" "${PATCH_F_SEARCH}" PATCH_F_POS)
+            if(PATCH_F_POS EQUAL -1)
+                message(FATAL_ERROR
+                    "[Patch-F] CS entry point not found!\n"
+                    "Check LINE output above for exact signature."
+                )
+            else()
+                string(REPLACE
+                    "${PATCH_F_SEARCH}"
+                    "${PATCH_F_REPLACE}"
+                    hlsl_code "${hlsl_code}")
+                file(WRITE "${LUM_PYRAMID_HLSL}" "${hlsl_code}")
+                message(STATUS
+                    "[Patch-F] HLSL CS early return applied OK.")
+            endif()
+
+            # Verify
+            file(READ "${LUM_PYRAMID_HLSL}" hlsl_verify)
+            string(FIND "${hlsl_verify}" "CS_OriginalDisabled" VERIFY_F_POS)
+            if(VERIFY_F_POS EQUAL -1)
+                message(FATAL_ERROR
+                    "[VERIFY-F] Patch-F not confirmed in HLSL file!")
+            else()
+                message(STATUS "[VERIFY-F] Patch-F confirmed in HLSL file. OK!")
+            endif()
+        endif()
+    else()
+        message(STATUS "[Patch-F] DISABLED.")
+    endif()
+
+    # =========================================================================
+    # DXC SETUP (when compiling shaders from source)
     # =========================================================================
     if(NOT FFX_USE_PRECOMPILED_SHADERS)
         message(STATUS "[Shader] Precompiled shaders DISABLED.")
         message(STATUS "[Shader] Searching for DXC compiler...")
 
-        # Search locations for DXC on GitHub Actions Windows runner
-        # VS2022 ships dxc.exe in multiple locations
         find_program(DXC_PATH
             NAMES dxc.exe dxc
             HINTS
-                # Visual Studio 2022 Enterprise (GitHub Actions default)
                 "C:/Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Tools/MSVC"
-                # Windows SDK bin directories
                 "C:/Program Files (x86)/Windows Kits/10/bin"
-                # Common VS2022 subfolder patterns
             PATH_SUFFIXES
                 "x64"
                 "bin/Hostx64/x64"
@@ -317,37 +375,29 @@ if(NOT ffx_sdk_v2_POPULATED)
         )
 
         if(NOT DXC_PATH)
-            # Try a glob search for dxc.exe across known VS paths
             message(STATUS "[Shader] find_program did not locate DXC.")
             message(STATUS "[Shader] Trying glob search...")
-
             file(GLOB_RECURSE DXC_CANDIDATES
                 "C:/Program Files/Microsoft Visual Studio/2022/*/dxc.exe"
                 "C:/Program Files (x86)/Windows Kits/10/bin/*/x64/dxc.exe"
             )
-
             if(DXC_CANDIDATES)
-                # Use the first candidate found
                 list(GET DXC_CANDIDATES 0 DXC_PATH)
-                message(STATUS
-                    "[Shader] DXC found via glob: ${DXC_PATH}")
+                message(STATUS "[Shader] DXC found via glob: ${DXC_PATH}")
             else()
                 message(FATAL_ERROR
                     "[Shader] DXC compiler not found!\n"
-                    "Cannot compile shaders from source without DXC.\n"
-                    "Set FFX_USE_PRECOMPILED_SHADERS ON to use blobs,\n"
-                    "or install Visual Studio 2022 with Windows SDK."
+                    "Set FFX_USE_PRECOMPILED_SHADERS ON to use blobs."
                 )
             endif()
         else()
             message(STATUS "[Shader] DXC found: ${DXC_PATH}")
         endif()
 
-        # Pass DXC path to AMD SDK
         set(DXC_PATH "${DXC_PATH}" CACHE STRING "" FORCE)
-        message(STATUS "[Shader] DXC path set for AMD SDK: ${DXC_PATH}")
+        message(STATUS "[Shader] DXC path set: ${DXC_PATH}")
     else()
-        message(STATUS "[Shader] Using precompiled SPIR-V blobs (default).")
+        message(STATUS "[Shader] Using precompiled SPIR-V blobs.")
     endif()
 
     add_subdirectory(${ffx_sdk_v2_SOURCE_DIR}/sdk ${ffx_sdk_v2_BINARY_DIR}/sdk)
