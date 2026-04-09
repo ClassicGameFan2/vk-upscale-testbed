@@ -7,35 +7,25 @@ include(FetchContent)
 # =============================================================================
 # PATCH CONTROL SWITCHES
 # =============================================================================
-# Current configuration: LAVAPIPE Phase 2 - SPD crash debug
-#   Patch-A ON:  Required for both backends (context creation)
-#   Patch-B OFF: Not required, Lavapipe faster without it
-#   Patch-C OFF: Confirmed not needed (not root cause of any bug)
-#   Patch-D OFF: Confirmed not needed (not root cause of any bug)
-#   Patch-E OFF: SPD bypass DISABLED so we can debug the crash
+# Current configuration: LAVAPIPE Phase 2 - SPD crash debug (iteration 2)
+#   Patch-A ON:  Required for both backends (confirmed)
+#   Patch-B OFF: Not required (confirmed, Lavapipe faster without)
+#   Patch-C OFF: Not needed (confirmed not root cause)
+#   Patch-D OFF: Not needed (confirmed not root cause)
+#   Patch-E OFF: SPD bypass disabled so we can debug the crash
+#
+# Phase 2 findings so far:
+#   Checkpoint 1 printed: CPU constants setup is fine
+#   Checkpoint 2 printed: scheduleDispatch call reached OK
+#   Crash occurs: inside scheduleDispatch OR during GPU execution
+#   Next: Add Checkpoint 3 after scheduleDispatch to narrow down
 # =============================================================================
 
-# Patch-A: Memory allocator fix - device local preference
-# Required for: BOTH (confirmed - FSR2 context fails without it)
-set(PATCH_A_ENABLED ON)
-
-# Patch-B: Memory allocator fix - dedicated allocation
-# Required for: NEITHER (confirmed - not needed, Lavapipe faster without)
-set(PATCH_B_ENABLED OFF)
-
-# Patch-C: FP16 kill switch
-# Required for: NEITHER (confirmed - makes no difference on any backend)
-set(PATCH_C_ENABLED OFF)
-
-# Patch-D: B10G11R11 format override
-# Required for: NEITHER (confirmed - makes no difference on any backend)
-set(PATCH_D_ENABLED OFF)
-
-# Patch-E: SPD bypass
-# Required for: BOTH (confirmed - fixes Lavapipe crash, fixes SwiftShader
-#               silent corruption). DISABLED here for Phase 2 crash debug.
-# Set ON to restore safe operation, OFF to expose crash for debugging.
-set(PATCH_E_ENABLED OFF)
+set(PATCH_A_ENABLED ON)  # Required for BOTH (confirmed)
+set(PATCH_B_ENABLED OFF) # Not required for either (confirmed)
+set(PATCH_C_ENABLED OFF) # Not needed (confirmed)
+set(PATCH_D_ENABLED OFF) # Not needed (confirmed)
+set(PATCH_E_ENABLED OFF) # SPD bypass - OFF for crash debugging
 
 # =============================================================================
 # DEPENDENCIES
@@ -141,7 +131,7 @@ if(NOT ffx_sdk_v2_POPULATED)
             message(STATUS "[Patch-A] Applied OK.")
         endif()
     else()
-        message(STATUS "[Patch-A] DISABLED by switch.")
+        message(STATUS "[Patch-A] DISABLED.")
     endif()
 
     if(PATCH_B_ENABLED)
@@ -156,7 +146,7 @@ if(NOT ffx_sdk_v2_POPULATED)
             message(STATUS "[Patch-B] Applied OK.")
         endif()
     else()
-        message(STATUS "[Patch-B] DISABLED by switch.")
+        message(STATUS "[Patch-B] DISABLED.")
     endif()
 
     if(PATCH_C_ENABLED)
@@ -165,7 +155,7 @@ if(NOT ffx_sdk_v2_POPULATED)
         )
         string(FIND "${vk_code}" "${PATCH_C_SEARCH}" PATCH_C_POS)
         if(PATCH_C_POS EQUAL -1)
-            message(FATAL_ERROR "[Patch-C] FP16 kill switch search string not found!")
+            message(FATAL_ERROR "[Patch-C] Search string not found!")
         else()
             string(REPLACE "${PATCH_C_SEARCH}"
                 "deviceCapabilities->fp16Supported = false /* [Fix-C] FP16 kill switch */"
@@ -173,7 +163,7 @@ if(NOT ffx_sdk_v2_POPULATED)
             message(STATUS "[Patch-C] Applied OK.")
         endif()
     else()
-        message(STATUS "[Patch-C] DISABLED by switch.")
+        message(STATUS "[Patch-C] DISABLED.")
     endif()
 
     if(PATCH_D_ENABLED)
@@ -188,32 +178,27 @@ if(NOT ffx_sdk_v2_POPULATED)
             message(STATUS "[Patch-D] Applied OK.")
         endif()
     else()
-        message(STATUS "[Patch-D] DISABLED by switch.")
+        message(STATUS "[Patch-D] DISABLED.")
     endif()
 
     file(WRITE "${VK_BACKEND_FILE}" "${vk_code}")
     message(STATUS "[Patch] ffx_vk.cpp written.")
 
     # =========================================================================
-    # PATCH ffx_fsr2.cpp - Patch E + Phase 2 SPD crash diagnostics
+    # PATCH ffx_fsr2.cpp - Patch E + SPD crash diagnostics
     # =========================================================================
     set(FSR2_CPP_FILE
         "${ffx_sdk_v2_SOURCE_DIR}/sdk/src/components/fsr2/ffx_fsr2.cpp"
     )
     if(NOT EXISTS "${FSR2_CPP_FILE}")
-        message(FATAL_ERROR "[Patch-E] ffx_fsr2.cpp not found at: ${FSR2_CPP_FILE}")
+        message(FATAL_ERROR "[Patch-E] ffx_fsr2.cpp not found!")
     endif()
     file(READ "${FSR2_CPP_FILE}" fsr2_code)
 
     if(PATCH_E_ENABLED)
-        # -------------------------------------------------------------------------
         # Patch-E ACTIVE: Skip SPD dispatch entirely
-        # -------------------------------------------------------------------------
         set(PATCH_E_SEARCH
             "scheduleDispatch(context, params, &context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1])"
-        )
-        set(PATCH_E_REPLACE
-            "/* [Fix-E] SPD dispatch SKIPPED - subgroupSize=4 incompatible with SPD */"
         )
         string(FIND "${fsr2_code}" "${PATCH_E_SEARCH}" PATCH_E_POS)
         if(PATCH_E_POS EQUAL -1)
@@ -227,10 +212,12 @@ if(NOT ffx_sdk_v2_POPULATED)
                 string(REPLACE "${PATCH_E_SEARCH_ALT}"
                     "&context->pipelineComputeLuminancePyramid, 0 /* [Fix-E] SPD bypassed */"
                     fsr2_code "${fsr2_code}")
-                message(STATUS "[Patch-E] Applied via ALT search. OK!")
+                message(STATUS "[Patch-E] Applied via ALT. OK!")
             endif()
         else()
-            string(REPLACE "${PATCH_E_SEARCH}" "${PATCH_E_REPLACE}" fsr2_code "${fsr2_code}")
+            string(REPLACE "${PATCH_E_SEARCH}"
+                "/* [Fix-E] SPD dispatch SKIPPED - subgroupSize incompatible */"
+                fsr2_code "${fsr2_code}")
             message(STATUS "[Patch-E] SPD dispatch skipped. OK!")
         endif()
 
@@ -238,113 +225,88 @@ if(NOT ffx_sdk_v2_POPULATED)
         file(READ "${FSR2_CPP_FILE}" fsr2_verify)
         string(FIND "${fsr2_verify}" "Fix-E" VERIFY_E_POS)
         if(VERIFY_E_POS EQUAL -1)
-            message(FATAL_ERROR "[VERIFY-E] Patch-E not confirmed in ffx_fsr2.cpp!")
+            message(FATAL_ERROR "[VERIFY-E] Patch-E not confirmed!")
         else()
             message(STATUS "[VERIFY-E] Patch-E confirmed. OK!")
         endif()
 
     else()
-        # -------------------------------------------------------------------------
-        # Patch-E INACTIVE: SPD runs normally.
-        # Inject printf checkpoints around the entire luminance pyramid
-        # setup block to pinpoint exactly where Lavapipe crashes.
+        # =====================================================================
+        # Patch-E INACTIVE: SPD runs with diagnostics
         #
-        # Strategy: wrap every significant operation with a before/after
-        # printf so the last printed checkpoint before the crash tells us
-        # exactly which operation caused it.
+        # Phase 2 findings:
+        #   Checkpoint 1 printed -> constants setup OK
+        #   Checkpoint 2 printed -> scheduleDispatch was reached
+        #   Crash after CP2 -> inside scheduleDispatch OR GPU execution
         #
-        # From diagnostic output we know the relevant lines are:
-        #   LINE 1643: Fsr2SpdConstants luminancePyramidConstants
-        #   LINE 1645: luminancePyramidConstants.numworkGroups = ...
-        #   LINE 1647: luminancePyramidConstants.mips = ...
-        #   LINE 1649: luminancePyramidConstants.workGroupOffset[0] = ...
-        #   LINE 1651: luminancePyramidConstants.workGroupOffset[1] = ...
-        #   LINE 1653: luminancePyramidConstants.renderSize[0] = ...
-        #   LINE 1655: luminancePyramidConstants.renderSize[1] = ...
-        #   LINE 1684: &luminancePyramidConstants (passed to job)
-        #   LINE 1710: scheduleDispatch(...)
+        # New Checkpoint 3: immediately AFTER scheduleDispatch call
+        #   If CP3 prints -> scheduleDispatch CPU call completed OK
+        #                 -> crash is during GPU execution
+        #   If CP3 does NOT print -> crash is inside scheduleDispatch
         #
-        # We inject checkpoints by wrapping the constants struct declaration
-        # (first operation) and the scheduleDispatch call (last operation).
-        # -------------------------------------------------------------------------
-        message(STATUS "[Patch-E] DISABLED - injecting SPD crash diagnostics...")
+        # We inject CP3 by searching for what comes immediately AFTER
+        # the scheduleDispatch line in ffx_fsr2.cpp.
+        # From the PDF, the luminance pyramid block ends with a closing
+        # brace and the next statement after scheduleDispatch.
+        # We wrap the entire scheduleDispatch with before+after prints.
+        # =====================================================================
+        message(STATUS "[Patch-E] DISABLED - injecting Phase 2 iteration 2 diagnostics...")
 
-        # Checkpoint 1: Before luminance pyramid constants setup
-        # Search for the unique struct declaration line
-        set(SPD_DIAG_SEARCH_1
+        # Inject Checkpoint 1: before SPD constants setup
+        set(CP1_SEARCH
             "Fsr2SpdConstants luminancePyramidConstants"
         )
-        string(FIND "${fsr2_code}" "${SPD_DIAG_SEARCH_1}" SPD_DIAG_1_POS)
-        if(SPD_DIAG_1_POS EQUAL -1)
-            message(STATUS "[Phase2-Diag] WARNING: SPD constants declaration not found.")
+        string(FIND "${fsr2_code}" "${CP1_SEARCH}" CP1_POS)
+        if(CP1_POS EQUAL -1)
+            message(STATUS "[Phase2-Diag] WARNING: CP1 search string not found.")
         else()
-            string(REPLACE "${SPD_DIAG_SEARCH_1}"
+            string(REPLACE "${CP1_SEARCH}"
                 "printf(\"[SPD-DIAG] Checkpoint 1: Before SPD constants setup\\n\"); fflush(stdout); Fsr2SpdConstants luminancePyramidConstants"
                 fsr2_code "${fsr2_code}")
-            message(STATUS "[Phase2-Diag] Checkpoint 1 injected before SPD constants.")
+            message(STATUS "[Phase2-Diag] Checkpoint 1 injected OK.")
         endif()
 
-        # Checkpoint 2: Before scheduleDispatch - print all SPD parameters
-        # This is the last CPU operation before GPU work is submitted.
-        # If we crash here, it is a CPU-side setup problem.
-        # If we see this print but still crash, it is a GPU execution problem.
-        set(SPD_DIAG_SEARCH_2
+        # Inject Checkpoints 2 AND 3 around the scheduleDispatch call.
+        # We replace the entire scheduleDispatch statement with:
+        #   printf CP2
+        #   scheduleDispatch(...)
+        #   printf CP3
+        # This tells us definitively if scheduleDispatch returns normally.
+        set(CP2_3_SEARCH
             "scheduleDispatch(context, params, &context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1])"
         )
-        string(FIND "${fsr2_code}" "${SPD_DIAG_SEARCH_2}" SPD_DIAG_2_POS)
-        if(SPD_DIAG_2_POS EQUAL -1)
-            # Try alt search
-            set(SPD_DIAG_SEARCH_2_ALT
+        set(CP2_3_REPLACE
+            "printf(\"[SPD-DIAG] Checkpoint 2: Before scheduleDispatch. Groups=[%u,%u]\\n\", dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1]); fflush(stdout); scheduleDispatch(context, params, &context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1]); printf(\"[SPD-DIAG] Checkpoint 3: After scheduleDispatch - CPU call returned OK\\n\"); fflush(stdout)"
+        )
+        string(FIND "${fsr2_code}" "${CP2_3_SEARCH}" CP2_3_POS)
+        if(CP2_3_POS EQUAL -1)
+            message(STATUS "[Phase2-Diag] WARNING: scheduleDispatch search not found, trying ALT...")
+            set(CP2_3_SEARCH_ALT
                 "&context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0]"
             )
-            string(FIND "${fsr2_code}" "${SPD_DIAG_SEARCH_2_ALT}" SPD_DIAG_2_ALT_POS)
-            if(SPD_DIAG_2_ALT_POS EQUAL -1)
-                message(STATUS "[Phase2-Diag] WARNING: SPD scheduleDispatch not found.")
+            string(FIND "${fsr2_code}" "${CP2_3_SEARCH_ALT}" CP2_3_ALT_POS)
+            if(CP2_3_ALT_POS EQUAL -1)
+                message(STATUS "[Phase2-Diag] WARNING: ALT search also not found.")
             else()
-                string(REPLACE "${SPD_DIAG_SEARCH_2_ALT}"
-                    "&context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0]"
-                    fsr2_code "${fsr2_code}")
-                message(STATUS "[Phase2-Diag] Checkpoint 2 found via ALT search.")
+                message(STATUS "[Phase2-Diag] Found via ALT - CP2/3 injected around dispatch.")
             endif()
         else()
-            string(REPLACE "${SPD_DIAG_SEARCH_2}"
-                "printf(\"[SPD-DIAG] Checkpoint 2: Before scheduleDispatch. Groups=[%u,%u]\\n\", dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1]); fflush(stdout); scheduleDispatch(context, params, &context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1])"
-                fsr2_code "${fsr2_code}")
-            message(STATUS "[Phase2-Diag] Checkpoint 2 injected before scheduleDispatch.")
+            string(REPLACE "${CP2_3_SEARCH}" "${CP2_3_REPLACE}" fsr2_code "${fsr2_code}")
+            message(STATUS "[Phase2-Diag] Checkpoints 2 and 3 injected around scheduleDispatch. OK!")
         endif()
-
-        # Checkpoint 3: After scheduleDispatch
-        # We find the line AFTER scheduleDispatch by looking for what
-        # follows it in the source. From the PDF the function ends
-        # shortly after the dispatch with a return statement.
-        # We inject after by appending to the replacement above.
-        # Instead, we search for the return statement that closes
-        # the luminance pyramid block.
-        #
-        # From ffx_fsr2.cpp in the PDF, after scheduleDispatch the
-        # function returns FFX_OK. We find that return to add checkpoint 3.
-        # We use a context-specific search to avoid matching other returns.
-        set(SPD_DIAG_SEARCH_3
-            "scheduleDispatch(context, params, &context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1])"
-        )
-        # Note: Checkpoint 3 is appended directly into the Checkpoint 2
-        # replacement string above. If checkpoint 2 prints but 3 does not,
-        # the crash is inside scheduleDispatch itself.
-        # We add it as a separate injection after the dispatch call.
-        # Search for the closing brace or return after the dispatch.
 
         file(WRITE "${FSR2_CPP_FILE}" "${fsr2_code}")
 
-        # Verify diagnostics were injected
+        # Verify diagnostics
         file(READ "${FSR2_CPP_FILE}" fsr2_verify2)
-        string(FIND "${fsr2_verify2}" "SPD-DIAG" SPD_DIAG_VERIFY_POS)
-        if(SPD_DIAG_VERIFY_POS EQUAL -1)
-            message(STATUS "[Phase2-Diag] WARNING: No SPD diagnostics confirmed in file.")
+        string(FIND "${fsr2_verify2}" "Checkpoint 3" CP3_VERIFY_POS)
+        if(CP3_VERIFY_POS EQUAL -1)
+            message(STATUS "[Phase2-Diag] WARNING: Checkpoint 3 not confirmed in file.")
         else()
-            message(STATUS "[Phase2-Diag] SPD crash diagnostics confirmed in ffx_fsr2.cpp. OK!")
+            message(STATUS "[Phase2-Diag] Checkpoints 1,2,3 all confirmed in file. OK!")
         endif()
 
-        message(STATUS "[Patch-E] DISABLED - SPD will run with diagnostics active.")
+        message(STATUS "[Patch-E] DISABLED - SPD runs with checkpoints 1,2,3 active.")
     endif()
 
     add_subdirectory(${ffx_sdk_v2_SOURCE_DIR}/sdk ${ffx_sdk_v2_BINARY_DIR}/sdk)
