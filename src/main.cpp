@@ -381,8 +381,8 @@ int main() {
     std::cout << "[Init] Forcing shaderFloat16 = FALSE (SwiftShader FP16 bug workaround)"
               << std::endl;
     std::cout.flush();
-    features12.shaderFloat16 = VK_FALSE;
-    features11.storageBuffer16BitAccess = VK_FALSE;
+    //features12.shaderFloat16 = VK_FALSE;
+    //features11.storageBuffer16BitAccess = VK_FALSE;
 
     uint32_t extCount = 0;
     vkEnumerateDeviceExtensionProperties(
