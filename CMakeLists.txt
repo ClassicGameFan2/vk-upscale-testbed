@@ -19,7 +19,7 @@ include(FetchContent)
 # Patch-A: SwiftShader memory allocator fix #1
 # Disables device-local memory preference that confuses SwiftShader.
 # Required for: SWIFTSHADER (confirmed) / Lavapipe: unknown, keep ON for safety
-set(PATCH_A_ENABLED ON)
+set(PATCH_A_ENABLED OFF)
 
 # Patch-B: SwiftShader memory allocator fix #2
 # Disables dedicated allocation that SwiftShader does not support properly.
