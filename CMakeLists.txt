@@ -8,33 +8,13 @@ include(FetchContent)
 # PATCH CONTROL SWITCHES
 # =============================================================================
 # Patch-A: RAM allocation fix in ffx_vk.cpp - Required for BOTH renderers.
-#
 # Patch-B: Dedicated allocation disable - not needed, OFF.
-#
 # Patch-C: FP16 kill switch - not needed for Lavapipe, OFF.
-#
 # Patch-D: B10G11R11 format override - not needed for Lavapipe, OFF.
-#
 # Patch-E: Clamp SPD workgroup dispatch to [1,1] in ffx_fsr2.cpp
-#   Prevents Lavapipe groupshared memory accumulation over 32 frames.
-#
 # Patch-F: HLSL single-workgroup guard in ComputeAutoExposure
-#   Early-returns all workgroups except (0,0).
-#   Passes NumWorkGroups=1 to SpdDownsample.
-#
-# Patch-G: Override SpdIncreaseAtomicCounter in HLSL to bypass GPU atomic.
-#   ROOT CAUSE OF SPD CRASH ON LAVAPIPE:
-#   SpdExitWorkgroup() calls SpdIncreaseAtomicCounter() which calls
-#   SPD_IncreaseAtomicCounter(spdCounter) - a GPU storage buffer atomic.
-#   Lavapipe crashes on this atomic operation (confirmed from chat history).
-#   FIX: rename original SpdIncreaseAtomicCounter, replace with version
-#   that sets groupshared spdCounter=0 WITHOUT touching GPU storage buffer.
-#   With spdCounter=0 and numWorkGroups=1:
-#     SpdExitWorkgroup returns: (0 != (1-1)) = (0 != 0) = FALSE
-#     = workgroup proceeds (correct - it IS the last/only workgroup)
-#   SpdResetAtomicCounter is still called but SPD_ResetAtomicCounter
-#   writes to the same GPU buffer - if that also crashes we handle separately.
-#   Using file(APPEND) to write HLSL to avoid CMake string escaping issues.
+# Patch-G: Override SpdIncreaseAtomicCounter to bypass GPU atomic
+#   Written to a separate include file to avoid CMake string encoding issues.
 # =============================================================================
 
 set(PATCH_A_ENABLED ON)  # Required for BOTH (confirmed)
@@ -43,7 +23,7 @@ set(PATCH_C_ENABLED OFF) # Not needed for Lavapipe (confirmed)
 set(PATCH_D_ENABLED OFF) # Not needed for Lavapipe (confirmed)
 set(PATCH_E_ENABLED ON)  # Workgroup clamp to [1,1]
 set(PATCH_F_ENABLED ON)  # HLSL single-workgroup guard
-set(PATCH_G_ENABLED ON)  # HLSL GPU atomic bypass - fixes SPD crash
+set(PATCH_G_ENABLED ON)  # HLSL GPU atomic bypass
 
 set(FFX_USE_PRECOMPILED_SHADERS OFF)
 
@@ -226,11 +206,9 @@ if(NOT ffx_sdk_v2_POPULATED)
             message(FATAL_ERROR
                 "[Patch-E] SPD scheduleDispatch not found in ffx_fsr2.cpp!")
         endif()
-
         string(REPLACE "${PATCH_E_SEARCH}"
             "printf(\"[SPD] Clamping dispatch [%u,%u]->[1,1]\\n\", dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1]); fflush(stdout); scheduleDispatch(context, params, &context->pipelineComputeLuminancePyramid, 1, 1); printf(\"[SPD] scheduleDispatch returned OK\\n\"); fflush(stdout)"
             fsr2_code "${fsr2_code}")
-
         string(FIND "${fsr2_code}" "Clamping dispatch" VERIFY_E_POS)
         if(VERIFY_E_POS EQUAL -1)
             message(FATAL_ERROR "[VERIFY-E] Patch-E not confirmed!")
@@ -255,147 +233,164 @@ if(NOT ffx_sdk_v2_POPULATED)
 
     # =========================================================================
     # PATCH F + G: Fix SPD HLSL
-    # Both patches write to ffx_fsr2_compute_luminance_pyramid.h
-    # All HLSL is written via file(WRITE)/file(APPEND) to avoid CMake
-    # string escaping corrupting the shader syntax.
     #
-    # Order of operations:
-    #   1. Read original file
-    #   2. Patch-G: rename SpdIncreaseAtomicCounter -> _Original via
-    #      string(REPLACE) then file(WRITE) the modified content
-    #   3. file(APPEND) the Fix-G replacement function
-    #   4. Patch-F: rename ComputeAutoExposure -> _Original via
-    #      string(REPLACE) then file(WRITE) the modified content
-    #   5. file(APPEND) the Fix-F wrapper function
+    # Strategy: write replacement functions to a SEPARATE .h file, then
+    # add #include of that file at the end of the original HLSL.
+    # This completely avoids CMake string encoding/escaping issues that
+    # caused "unexpected VOID" syntax errors in previous attempts.
+    #
+    # The separate file is written to the same directory as the original
+    # so the relative #include path works correctly.
+    #
+    # Patch-G fix file: ffx_fsr2_spd_lavapipe_fix.h
+    #   - Defines replacement SpdIncreaseAtomicCounter that sets
+    #     groupshared spdCounter=0 without GPU storage buffer atomic
+    #   - Defines replacement ComputeAutoExposure wrapper (Patch-F)
     # =========================================================================
     set(LUM_PYRAMID_HLSL
         "${ffx_sdk_v2_SOURCE_DIR}/sdk/include/FidelityFX/gpu/fsr2/ffx_fsr2_compute_luminance_pyramid.h"
     )
+    set(SPD_FIX_HLSL
+        "${ffx_sdk_v2_SOURCE_DIR}/sdk/include/FidelityFX/gpu/fsr2/ffx_fsr2_spd_lavapipe_fix.h"
+    )
+
     if(NOT EXISTS "${LUM_PYRAMID_HLSL}")
-        message(FATAL_ERROR "[Patch-F/G] HLSL not found: ${LUM_PYRAMID_HLSL}")
+        message(FATAL_ERROR
+            "[Patch-F/G] HLSL not found: ${LUM_PYRAMID_HLSL}")
     endif()
 
     file(READ "${LUM_PYRAMID_HLSL}" hlsl_code)
     message(STATUS "[Patch-F/G] HLSL file read OK.")
 
-    # -------------------------------------------------------------------------
-    # PATCH G: Rename SpdIncreaseAtomicCounter, append bypass replacement
-    # -------------------------------------------------------------------------
+    # Build the content of the fix include file
+    set(SPD_FIX_CONTENT "")
+
     if(PATCH_G_ENABLED)
+        # Step 1: Rename original SpdIncreaseAtomicCounter in the main file
         set(PATCH_G_SEARCH
             "void SpdIncreaseAtomicCounter(FfxUInt32 slice)"
         )
         string(FIND "${hlsl_code}" "${PATCH_G_SEARCH}" PATCH_G_POS)
         if(PATCH_G_POS EQUAL -1)
             message(FATAL_ERROR
-                "[Patch-G] SpdIncreaseAtomicCounter not found in HLSL!")
+                "[Patch-G] SpdIncreaseAtomicCounter not found!")
         endif()
-
         string(REPLACE
             "void SpdIncreaseAtomicCounter(FfxUInt32 slice)"
             "void SpdIncreaseAtomicCounter_Original(FfxUInt32 slice)"
             hlsl_code "${hlsl_code}")
+        message(STATUS "[Patch-G] SpdIncreaseAtomicCounter renamed OK.")
 
-        # Write the renamed file first
-        file(WRITE "${LUM_PYRAMID_HLSL}" "${hlsl_code}")
-
-        # Append replacement using file(APPEND) - avoids CMake escape issues
-        # Sets groupshared spdCounter=0 without GPU storage buffer atomic.
-        # ffx_spd.h SpdExitWorkgroup then evaluates:
-        #   (SpdGetAtomicCounter() != (numWorkGroups-1))
-        #   = (0 != (1-1)) = (0 != 0) = FALSE
-        #   = workgroup(0,0) proceeds as last workgroup. Correct.
-        file(APPEND "${LUM_PYRAMID_HLSL}"
-            "\n// [Fix-G] GPU atomic bypass for Lavapipe compatibility.\n"
-            "// SPD_IncreaseAtomicCounter crashes Lavapipe (GPU storage buffer atomic).\n"
-            "// We set groupshared spdCounter=0 directly instead.\n"
-            "// SpdExitWorkgroup check: (0 != (1-1)) = FALSE -> proceed. Correct.\n"
-            "void SpdIncreaseAtomicCounter(FfxUInt32 slice)\n"
-            "{\n"
-            "    spdCounter = 0;\n"
-            "}\n"
+        # Step 2: Add replacement to fix file content
+        # Sets groupshared spdCounter=0 - no GPU atomic.
+        # SpdExitWorkgroup: (0 != (1-1)) = FALSE -> workgroup proceeds.
+        string(APPEND SPD_FIX_CONTENT
+            "// [Fix-G] Bypass GPU storage buffer atomic for Lavapipe.\n"
         )
-
-        # Re-read for verification and subsequent patches
-        file(READ "${LUM_PYRAMID_HLSL}" hlsl_code)
-        string(FIND "${hlsl_code}" "Fix-G" VERIFY_G_POS)
-        if(VERIFY_G_POS EQUAL -1)
-            message(FATAL_ERROR "[VERIFY-G] Patch-G not confirmed in HLSL!")
-        else()
-            message(STATUS "[VERIFY-G] Patch-G confirmed OK.")
-        endif()
+        string(APPEND SPD_FIX_CONTENT
+            "// SPD_IncreaseAtomicCounter crashes Lavapipe.\n"
+        )
+        string(APPEND SPD_FIX_CONTENT
+            "// Set groupshared spdCounter=0: exit check (0!=(1-1))=FALSE -> proceed.\n"
+        )
+        string(APPEND SPD_FIX_CONTENT
+            "void SpdIncreaseAtomicCounter(FfxUInt32 slice) { spdCounter = 0; }\n"
+        )
     else()
         message(STATUS "[Patch-G] DISABLED.")
     endif()
 
-    # -------------------------------------------------------------------------
-    # PATCH F: Rename ComputeAutoExposure, append single-workgroup wrapper
-    # -------------------------------------------------------------------------
     if(PATCH_F_ENABLED)
+        # Step 1: Rename original ComputeAutoExposure in the main file
         set(PATCH_F_SEARCH
             "void ComputeAutoExposure(FfxUInt32x3 WorkGroupId, FfxUInt32 LocalThreadIndex)"
         )
         string(FIND "${hlsl_code}" "${PATCH_F_SEARCH}" PATCH_F_POS)
         if(PATCH_F_POS EQUAL -1)
             message(FATAL_ERROR
-                "[Patch-F] ComputeAutoExposure not found in HLSL!")
+                "[Patch-F] ComputeAutoExposure not found!")
         endif()
-
         string(REPLACE
             "void ComputeAutoExposure(FfxUInt32x3 WorkGroupId, FfxUInt32 LocalThreadIndex)"
             "void ComputeAutoExposure_Original(FfxUInt32x3 WorkGroupId, FfxUInt32 LocalThreadIndex)"
             hlsl_code "${hlsl_code}")
+        message(STATUS "[Patch-F] ComputeAutoExposure renamed OK.")
 
-        # Write renamed content
-        file(WRITE "${LUM_PYRAMID_HLSL}" "${hlsl_code}")
-
-        # Append wrapper using file(APPEND)
-        file(APPEND "${LUM_PYRAMID_HLSL}"
-            "\n// [Fix-F] Single-workgroup wrapper for ComputeAutoExposure.\n"
-            "// Only workgroup(0,0) runs SpdDownsample with NumWorkGroups=1.\n"
-            "// All other workgroups early-return without touching GPU memory.\n"
-            "// Combined with Fix-G: GPU atomic bypassed, no Lavapipe crash.\n"
-            "void ComputeAutoExposure(FfxUInt32x3 WorkGroupId, FfxUInt32 LocalThreadIndex)\n"
-            "{\n"
-            "    if (WorkGroupId.x != 0 || WorkGroupId.y != 0) return;\n"
-            "#if FFX_HALF\n"
-            "    SpdDownsampleH(\n"
-            "        FfxUInt32x2(0, 0),\n"
-            "        FfxUInt32(LocalThreadIndex),\n"
-            "        FfxUInt32(MipCount()),\n"
-            "        FfxUInt32(1),\n"
-            "        FfxUInt32(WorkGroupId.z),\n"
-            "        FfxUInt32x2(0, 0));\n"
-            "#else\n"
-            "    SpdDownsample(\n"
-            "        FfxUInt32x2(0, 0),\n"
-            "        FfxUInt32(LocalThreadIndex),\n"
-            "        FfxUInt32(MipCount()),\n"
-            "        FfxUInt32(1),\n"
-            "        FfxUInt32(WorkGroupId.z),\n"
-            "        FfxUInt32x2(0, 0));\n"
-            "#endif\n"
-            "}\n"
+        # Step 2: Add wrapper to fix file content
+        # Single line per append to keep content clean
+        string(APPEND SPD_FIX_CONTENT
+            "// [Fix-F] Single-workgroup wrapper. Only WG(0,0) runs SPD.\n"
         )
-
-        # Verify
-        file(READ "${LUM_PYRAMID_HLSL}" hlsl_verify)
-        string(FIND "${hlsl_verify}" "Fix-F" VERIFY_F_POS)
-        if(VERIFY_F_POS EQUAL -1)
-            message(FATAL_ERROR "[VERIFY-F] Patch-F not confirmed in HLSL!")
-        else()
-            message(STATUS "[VERIFY-F] Patch-F confirmed OK.")
-        endif()
-        string(FIND "${hlsl_verify}"
-            "ComputeAutoExposure_Original" VERIFY_F2_POS)
-        if(VERIFY_F2_POS EQUAL -1)
-            message(FATAL_ERROR
-                "[VERIFY-F] ComputeAutoExposure rename not confirmed!")
-        else()
-            message(STATUS "[VERIFY-F] ComputeAutoExposure renamed OK.")
-        endif()
+        string(APPEND SPD_FIX_CONTENT
+            "void ComputeAutoExposure(FfxUInt32x3 WorkGroupId, FfxUInt32 LocalThreadIndex)\n"
+        )
+        string(APPEND SPD_FIX_CONTENT "{\n")
+        string(APPEND SPD_FIX_CONTENT
+            "    if (WorkGroupId.x != 0 || WorkGroupId.y != 0) return;\n"
+        )
+        string(APPEND SPD_FIX_CONTENT "#if FFX_HALF\n")
+        string(APPEND SPD_FIX_CONTENT "    SpdDownsampleH(\n")
+        string(APPEND SPD_FIX_CONTENT "        FfxUInt32x2(0, 0),\n")
+        string(APPEND SPD_FIX_CONTENT "        FfxUInt32(LocalThreadIndex),\n")
+        string(APPEND SPD_FIX_CONTENT "        FfxUInt32(MipCount()),\n")
+        string(APPEND SPD_FIX_CONTENT "        FfxUInt32(1),\n")
+        string(APPEND SPD_FIX_CONTENT "        FfxUInt32(WorkGroupId.z),\n")
+        string(APPEND SPD_FIX_CONTENT "        FfxUInt32x2(0, 0));\n")
+        string(APPEND SPD_FIX_CONTENT "#else\n")
+        string(APPEND SPD_FIX_CONTENT "    SpdDownsample(\n")
+        string(APPEND SPD_FIX_CONTENT "        FfxUInt32x2(0, 0),\n")
+        string(APPEND SPD_FIX_CONTENT "        FfxUInt32(LocalThreadIndex),\n")
+        string(APPEND SPD_FIX_CONTENT "        FfxUInt32(MipCount()),\n")
+        string(APPEND SPD_FIX_CONTENT "        FfxUInt32(1),\n")
+        string(APPEND SPD_FIX_CONTENT "        FfxUInt32(WorkGroupId.z),\n")
+        string(APPEND SPD_FIX_CONTENT "        FfxUInt32x2(0, 0));\n")
+        string(APPEND SPD_FIX_CONTENT "#endif\n")
+        string(APPEND SPD_FIX_CONTENT "}\n")
     else()
         message(STATUS "[Patch-F] DISABLED.")
+    endif()
+
+    # Write the modified main HLSL file (with renames applied)
+    file(WRITE "${LUM_PYRAMID_HLSL}" "${hlsl_code}")
+    message(STATUS "[Patch-F/G] Main HLSL written with renames.")
+
+    # Write the fix include file
+    file(WRITE "${SPD_FIX_HLSL}" "${SPD_FIX_CONTENT}")
+    message(STATUS "[Patch-F/G] Fix include file written: ${SPD_FIX_HLSL}")
+
+    # Add #include of fix file at end of main HLSL
+    # Use file(APPEND) for this single clean line only
+    file(APPEND "${LUM_PYRAMID_HLSL}"
+        "\n#include \"ffx_fsr2_spd_lavapipe_fix.h\"\n"
+    )
+    message(STATUS "[Patch-F/G] Include directive appended to main HLSL.")
+
+    # Verify
+    file(READ "${LUM_PYRAMID_HLSL}" hlsl_verify)
+    string(FIND "${hlsl_verify}"
+        "ffx_fsr2_spd_lavapipe_fix.h" VERIFY_INCLUDE_POS)
+    if(VERIFY_INCLUDE_POS EQUAL -1)
+        message(FATAL_ERROR "[VERIFY-F/G] Include directive not found!")
+    else()
+        message(STATUS "[VERIFY-F/G] Include directive confirmed OK.")
+    endif()
+
+    file(READ "${SPD_FIX_HLSL}" fix_verify)
+    if(PATCH_G_ENABLED)
+        string(FIND "${fix_verify}" "Fix-G" VERIFY_G_POS)
+        if(VERIFY_G_POS EQUAL -1)
+            message(FATAL_ERROR "[VERIFY-G] Fix-G not found in fix file!")
+        else()
+            message(STATUS "[VERIFY-G] Patch-G confirmed in fix file OK.")
+        endif()
+    endif()
+    if(PATCH_F_ENABLED)
+        string(FIND "${fix_verify}" "Fix-F" VERIFY_F_POS)
+        if(VERIFY_F_POS EQUAL -1)
+            message(FATAL_ERROR "[VERIFY-F] Fix-F not found in fix file!")
+        else()
+            message(STATUS "[VERIFY-F] Patch-F confirmed in fix file OK.")
+        endif()
     endif()
 
     # =========================================================================
