@@ -7,25 +7,46 @@ include(FetchContent)
 # =============================================================================
 # PATCH CONTROL SWITCHES
 # =============================================================================
-# Patch-F: SPD single-workgroup guard in HLSL ComputeAutoExposure
-#   Only workgroup(0,0) calls SpdDownsample with NumWorkGroups=1
-#   Other workgroups early-return
+# Summary of all patches and their purpose:
 #
-# Patch-G: Fix SPD atomic counter accumulation across frames
-#   Root cause: SpdDownsample atomically increments counter each frame.
-#   With NumWorkGroups=1 the counter goes 0->1->2->...->32 across frames.
-#   Fix: patch AtomicIncSPDCounter in HLSL to always reset to 0 and
-#   return 0, making workgroup(0,0) always behave as "last workgroup".
-#   No internal C++ struct access needed - pure HLSL fix.
+# Patch-A: RAM allocation fix in ffx_vk.cpp
+#   Disables device-local memory preference so Lavapipe/SwiftShader work.
+#   Required for BOTH renderers.
+#
+# Patch-B: Dedicated allocation disable in ffx_vk.cpp
+#   Not needed - confirmed OFF.
+#
+# Patch-C: FP16 kill switch in ffx_vk.cpp
+#   Forces FP32 shader path. Not needed for Lavapipe - confirmed OFF.
+#
+# Patch-D: B10G11R11 format override in ffx_vk.cpp
+#   Not needed for Lavapipe - confirmed OFF.
+#
+# Patch-E: C++ SPD workgroup count clamp in ffx_fsr2.cpp
+#   UPGRADED: now clamps dispatchThreadGroupCountXY to [1,1] before
+#   the luminance pyramid scheduleDispatch. This means Lavapipe only
+#   allocates resources for 1 workgroup instead of 20, fixing the
+#   memory exhaustion that caused stbi_write_png to crash.
+#   Combined with Patch-F (HLSL guard), only workgroup(0,0) runs SPD.
+#
+# Patch-F: HLSL single-workgroup guard in ffx_fsr2_compute_luminance_pyramid.h
+#   Wraps ComputeAutoExposure to early-return all workgroups except (0,0).
+#   Passes NumWorkGroups=1 so SPD never uses inter-workgroup atomics.
+#   Required for Lavapipe.
+#
+# Patch-G: HLSL SpdIncreaseAtomicCounter bypass
+#   Makes spdCounter=0 without calling SPD_IncreaseAtomicCounter.
+#   Ensures workgroup(0,0) always passes the 'last workgroup' check.
+#   SPD_ResetAtomicCounter still runs to clean up the GPU buffer.
 # =============================================================================
 
 set(PATCH_A_ENABLED ON)  # Required for BOTH (confirmed)
-set(PATCH_B_ENABLED OFF) # Not required for either (confirmed)
-set(PATCH_C_ENABLED OFF) # Not needed (confirmed)
-set(PATCH_D_ENABLED OFF) # Not needed (confirmed)
-set(PATCH_E_ENABLED OFF) # C++ SPD bypass - OFF (using HLSL fix instead)
-set(PATCH_F_ENABLED ON)  # HLSL SPD single-workgroup guard
-set(PATCH_G_ENABLED ON)  # HLSL SPD atomic counter reset fix
+set(PATCH_B_ENABLED OFF) # Not required (confirmed)
+set(PATCH_C_ENABLED OFF) # Not needed for Lavapipe (confirmed)
+set(PATCH_D_ENABLED OFF) # Not needed for Lavapipe (confirmed)
+set(PATCH_E_ENABLED ON)  # Workgroup count clamp - fixes stbi crash
+set(PATCH_F_ENABLED ON)  # HLSL single-workgroup guard
+set(PATCH_G_ENABLED ON)  # HLSL atomic counter bypass
 
 set(FFX_USE_PRECOMPILED_SHADERS OFF)
 
@@ -189,7 +210,24 @@ if(NOT ffx_sdk_v2_POPULATED)
     message(STATUS "[Patch] ffx_vk.cpp written.")
 
     # =========================================================================
-    # PATCH E: C++ SPD dispatch bypass in ffx_fsr2.cpp
+    # PATCH E: Clamp SPD workgroup count to [1,1] in ffx_fsr2.cpp
+    #
+    # ROOT CAUSE OF stbi_write_png CRASH:
+    #   With Patch-F (HLSL early-return), workgroups (1,0)..(4,3) still get
+    #   dispatched to Lavapipe even though they immediately return.
+    #   Lavapipe allocates groupshared memory for ALL dispatched workgroups:
+    #     spdIntermediateR/G/B/A[16][16] = 4 * 16*16 * 4 bytes = 4KB each
+    #     With 5*4=20 workgroups: 20 * ~6KB groupshared = ~120KB per dispatch
+    #     Over 32 frames this accumulates in Lavapipe's internal allocator.
+    #   When stbi_write_png calls malloc() for its PNG compression buffers,
+    #   Lavapipe's deferred memory cleanup triggers and corrupts the heap.
+    #
+    # FIX:
+    #   Clamp dispatchThreadGroupCountXY[0] and [1] to 1 before the
+    #   luminance pyramid scheduleDispatch call. Lavapipe then only
+    #   allocates resources for 1 workgroup total.
+    #   Combined with Patch-F HLSL guard (which also passes NumWorkGroups=1
+    #   to SpdDownsample), this is fully consistent and correct.
     # =========================================================================
     set(FSR2_CPP_FILE
         "${ffx_sdk_v2_SOURCE_DIR}/sdk/src/components/fsr2/ffx_fsr2.cpp"
@@ -200,40 +238,32 @@ if(NOT ffx_sdk_v2_POPULATED)
     file(READ "${FSR2_CPP_FILE}" fsr2_code)
 
     if(PATCH_E_ENABLED)
+        # Search for the SPD dispatch call
         set(PATCH_E_SEARCH
             "scheduleDispatch(context, params, &context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1])"
         )
         string(FIND "${fsr2_code}" "${PATCH_E_SEARCH}" PATCH_E_POS)
         if(PATCH_E_POS EQUAL -1)
-            set(PATCH_E_SEARCH_ALT
-                "&context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0]"
-            )
-            string(FIND "${fsr2_code}" "${PATCH_E_SEARCH_ALT}" PATCH_E_ALT_POS)
-            if(PATCH_E_ALT_POS EQUAL -1)
-                message(FATAL_ERROR "[Patch-E] SPD dispatch not found!")
-            else()
-                string(REPLACE "${PATCH_E_SEARCH_ALT}"
-                    "&context->pipelineComputeLuminancePyramid, 0 /* [Fix-E] SPD bypassed */"
-                    fsr2_code "${fsr2_code}")
-                message(STATUS "[Patch-E] Applied via ALT. OK!")
-            endif()
+            message(FATAL_ERROR "[Patch-E] SPD scheduleDispatch not found in ffx_fsr2.cpp!")
+        endif()
+
+        # Replace: clamp workgroup counts to 1, add diagnostics, then dispatch
+        string(REPLACE "${PATCH_E_SEARCH}"
+            "printf(\"[SPD] Dispatching Groups=[%u,%u] -> clamped to [1,1]\\n\", dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1]); fflush(stdout); dispatchThreadGroupCountXY[0] = 1; dispatchThreadGroupCountXY[1] = 1; scheduleDispatch(context, params, &context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1]); printf(\"[SPD] scheduleDispatch returned OK\\n\"); fflush(stdout)"
+            fsr2_code "${fsr2_code}")
+
+        # Verify
+        string(FIND "${fsr2_code}" "clamped to [1,1]" VERIFY_E_POS)
+        if(VERIFY_E_POS EQUAL -1)
+            message(FATAL_ERROR "[VERIFY-E] Patch-E replacement not confirmed!")
         else()
-            string(REPLACE "${PATCH_E_SEARCH}"
-                "/* [Fix-E] SPD dispatch SKIPPED */"
-                fsr2_code "${fsr2_code}")
-            message(STATUS "[Patch-E] SPD dispatch skipped. OK!")
+            message(STATUS "[Patch-E] SPD workgroup clamp applied OK.")
         endif()
 
         file(WRITE "${FSR2_CPP_FILE}" "${fsr2_code}")
-        file(READ "${FSR2_CPP_FILE}" fsr2_verify)
-        string(FIND "${fsr2_verify}" "Fix-E" VERIFY_E_POS)
-        if(VERIFY_E_POS EQUAL -1)
-            message(FATAL_ERROR "[VERIFY-E] Patch-E not confirmed!")
-        else()
-            message(STATUS "[VERIFY-E] Patch-E confirmed. OK!")
-        endif()
+        message(STATUS "[Patch-E] ffx_fsr2.cpp written.")
     else()
-        # Patch-E inactive - inject minimal diagnostics
+        # Patch-E inactive - inject minimal diagnostics only
         set(CP2_3_SEARCH
             "scheduleDispatch(context, params, &context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1])"
         )
@@ -244,124 +274,97 @@ if(NOT ffx_sdk_v2_POPULATED)
                 fsr2_code "${fsr2_code}")
         endif()
         file(WRITE "${FSR2_CPP_FILE}" "${fsr2_code}")
-        message(STATUS "[Patch-E] DISABLED - SPD dispatch runs normally.")
+        message(STATUS "[Patch-E] DISABLED - SPD runs with original workgroup count.")
     endif()
 
     # =========================================================================
-    # PATCH F + G: Fix SPD atomic counter in HLSL
+    # PATCH F + G: Fix SPD in HLSL
     #
     # Both patches modify ffx_fsr2_compute_luminance_pyramid.h
-    # They are applied together to that single file.
     #
-    # Patch-F: Single-workgroup guard
-    #   Renames ComputeAutoExposure -> ComputeAutoExposure_Original
-    #   Adds wrapper that only lets workgroup(0,0) through,
-    #   passing NumWorkGroups=1 to SpdDownsample.
+    # Patch-F: ComputeAutoExposure single-workgroup wrapper
+    #   Renames original ComputeAutoExposure, adds wrapper that:
+    #   - Early-returns all workgroups except (0,0)
+    #   - Calls SpdDownsample with NumWorkGroups=1
+    #   This prevents inter-workgroup atomic coordination.
     #
-    # Patch-G: Atomic counter reset
-    #   Patches AtomicIncSPDCounter to always store 0 back to the
-    #   counter buffer and return 0.
-    #   This means:
-    #     - The GPU buffer is always reset to 0 at the start of each
-    #       SpdDownsample call (first thing workgroup(0,0) does)
-    #     - workgroup(0,0) always sees counter==0, increments to 1,
-    #       checks 1==NumWorkGroups(1) -> TRUE -> proceeds as last WG
-    #     - Counter is written back as 0 (not 1) so next frame starts clean
-    #   Result: no accumulation across frames, no heap corruption.
-    #
-    # Why AtomicIncSPDCounter?
-    #   From ffx_fsr2_compute_luminance_pyramid.h in the SDK:
-    #   void SpdIncreaseAtomicCounter(FfxUInt32 slice,
-    #       FFX_PARAMETER_INOUT FfxUInt32 spdCounter)
-    #   {
-    #       AtomicIncSPDCounter(slice, spdCounter);
-    #   }
-    #   AtomicIncSPDCounter is the macro/function that does the
-    #   actual imageAtomicAdd to the SPD counter buffer.
-    #   By overriding it we control what gets written to GPU memory.
+    # Patch-G: SpdIncreaseAtomicCounter bypass
+    #   From the actual source we can see:
+    #     void SpdIncreaseAtomicCounter(FfxUInt32 slice)   <- 1 param only
+    #     { SPD_IncreaseAtomicCounter(spdCounter); }       <- groupshared var
+    #   The groupshared spdCounter resets automatically each dispatch.
+    #   SPD_IncreaseAtomicCounter writes to the GPU storage buffer atomically.
+    #   With NumWorkGroups=1 and only workgroup(0,0) running, we want
+    #   the 'last workgroup' check to always pass.
+    #   We bypass SPD_IncreaseAtomicCounter and set spdCounter=0 directly,
+    #   so SpdGetAtomicCounter() returns 0, and the SPD check
+    #   (0 == numWorkGroups-1) == (0 == 0) is TRUE for NumWorkGroups=1.
+    #   SpdResetAtomicCounter still runs normally to clean GPU buffer.
     # =========================================================================
     if(PATCH_F_ENABLED OR PATCH_G_ENABLED)
         set(LUM_PYRAMID_HLSL
             "${ffx_sdk_v2_SOURCE_DIR}/sdk/include/FidelityFX/gpu/fsr2/ffx_fsr2_compute_luminance_pyramid.h"
         )
-
         if(NOT EXISTS "${LUM_PYRAMID_HLSL}")
             message(FATAL_ERROR
-                "[Patch-F/G] HLSL file not found at:\n${LUM_PYRAMID_HLSL}"
-            )
+                "[Patch-F/G] HLSL not found: ${LUM_PYRAMID_HLSL}")
         endif()
 
         file(READ "${LUM_PYRAMID_HLSL}" hlsl_code)
-        message(STATUS "[Patch-F/G] HLSL luminance pyramid file read OK.")
+        message(STATUS "[Patch-F/G] HLSL file read OK.")
 
         # ---------------------------------------------------------------------
-        # PATCH G: Override AtomicIncSPDCounter to reset counter each frame
-        #
-        # Original in ffx_fsr2_compute_luminance_pyramid.h:
-        #   void SpdIncreaseAtomicCounter(FfxUInt32 slice,
-        #       FFX_PARAMETER_INOUT FfxUInt32 spdCounter)
-        #   {
-        #       AtomicIncSPDCounter(slice, spdCounter);
-        #   }
-        #
-        # We rename the original and replace with a version that:
-        #   1. Reads current counter value (always 0 on first call per frame
-        #      because we reset it)
-        #   2. Sets spdCounter = 0 (so the "last workgroup" check always
-        #      sees 0+1 == NumWorkGroups(1) == TRUE)
-        #   3. Writes 0 back to GPU buffer (reset for next frame)
-        #
-        # This is safe because with Patch-F we only have 1 workgroup running,
-        # so the atomic coordination logic is irrelevant - we just need
-        # workgroup(0,0) to always pass the "am I last?" check.
+        # PATCH G: Bypass SpdIncreaseAtomicCounter
+        # Exact signature from source: void SpdIncreaseAtomicCounter(FfxUInt32 slice)
+        # Exact body from source:      SPD_IncreaseAtomicCounter(spdCounter);
+        # We rename it and append a replacement that sets spdCounter=0.
         # ---------------------------------------------------------------------
         if(PATCH_G_ENABLED)
             set(PATCH_G_SEARCH
-                "void SpdIncreaseAtomicCounter(FfxUInt32 slice, FFX_PARAMETER_INOUT FfxUInt32 spdCounter)"
+"void SpdIncreaseAtomicCounter(FfxUInt32 slice)
+{
+    SPD_IncreaseAtomicCounter(spdCounter);
+}"
             )
             string(FIND "${hlsl_code}" "${PATCH_G_SEARCH}" PATCH_G_POS)
             if(PATCH_G_POS EQUAL -1)
                 message(FATAL_ERROR
-                    "[Patch-G] SpdIncreaseAtomicCounter not found in HLSL!"
-                )
+                    "[Patch-G] SpdIncreaseAtomicCounter body not found!")
             else()
-                # Rename original
-                string(REPLACE
-                    "${PATCH_G_SEARCH}"
-                    "void SpdIncreaseAtomicCounter_Original(FfxUInt32 slice, FFX_PARAMETER_INOUT FfxUInt32 spdCounter)"
+                string(REPLACE "${PATCH_G_SEARCH}"
+"void SpdIncreaseAtomicCounter_Original(FfxUInt32 slice)
+{
+    SPD_IncreaseAtomicCounter(spdCounter);
+}"
                     hlsl_code "${hlsl_code}")
 
-                # We also need to rename the call inside it so the original
-                # still compiles (it calls AtomicIncSPDCounter which is fine)
-                # Now append our replacement after the file content
-                set(PATCH_G_REPLACEMENT
+                # Append replacement - sets spdCounter=0 without touching GPU buffer
+                # With NumWorkGroups=1: SpdGetAtomicCounter() returns 0
+                # SPD check: (0 == numWorkGroups-1) = (0 == 0) = TRUE
+                # workgroup(0,0) always proceeds as last workgroup. Correct.
+                # SpdResetAtomicCounter() still runs and cleans GPU buffer.
+                string(APPEND hlsl_code
 "
-// [Fix-G] SPD atomic counter reset - prevents accumulation across frames.
-// With NumWorkGroups=1 (Patch-F), workgroup(0,0) is always the only/last WG.
-// We set spdCounter=0 so the 'last workgroup' check (spdCounter+1==numWGs)
-// always passes for workgroup(0,0). We also write 0 back to GPU memory
-// so the counter is clean for the next frame dispatch.
-void SpdIncreaseAtomicCounter(FfxUInt32 slice,
-    FFX_PARAMETER_INOUT FfxUInt32 spdCounter)
+// [Fix-G] Bypass GPU atomic counter - sets groupshared spdCounter=0 directly.
+// With NumWorkGroups=1 (Fix-F), workgroup(0,0) must always be 'last workgroup'.
+// SPD check: SpdGetAtomicCounter()==numWorkGroups-1 -> 0==0 -> TRUE. Correct.
+// GPU storage buffer is never written here; SpdResetAtomicCounter handles cleanup.
+void SpdIncreaseAtomicCounter(FfxUInt32 slice)
 {
-    // Set counter to 0: with NumWorkGroups=1, check is (0+1)==1 -> TRUE
-    // workgroup(0,0) always proceeds as 'last workgroup'. Correct behavior.
-    spdCounter = 0;
-    // Write 0 back to GPU buffer so next frame starts clean (no accumulation)
-    AtomicIncSPDCounter(slice, spdCounter);
-    spdCounter = 0;
+    spdCounter = 0; // [Fix-G] bypass GPU atomic, force 'last workgroup' check to pass
 }
 "
                 )
-                string(APPEND hlsl_code "${PATCH_G_REPLACEMENT}")
-                message(STATUS "[Patch-G] SpdIncreaseAtomicCounter override appended.")
+                message(STATUS "[Patch-G] SpdIncreaseAtomicCounter bypass applied OK.")
             endif()
         else()
             message(STATUS "[Patch-G] DISABLED.")
         endif()
 
         # ---------------------------------------------------------------------
-        # PATCH F: Single-workgroup wrapper for ComputeAutoExposure
+        # PATCH F: ComputeAutoExposure single-workgroup wrapper
+        # Exact signature from source:
+        #   void ComputeAutoExposure(FfxUInt32x3 WorkGroupId, FfxUInt32 LocalThreadIndex)
         # ---------------------------------------------------------------------
         if(PATCH_F_ENABLED)
             set(PATCH_F_SEARCH
@@ -370,22 +373,18 @@ void SpdIncreaseAtomicCounter(FfxUInt32 slice,
             string(FIND "${hlsl_code}" "${PATCH_F_SEARCH}" PATCH_F_POS)
             if(PATCH_F_POS EQUAL -1)
                 message(FATAL_ERROR
-                    "[Patch-F] ComputeAutoExposure signature not found!"
-                )
+                    "[Patch-F] ComputeAutoExposure not found in HLSL!")
             else()
-                # Rename original
-                string(REPLACE
-                    "${PATCH_F_SEARCH}"
+                string(REPLACE "${PATCH_F_SEARCH}"
                     "void ComputeAutoExposure_Original(FfxUInt32x3 WorkGroupId, FfxUInt32 LocalThreadIndex)"
                     hlsl_code "${hlsl_code}")
 
-                # Append wrapper
-                set(PATCH_F_WRAPPER
+                string(APPEND hlsl_code
 "
-// [Fix-F] SPD single-workgroup wrapper.
-// Only workgroup(0,0) runs SpdDownsample with NumWorkGroups=1.
-// All other workgroups early-return without touching any GPU memory.
-// Combined with Fix-G, the atomic counter is always clean each frame.
+// [Fix-F] Single-workgroup wrapper for ComputeAutoExposure.
+// Only workgroup(0,0) runs SpdDownsample. All others early-return.
+// NumWorkGroups=1 passed to SpdDownsample - no inter-workgroup atomics needed.
+// Combined with Fix-G: workgroup(0,0) always passes 'last workgroup' check.
 void ComputeAutoExposure(FfxUInt32x3 WorkGroupId, FfxUInt32 LocalThreadIndex)
 {
     if (WorkGroupId.x != 0 || WorkGroupId.y != 0) return;
@@ -410,8 +409,7 @@ void ComputeAutoExposure(FfxUInt32x3 WorkGroupId, FfxUInt32 LocalThreadIndex)
 }
 "
                 )
-                string(APPEND hlsl_code "${PATCH_F_WRAPPER}")
-                message(STATUS "[Patch-F] ComputeAutoExposure wrapper appended.")
+                message(STATUS "[Patch-F] ComputeAutoExposure wrapper applied OK.")
             endif()
         else()
             message(STATUS "[Patch-F] DISABLED.")
@@ -421,22 +419,22 @@ void ComputeAutoExposure(FfxUInt32x3 WorkGroupId, FfxUInt32 LocalThreadIndex)
         file(WRITE "${LUM_PYRAMID_HLSL}" "${hlsl_code}")
         message(STATUS "[Patch-F/G] HLSL file written.")
 
-        # Verify
+        # Verify both patches
         file(READ "${LUM_PYRAMID_HLSL}" hlsl_verify)
-        if(PATCH_F_ENABLED)
-            string(FIND "${hlsl_verify}" "Fix-F" VERIFY_F_POS)
-            if(VERIFY_F_POS EQUAL -1)
-                message(FATAL_ERROR "[VERIFY-F] Patch-F not confirmed!")
-            else()
-                message(STATUS "[VERIFY-F] Patch-F confirmed OK.")
-            endif()
-        endif()
         if(PATCH_G_ENABLED)
             string(FIND "${hlsl_verify}" "Fix-G" VERIFY_G_POS)
             if(VERIFY_G_POS EQUAL -1)
                 message(FATAL_ERROR "[VERIFY-G] Patch-G not confirmed!")
             else()
                 message(STATUS "[VERIFY-G] Patch-G confirmed OK.")
+            endif()
+        endif()
+        if(PATCH_F_ENABLED)
+            string(FIND "${hlsl_verify}" "Fix-F" VERIFY_F_POS)
+            if(VERIFY_F_POS EQUAL -1)
+                message(FATAL_ERROR "[VERIFY-F] Patch-F not confirmed!")
+            else()
+                message(STATUS "[VERIFY-F] Patch-F confirmed OK.")
             endif()
         endif()
     endif()
