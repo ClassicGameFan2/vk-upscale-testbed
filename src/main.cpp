@@ -716,7 +716,7 @@ int main() {
 
     std::cout << "[FSR2-DL] Step 9: saveFloatImage..." << std::endl;
     std::cout.flush();
-    //saveFloatImage("FSR_2.3.3_2x.png", displayW, displayH, (float*)outData);
+    saveFloatImage("FSR_2.3.3_2x.png", displayW, displayH, (float*)outData);
 
     std::cout << "[FSR2-DL] Step 10: vkUnmapMemory..." << std::endl;
     std::cout.flush();
