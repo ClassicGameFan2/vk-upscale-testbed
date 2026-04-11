@@ -23,11 +23,12 @@ set(PATCH_F_ENABLED OFF) # Moved to fork: SPD counter reset in ffx_fsr2.cpp
 # Disable passes one at a time to find which shader crashes on Lavapipe.
 # ALL should be ON for normal operation.
 # =============================================================================
-set(PASS_SPD_ENABLED          OFF)  # Luminance pyramid (SPD)
+set(PASS_SPD_ENABLED          ON)  # Luminance pyramid (SPD)
 set(PASS_RECONSTRUCT_ENABLED  ON)  # ReconstructPreviousDepth
 set(PASS_DEPTHCLIP_ENABLED    ON)  # DepthClip
 set(PASS_LOCK_ENABLED         ON)  # Lock
 set(PASS_ACCUMULATE_ENABLED   ON)  # Accumulate
+set(PASS_SPD_FORCE_SINGLE_WORKGROUP ON)  # Force SPD to 1 workgroup (skips atomics)
 
 set(FFX_USE_PRECOMPILED_SHADERS OFF)
 
@@ -361,6 +362,29 @@ if(NOT ffx_sdk_v2_POPULATED)
         message(STATUS "[Shader] DXC path set: ${DXC_PATH}")
     else()
         message(STATUS "[Shader] Using precompiled SPIR-V blobs.")
+    endif()
+
+    # =========================================================================
+    # DIAGNOSTIC: Force SPD to single workgroup to test if atomic is the crash
+    # When numworkGroups=1, SPD's SpdExitWorkgroup() returns immediately
+    # without ever calling SpdIncreaseAtomicCounter().
+    # If this does not crash, the atomic counter IS the crash cause.
+    # If this still crashes, something else in SPD crashes Lavapipe.
+    # =========================================================================
+    if(PASS_SPD_FORCE_SINGLE_WORKGROUP)
+        file(READ "${FSR2_CPP_FILE}" fsr2_spd_test_code)
+        string(REPLACE
+            "luminancePyramidConstants.numworkGroups = numWorkGroupsAndMips[0];"
+            "luminancePyramidConstants.numworkGroups = 1; /* [SPD-TEST] forced single workgroup */"
+            fsr2_spd_test_code "${fsr2_spd_test_code}"
+        )
+        string(REPLACE
+            "scheduleDispatch(context, params, &context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1]);"
+            "scheduleDispatch(context, params, &context->pipelineComputeLuminancePyramid, 1, 1); /* [SPD-TEST] forced single workgroup dispatch */"
+            fsr2_spd_test_code "${fsr2_spd_test_code}"
+        )
+        file(WRITE "${FSR2_CPP_FILE}" "${fsr2_spd_test_code}")
+        message(STATUS "[SPD-TEST] Single workgroup force applied.")
     endif()
 
     # =========================================================================
