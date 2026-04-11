@@ -23,7 +23,7 @@ set(PATCH_F_ENABLED OFF) # Moved to fork: SPD counter reset in ffx_fsr2.cpp
 # Disable passes one at a time to find which shader crashes on Lavapipe.
 # ALL should be ON for normal operation.
 # =============================================================================
-set(PASS_SPD_ENABLED          ON)  # Luminance pyramid (SPD)
+set(PASS_SPD_ENABLED          OFF)  # Luminance pyramid (SPD)
 set(PASS_RECONSTRUCT_ENABLED  ON)  # ReconstructPreviousDepth
 set(PASS_DEPTHCLIP_ENABLED    ON)  # DepthClip
 set(PASS_LOCK_ENABLED         ON)  # Lock
