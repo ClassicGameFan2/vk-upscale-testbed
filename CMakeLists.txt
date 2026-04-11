@@ -18,6 +18,17 @@ set(PATCH_D_ENABLED OFF) # Not needed (confirmed)
 set(PATCH_E_ENABLED OFF) # Not needed (replaced by fork Fix-F)
 set(PATCH_F_ENABLED OFF) # Moved to fork: SPD counter reset in ffx_fsr2.cpp
 
+# =============================================================================
+# PASS ISOLATION SWITCHES - for crash diagnosis only
+# Disable passes one at a time to find which shader crashes on Lavapipe.
+# ALL should be ON for normal operation.
+# =============================================================================
+set(PASS_SPD_ENABLED          ON)  # Luminance pyramid (SPD)
+set(PASS_RECONSTRUCT_ENABLED  ON)  # ReconstructPreviousDepth
+set(PASS_DEPTHCLIP_ENABLED    ON)  # DepthClip
+set(PASS_LOCK_ENABLED         ON)  # Lock
+set(PASS_ACCUMULATE_ENABLED   ON)  # Accumulate
+
 set(FFX_USE_PRECOMPILED_SHADERS OFF)
 
 # =============================================================================
@@ -351,6 +362,60 @@ if(NOT ffx_sdk_v2_POPULATED)
     else()
         message(STATUS "[Shader] Using precompiled SPIR-V blobs.")
     endif()
+
+    # =========================================================================
+    # PASS ISOLATION INJECTOR: comment out individual passes in fsr2Dispatch
+    # to find which GPU shader causes the vkQueueWaitIdle crash.
+    # =========================================================================
+    file(READ "${FSR2_CPP_FILE}" fsr2_isolation_code)
+
+    if(NOT PASS_SPD_ENABLED)
+        message(STATUS "[Isolate] SPD luminance pyramid DISABLED.")
+        string(REPLACE
+            "scheduleDispatch(context, params, &context->pipelineComputeLuminancePyramid, dispatchThreadGroupCountXY[0], dispatchThreadGroupCountXY[1]);"
+            "/* [ISOLATE] SPD disabled */ (void)dispatchThreadGroupCountXY;"
+            fsr2_isolation_code "${fsr2_isolation_code}"
+        )
+    endif()
+
+    if(NOT PASS_RECONSTRUCT_ENABLED)
+        message(STATUS "[Isolate] ReconstructPreviousDepth DISABLED.")
+        string(REPLACE
+            "scheduleDispatch(context, params, &context->pipelineReconstructPreviousDepth, dispatchSrcX, dispatchSrcY);"
+            "/* [ISOLATE] ReconstructPreviousDepth disabled */"
+            fsr2_isolation_code "${fsr2_isolation_code}"
+        )
+    endif()
+
+    if(NOT PASS_DEPTHCLIP_ENABLED)
+        message(STATUS "[Isolate] DepthClip DISABLED.")
+        string(REPLACE
+            "scheduleDispatch(context, params, &context->pipelineDepthClip, dispatchSrcX, dispatchSrcY);"
+            "/* [ISOLATE] DepthClip disabled */"
+            fsr2_isolation_code "${fsr2_isolation_code}"
+        )
+    endif()
+
+    if(NOT PASS_LOCK_ENABLED)
+        message(STATUS "[Isolate] Lock DISABLED.")
+        string(REPLACE
+            "scheduleDispatch(context, params, &context->pipelineLock, dispatchSrcX, dispatchSrcY);"
+            "/* [ISOLATE] Lock disabled */"
+            fsr2_isolation_code "${fsr2_isolation_code}"
+        )
+    endif()
+
+    if(NOT PASS_ACCUMULATE_ENABLED)
+        message(STATUS "[Isolate] Accumulate DISABLED.")
+        string(REPLACE
+            "scheduleDispatch(context, params, sharpenEnabled ? &context->pipelineAccumulateSharpen : &context->pipelineAccumulate, dispatchDstX, dispatchDstY);"
+            "/* [ISOLATE] Accumulate disabled */"
+            fsr2_isolation_code "${fsr2_isolation_code}"
+        )
+    endif()
+
+    file(WRITE "${FSR2_CPP_FILE}" "${fsr2_isolation_code}")
+    message(STATUS "[Isolate] Pass isolation applied.")
 
     add_subdirectory(${ffx_sdk_v2_SOURCE_DIR}/sdk ${ffx_sdk_v2_BINARY_DIR}/sdk)
 endif()
