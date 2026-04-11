@@ -28,7 +28,7 @@ set(PASS_RECONSTRUCT_ENABLED  ON)  # ReconstructPreviousDepth
 set(PASS_DEPTHCLIP_ENABLED    ON)  # DepthClip
 set(PASS_LOCK_ENABLED         ON)  # Lock
 set(PASS_ACCUMULATE_ENABLED   ON)  # Accumulate
-set(PASS_SPD_FORCE_SINGLE_WORKGROUP ON)  # Force SPD to 1 workgroup (skips atomics)
+set(PASS_SPD_FORCE_SINGLE_WORKGROUP OFF)  # Force SPD to 1 workgroup (skips atomics)
 
 set(FFX_USE_PRECOMPILED_SHADERS OFF)
 
@@ -77,7 +77,7 @@ set(FFX_USE_PRECOMPILED_SHADERS ${FFX_USE_PRECOMPILED_SHADERS}
 
 FetchContent_Declare(ffx_sdk_v2
     GIT_REPOSITORY https://github.com/ClassicGameFan2/FidelityFX-SDK.git
-    GIT_TAG        changes
+    GIT_TAG        MinChanges
 )
 FetchContent_GetProperties(ffx_sdk_v2)
 
