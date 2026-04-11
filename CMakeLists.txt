@@ -64,7 +64,7 @@ file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/FindVulkan.cmake "
     set(VULKAN_FOUND TRUE)
     set(Vulkan_INCLUDE_DIRS \"${vulkan_headers_SOURCE_DIR}/include\")
     set(Vulkan_LIBRARIES Vulkan::Vulkan)
-    set(Vulkan_VERSION \"1.3.250\")
+    set(Vulkan_VERSION \"1.4.328\")
 ")
 list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_CURRENT_BINARY_DIR}")
 
