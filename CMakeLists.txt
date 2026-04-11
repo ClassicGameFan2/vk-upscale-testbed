@@ -23,12 +23,12 @@ include(FetchContent)
 #   which is much better than zeros from the early return.
 # =============================================================================
 
-set(PATCH_A_ENABLED ON)  # Required for BOTH (confirmed)
+set(PATCH_A_ENABLED OFF)  # Required for BOTH (confirmed)
 set(PATCH_B_ENABLED OFF) # Not required for either (confirmed)
 set(PATCH_C_ENABLED OFF) # Not needed (confirmed)
 set(PATCH_D_ENABLED OFF) # Not needed (confirmed)
 set(PATCH_E_ENABLED OFF) # C++ SPD bypass - OFF (using HLSL fix instead)
-set(PATCH_F_ENABLED ON)  # HLSL SPD fix - single workgroup guard
+set(PATCH_F_ENABLED OFF)  # HLSL SPD fix - single workgroup guard
 
 set(FFX_USE_PRECOMPILED_SHADERS OFF)
 
@@ -76,8 +76,10 @@ set(FFX_USE_PRECOMPILED_SHADERS ${FFX_USE_PRECOMPILED_SHADERS}
     CACHE BOOL "" FORCE)
 
 FetchContent_Declare(ffx_sdk_v2
-    GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git
-    GIT_TAG        v1.1.4
+#    GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git
+#    GIT_TAG        v1.1.4
+    GIT_REPOSITORY https://github.com/ClassicGameFan2/FidelityFX-SDK.git
+    GIT_TAG        changes
 )
 FetchContent_GetProperties(ffx_sdk_v2)
 
