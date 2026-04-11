@@ -30,7 +30,7 @@ set(PASS_LOCK_ENABLED         ON)  # Lock
 set(PASS_ACCUMULATE_ENABLED   ON)  # Accumulate
 set(PASS_SPD_FORCE_SINGLE_WORKGROUP OFF)  # Force SPD to 1 workgroup (skips atomics)
 
-set(FFX_USE_PRECOMPILED_SHADERS OFF)
+set(FFX_USE_PRECOMPILED_SHADERS ON)
 
 # =============================================================================
 # DEPENDENCIES
@@ -64,7 +64,7 @@ file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/FindVulkan.cmake "
     set(VULKAN_FOUND TRUE)
     set(Vulkan_INCLUDE_DIRS \"${vulkan_headers_SOURCE_DIR}/include\")
     set(Vulkan_LIBRARIES Vulkan::Vulkan)
-    set(Vulkan_VERSION \"1.4.328\")
+    set(Vulkan_VERSION \"1.3.250\")
 ")
 list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_CURRENT_BINARY_DIR}")
 
