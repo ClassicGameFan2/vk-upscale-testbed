@@ -598,13 +598,19 @@ int main() {
         vkEndCommandBuffer(cmd);
 
         // =====================================================================
-        // PHASE 2 GPU CRASH DIAGNOSTICS
-        // Checkpoint 3 confirmed: scheduleDispatch() CPU call returned OK.
-        // The crash is happening on the GPU side.
-        // Now we isolate WHICH Vulkan GPU call crashes:
-        //   CP4: after vkQueueSubmit  - if crash here, submission failed
-        //   CP5: after vkQueueWaitIdle - if crash here, shader execution failed
+        // PHASE 3 GPU CRASH DIAGNOSTICS
+        // fpExecuteGpuJobs batches ALL passes into ONE command buffer.
+        // vkQueueSubmit submits that whole batch at once.
+        // We cannot split them per-pass without modifying the SDK.
+        //
+        // Strategy: submit the whole batch, then use per-pass fence isolation
+        // by splitting into separate command buffers - one per FSR2 pass.
+        // Since we cannot do that without SDK changes, instead we isolate
+        // by disabling passes one at a time via CMake to find which crashes.
+        //
+        // For now: confirm exactly which vkQueueWaitIdle result we get.
         // =====================================================================
+
         std::cout << "[GPU-DIAG] Frame " << i
                   << ": Before vkQueueSubmit..." << std::endl;
         std::cout.flush();
@@ -618,6 +624,16 @@ int main() {
                   << std::endl;
         std::cout.flush();
 
+        if (submitResult != VK_SUCCESS) {
+            std::cout << "[FATAL] vkQueueSubmit failed on frame " << i
+                      << " with VkResult=" << submitResult << std::endl;
+            return 1;
+        }
+
+        std::cout << "[GPU-DIAG] Frame " << i
+                  << ": Before vkQueueWaitIdle..." << std::endl;
+        std::cout.flush();
+
         VkResult waitResult = vkQueueWaitIdle(queue);
 
         std::cout << "[GPU-DIAG] Frame " << i
@@ -626,18 +642,13 @@ int main() {
                   << std::endl;
         std::cout.flush();
 
-        if (submitResult != VK_SUCCESS) {
-            std::cout << "[FATAL] vkQueueSubmit failed on frame " << i
-                      << " with VkResult=" << submitResult << std::endl;
-            return 1;
-        }
         if (waitResult != VK_SUCCESS) {
             std::cout << "[FATAL] vkQueueWaitIdle failed on frame " << i
                       << " with VkResult=" << waitResult << std::endl;
-            std::cout << "[FATAL] The SPD SPIR-V shader crashed during GPU"
-                      << " execution on Lavapipe." << std::endl;
-            std::cout << "[FATAL] This confirms the crash is in the"
-                      << " pre-compiled SPD shader blob." << std::endl;
+            std::cout << "[FATAL] A GPU shader crashed during execution."
+                      << std::endl;
+            std::cout << "[FATAL] VkResult=" << waitResult
+                      << " (check Vulkan error codes)" << std::endl;
             return 1;
         }
 
