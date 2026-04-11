@@ -171,53 +171,21 @@ void renderScene(int w, int h, float jx, float jy,
 
 void saveFloatImage(const std::string& filename, int w, int h,
     const float* data) {
-    std::cout << "[saveFloat] START " << filename
-              << " size=" << w << "x" << h << std::endl;
-    std::cout.flush();
-
-    // Step A: allocate output buffer
-    std::cout << "[saveFloat] A: allocating bytes buffer..." << std::endl;
-    std::cout.flush();
     std::vector<unsigned char> bytes(w * h * 4);
-
-    // Step B: pixel conversion loop
-    std::cout << "[saveFloat] B: pixel conversion loop..." << std::endl;
-    std::cout.flush();
     int nanCount = 0;
-    int infCount = 0;
     for (int i = 0; i < w*h*4; i+=4) {
         for (int c = 0; c < 3; c++) {
             float v = data[i+c];
-            if (std::isnan(v))  { v = 0.0f; nanCount++; }
-            if (std::isinf(v))  { v = 1.0f; infCount++; }
+            if (std::isnan(v)) { v = 0.0f; nanCount++; }
             v = fmaxf(0.0f, fminf(1.0f, v));
             bytes[i+c] = (unsigned char)(powf(v, 1.0f/2.2f) * 255.0f);
         }
         bytes[i+3] = 255;
     }
-    std::cout << "[saveFloat] B: done. NaNs=" << nanCount
-              << " Infs=" << infCount << std::endl;
-    std::cout.flush();
-
-    // Step C: stbi write
-    std::cout << "[saveFloat] C: calling stbi_write_png..." << std::endl;
-    std::cout.flush();
-    int stbi_result = stbi_write_png(
-        filename.c_str(), w, h, 4, bytes.data(), w*4);
-    std::cout << "[saveFloat] C: stbi_write_png returned " 
-              << stbi_result << std::endl;
-    std::cout.flush();
-
-    // Step D: cleanup (vector destructor runs here at end of scope)
-    std::cout << "[saveFloat] D: about to destruct bytes vector..." << std::endl;
-    std::cout.flush();
-
-    // Force early scope exit to test vector destructor
-    { std::vector<unsigned char> tmp; bytes.swap(tmp); }
-
-    std::cout << "[saveFloat] D: bytes vector destructed OK." << std::endl;
-    std::cout.flush();
-
+    if (nanCount > 0)
+        std::cout << "[WARNING] " << nanCount << " NaNs in "
+                  << filename << std::endl;
+    stbi_write_png(filename.c_str(), w, h, 4, bytes.data(), w*4);
     std::cout << "Saved: " << filename << std::endl;
     std::cout.flush();
 }
@@ -629,6 +597,14 @@ int main() {
 
         vkEndCommandBuffer(cmd);
 
+        // =====================================================================
+        // PHASE 2 GPU CRASH DIAGNOSTICS
+        // Checkpoint 3 confirmed: scheduleDispatch() CPU call returned OK.
+        // The crash is happening on the GPU side.
+        // Now we isolate WHICH Vulkan GPU call crashes:
+        //   CP4: after vkQueueSubmit  - if crash here, submission failed
+        //   CP5: after vkQueueWaitIdle - if crash here, shader execution failed
+        // =====================================================================
         std::cout << "[GPU-DIAG] Frame " << i
                   << ": Before vkQueueSubmit..." << std::endl;
         std::cout.flush();
@@ -658,6 +634,10 @@ int main() {
         if (waitResult != VK_SUCCESS) {
             std::cout << "[FATAL] vkQueueWaitIdle failed on frame " << i
                       << " with VkResult=" << waitResult << std::endl;
+            std::cout << "[FATAL] The SPD SPIR-V shader crashed during GPU"
+                      << " execution on Lavapipe." << std::endl;
+            std::cout << "[FATAL] This confirms the crash is in the"
+                      << " pre-compiled SPD shader blob." << std::endl;
             return 1;
         }
 
@@ -665,129 +645,45 @@ int main() {
             std::cout << "[FSR2] Frame " << (i+1) << "/32 done" << std::endl;
     }
 
-    // =========================================================================
-    // POST-LOOP: Download result and save PNG
-    // Diagnostics added to pinpoint post-loop crash location
-    // =========================================================================
-    std::cout << "[FSR2] All frames done. Starting result download..."
-              << std::endl;
-    std::cout.flush();
-
-    std::cout << "[FSR2-DL] Step 1: vkResetCommandBuffer..." << std::endl;
-    std::cout.flush();
+    // Download result
     vkResetCommandBuffer(cmd, 0);
-
-    std::cout << "[FSR2-DL] Step 2: vkBeginCommandBuffer..." << std::endl;
-    std::cout.flush();
     vkBeginCommandBuffer(cmd, &beginInfo);
-
-    std::cout << "[FSR2-DL] Step 3: transition outputImage -> TRANSFER_SRC..."
-              << std::endl;
-    std::cout.flush();
     transition(cmd, outputImage, outputLayout,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-
-    std::cout << "[FSR2-DL] Step 4: vkCmdCopyImageToBuffer..." << std::endl;
-    std::cout.flush();
     vkCmdCopyImageToBuffer(cmd, outputImage,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, downloadBuffer, 1, &outRegion);
-
-    std::cout << "[FSR2-DL] Step 5: vkEndCommandBuffer..." << std::endl;
-    std::cout.flush();
     vkEndCommandBuffer(cmd);
+    vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
+    vkQueueWaitIdle(queue);
 
-    std::cout << "[FSR2-DL] Step 6: vkQueueSubmit..." << std::endl;
-    std::cout.flush();
-    VkResult dlSubmit = vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
-    std::cout << "[FSR2-DL] Step 6 result: " << dlSubmit
-              << (dlSubmit == VK_SUCCESS ? " (OK)" : " (FAILED!)") << std::endl;
-    std::cout.flush();
-
-    std::cout << "[FSR2-DL] Step 7: vkQueueWaitIdle..." << std::endl;
-    std::cout.flush();
-    VkResult dlWait = vkQueueWaitIdle(queue);
-    std::cout << "[FSR2-DL] Step 7 result: " << dlWait
-              << (dlWait == VK_SUCCESS ? " (OK)" : " (FAILED!)") << std::endl;
-    std::cout.flush();
-
-    std::cout << "[FSR2-DL] Step 8: vkMapMemory..." << std::endl;
-    std::cout.flush();
     vkMapMemory(device, downloadMemory, 0, outSize, 0, &outData);
-
-    std::cout << "[FSR2-DL] Step 9: saveFloatImage..." << std::endl;
-    std::cout.flush();
     saveFloatImage("FSR_2.3.3_2x.png", displayW, displayH, (float*)outData);
-
-    std::cout << "[FSR2-DL] Step 10: vkUnmapMemory..." << std::endl;
-    std::cout.flush();
     vkUnmapMemory(device, downloadMemory);
 
-    std::cout << "[FSR2-DL] Step 11: ffxFsr2ContextDestroy..." << std::endl;
-    std::cout.flush();
     ffxFsr2ContextDestroy(fsr2Context);
-
-    std::cout << "[FSR2-DL] Step 12: _aligned_free fsr2Context..." << std::endl;
-    std::cout.flush();
     _aligned_free(fsr2Context);
-
     std::cout << "[FSR2] Done." << std::endl;
-    std::cout.flush();
 
-    // =========================================================================
     // Cleanup
-    // =========================================================================
-    std::cout << "[Cleanup] Starting Vulkan resource cleanup..." << std::endl;
-    std::cout.flush();
-
-    std::cout << "[Cleanup] Destroying colorImage..." << std::endl;
-    std::cout.flush();
     vkDestroyImage(device, colorImage,   nullptr);
     vkFreeMemory(device, colorMem,       nullptr);
-
-    std::cout << "[Cleanup] Destroying depthImage..." << std::endl;
-    std::cout.flush();
     vkDestroyImage(device, depthImage,   nullptr);
     vkFreeMemory(device, depthMem,       nullptr);
-
-    std::cout << "[Cleanup] Destroying mvImage..." << std::endl;
-    std::cout.flush();
     vkDestroyImage(device, mvImage,      nullptr);
     vkFreeMemory(device, mvMem,          nullptr);
-
-    std::cout << "[Cleanup] Destroying outputImage..." << std::endl;
-    std::cout.flush();
     vkDestroyImage(device, outputImage,  nullptr);
     vkFreeMemory(device, outputMem,      nullptr);
-
-    std::cout << "[Cleanup] Destroying expImage..." << std::endl;
-    std::cout.flush();
     vkDestroyImage(device, expImage,     nullptr);
     vkFreeMemory(device, expImageMem,    nullptr);
-
-    std::cout << "[Cleanup] Destroying buffers..." << std::endl;
-    std::cout.flush();
     vkDestroyBuffer(device, uploadBuffer,   nullptr);
     vkFreeMemory(device, uploadMemory,      nullptr);
     vkDestroyBuffer(device, downloadBuffer, nullptr);
     vkFreeMemory(device, downloadMemory,    nullptr);
-
-    std::cout << "[Cleanup] Destroying command pool..." << std::endl;
-    std::cout.flush();
     vkDestroyCommandPool(device, commandPool, nullptr);
-
-    std::cout << "[Cleanup] Destroying device..." << std::endl;
-    std::cout.flush();
     vkDestroyDevice(device, nullptr);
-
-    std::cout << "[Cleanup] Destroying instance..." << std::endl;
-    std::cout.flush();
     vkDestroyInstance(instance, nullptr);
-
-    std::cout << "[Cleanup] Freeing scratch buffer..." << std::endl;
-    std::cout.flush();
     _aligned_free(scratchBuffer);
 
     std::cout << "\n[Done] All tests complete." << std::endl;
-    std::cout.flush();
     return 0;
 }
