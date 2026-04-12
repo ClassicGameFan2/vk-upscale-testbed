@@ -163,6 +163,8 @@ void renderScene(int w, int h, float jx, float jy,
             colorOut[idx*4+1] = g;
             colorOut[idx*4+2] = b;
             colorOut[idx*4+3] = 1.0f;
+
+            // Inverted depth: near=1, far=0 (matches FFX_FSR2_ENABLE_DEPTH_INVERTED)
             depthOut[idx] = (hitZ > 0.0f) ?
                 (zNear*(zFar-hitZ))/(hitZ*(zFar-zNear)) : 0.0f;
         }
@@ -192,7 +194,7 @@ void saveFloatImage(const std::string& filename, int w, int h,
 
 int main() {
     std::cout << "============================================" << std::endl;
-    std::cout << "  FSR Vulkan Testbed - SwiftShader Edition  " << std::endl;
+    std::cout << "  FSR Vulkan Testbed                       " << std::endl;
     std::cout << "============================================" << std::endl;
     std::cout.flush();
 
@@ -201,6 +203,9 @@ int main() {
     const uint32_t renderW  = 320, renderH  = 240;
     const uint32_t displayW = 640, displayH = 480;
 
+    // =========================================================================
+    // VULKAN INIT
+    // =========================================================================
     std::cout << "\n[Init] Creating Vulkan instance..." << std::endl;
     std::cout.flush();
 
@@ -244,10 +249,6 @@ int main() {
     VkPhysicalDeviceFeatures2 features2 = {
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &features11 };
     vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
-
-    // shaderFloat16 fix: commented out - confirmed not needed
-    // features12.shaderFloat16 = VK_FALSE;
-    // features11.storageBuffer16BitAccess = VK_FALSE;
 
     uint32_t extCount = 0;
     vkEnumerateDeviceExtensionProperties(
@@ -297,7 +298,9 @@ int main() {
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &cmd;
 
-    // Native reference images
+    // =========================================================================
+    // CPU REFERENCE RENDERS
+    // =========================================================================
     std::cout << "\n[CPU] Rendering Native_1x.png (320x240)..." << std::endl;
     std::vector<float> native1x(renderW * renderH * 4);
     std::vector<float> depth1x(renderW * renderH);
@@ -310,7 +313,9 @@ int main() {
     renderScene(displayW, displayH, 0, 0, native2x.data(), depth2x.data());
     saveFloatImage("Native_2x.png", displayW, displayH, native2x.data());
 
-    // Shared Vulkan resources
+    // =========================================================================
+    // SHARED VULKAN RESOURCES
+    // =========================================================================
     VkDeviceSize uploadSize =
         (renderW * renderH * 4 * sizeof(float)) +
         (renderW * renderH * sizeof(float));
@@ -329,48 +334,58 @@ int main() {
         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         downloadBuffer, downloadMemory);
 
-    VkImage colorImage, depthImage, mvImage, outputImage, expImage;
-    VkDeviceMemory colorMem, depthMem, mvMem, outputMem, expImageMem;
-
+    // Color: linear HDR RGBA32F at render resolution
+    VkImage colorImage; VkDeviceMemory colorMem;
     VkImageCreateInfo colorInfo = createImage(device, physicalDevice,
         renderW, renderH, VK_FORMAT_R32G32B32A32_SFLOAT,
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         colorImage, colorMem);
+
+    // Depth: D32_SFLOAT at render resolution
+    VkImage depthImage; VkDeviceMemory depthMem;
     VkImageCreateInfo depthInfo = createImage(device, physicalDevice,
         renderW, renderH, VK_FORMAT_D32_SFLOAT,
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         depthImage, depthMem);
+
+    // Motion vectors: RG16F at render resolution (zero = static camera)
+    VkImage mvImage; VkDeviceMemory mvMem;
     VkImageCreateInfo mvInfo = createImage(device, physicalDevice,
-        renderW, renderH, VK_FORMAT_R32G32_SFLOAT,
+        renderW, renderH, VK_FORMAT_R16G16_SFLOAT,
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         mvImage, mvMem);
+
+    // Output: RGBA32F at display resolution
+    VkImage outputImage; VkDeviceMemory outputMem;
     VkImageCreateInfo outputInfo = createImage(device, physicalDevice,
         displayW, displayH, VK_FORMAT_R32G32B32A32_SFLOAT,
         VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
         VK_IMAGE_USAGE_SAMPLED_BIT,
         outputImage, outputMem);
-    VkImageCreateInfo expInfo = createImage(device, physicalDevice,
-        1, 1, VK_FORMAT_R32_SFLOAT,
-        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-        expImage, expImageMem);
 
     VkImageLayout colorLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
     VkImageLayout depthLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
     VkImageLayout mvLayout     = VK_IMAGE_LAYOUT_UNDEFINED;
     VkImageLayout outputLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    VkImageLayout expLayout    = VK_IMAGE_LAYOUT_UNDEFINED;
 
     VkImageSubresourceRange colorRange = {
         VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
 
     VkDeviceContext vkDeviceContext = {
         device, physicalDevice, vkGetDeviceProcAddr };
+
+    // Scratch buffer: 2x safety margin, 64-byte aligned
     size_t safeBufferSize =
         ffxGetScratchMemorySizeVK(physicalDevice, 4) * 2;
     void* scratchBuffer = _aligned_malloc(safeBufferSize, 64);
 
+    // Download region descriptor (reused for both FSR passes)
+    VkBufferImageCopy outRegion = {};
+    outRegion.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    outRegion.imageExtent = { displayW, displayH, 1 };
+
     // =========================================================================
-    // FSR 1.2
+    // FSR 1.2 - Spatial Upscaling
     // =========================================================================
     std::cout << "\n============================================" << std::endl;
     std::cout << "  FSR 1.2 Spatial Upscaling Test" << std::endl;
@@ -382,18 +397,23 @@ int main() {
         scratchBuffer, safeBufferSize, 4);
 
     FfxFsr1ContextDescription fsr1Desc = {};
-    fsr1Desc.flags = FFX_FSR1_ENABLE_HIGH_DYNAMIC_RANGE;
-    fsr1Desc.outputFormat =
-        ffxGetSurfaceFormatVK(VK_FORMAT_R32G32B32A32_SFLOAT);
-    fsr1Desc.maxRenderSize = { renderW, renderH };
-    fsr1Desc.displaySize   = { displayW, displayH };
+    // FFX_FSR1_ENABLE_HIGH_DYNAMIC_RANGE: input is linear light (HDR pipeline)
+    // FFX_FSR1_ENABLE_RCAS: enable robust contrast-adaptive sharpening pass
+    fsr1Desc.flags      = FFX_FSR1_ENABLE_HIGH_DYNAMIC_RANGE |
+                          FFX_FSR1_ENABLE_RCAS;
+    fsr1Desc.outputFormat     = ffxGetSurfaceFormatVK(VK_FORMAT_R32G32B32A32_SFLOAT);
+    fsr1Desc.maxRenderSize    = { renderW, renderH };
+    fsr1Desc.displaySize      = { displayW, displayH };
     fsr1Desc.backendInterface = ffxInterface1;
 
     FfxFsr1Context* fsr1Context =
         (FfxFsr1Context*)_aligned_malloc(sizeof(FfxFsr1Context), 64);
     memset(fsr1Context, 0, sizeof(FfxFsr1Context));
-    ffxFsr1ContextCreate(fsr1Context, &fsr1Desc);
+    if (ffxFsr1ContextCreate(fsr1Context, &fsr1Desc) != FFX_OK) {
+        std::cout << "[FATAL] ffxFsr1ContextCreate failed!\n"; return 1;
+    }
 
+    // Upload native 1x color for FSR1 input
     void* mappedData;
     vkMapMemory(device, uploadMemory, 0, uploadSize, 0, &mappedData);
     memcpy(mappedData, native1x.data(), native1x.size() * sizeof(float));
@@ -401,15 +421,18 @@ int main() {
 
     vkResetCommandBuffer(cmd, 0);
     vkBeginCommandBuffer(cmd, &beginInfo);
+
     transition(cmd, colorImage, colorLayout,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
     transition(cmd, outputImage, outputLayout,
         VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
+
     VkBufferImageCopy cRegion = {};
     cRegion.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
     cRegion.imageExtent = { renderW, renderH, 1 };
     vkCmdCopyBufferToImage(cmd, uploadBuffer, colorImage,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cRegion);
+
     transition(cmd, colorImage, colorLayout,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
 
@@ -423,21 +446,25 @@ int main() {
         L"FSR1_Output", FFX_RESOURCE_STATE_UNORDERED_ACCESS);
 
     FfxFsr1DispatchDescription disp1 = {};
-    disp1.commandList = ffxGetCommandListVK(cmd);
-    disp1.color = colorRes1;
-    disp1.output = outputRes1;
-    disp1.renderSize = { renderW, renderH };
-    disp1.enableSharpening = false;
+    disp1.commandList      = ffxGetCommandListVK(cmd);
+    disp1.color            = colorRes1;
+    disp1.output           = outputRes1;
+    disp1.renderSize       = { renderW, renderH };
+    // Enable RCAS sharpening. Sharpness 0.0=maximum, 1.0=minimum per AMD docs.
+    // 0.8 gives strong but not over-sharpened output - recommended default.
+    disp1.enableSharpening = true;
+    disp1.sharpness        = 0.8f;
+
     std::cout << "[FSR1] Dispatching FSR 1.2 upscaler..." << std::endl;
-    ffxFsr1ContextDispatch(fsr1Context, &disp1);
+    if (ffxFsr1ContextDispatch(fsr1Context, &disp1) != FFX_OK) {
+        std::cout << "[FATAL] FSR1 dispatch failed!\n"; return 1;
+    }
 
     transition(cmd, outputImage, outputLayout,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-    VkBufferImageCopy outRegion = {};
-    outRegion.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-    outRegion.imageExtent = { displayW, displayH, 1 };
     vkCmdCopyImageToBuffer(cmd, outputImage,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, downloadBuffer, 1, &outRegion);
+
     vkEndCommandBuffer(cmd);
     vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
     vkQueueWaitIdle(queue);
@@ -452,7 +479,7 @@ int main() {
     std::cout << "[FSR1] Done." << std::endl;
 
     // =========================================================================
-    // FSR 2.3.3
+    // FSR 2.3.3 - Temporal Upscaling
     // =========================================================================
     std::cout << "\n============================================" << std::endl;
     std::cout << "  FSR 2.3.3 Temporal Upscaling Test (32 frames)" << std::endl;
@@ -466,8 +493,24 @@ int main() {
     FfxFsr2ContextDescription fsr2Desc = {};
     memset(&fsr2Desc, 0, sizeof(fsr2Desc));
     fsr2Desc.flags =
-        FFX_FSR2_ENABLE_DEBUG_CHECKING |
-        FFX_FSR2_ENABLE_DEPTH_INVERTED;
+        // Enable debug checking for development diagnostics
+        FFX_FSR2_ENABLE_DEBUG_CHECKING                  |
+        // Our depth buffer is inverted (near=1, far=0) for better precision
+        FFX_FSR2_ENABLE_DEPTH_INVERTED                  |
+        // Input color is linear light HDR (no tonemapping applied before FSR2)
+        FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE              |
+        // Let FSR2 compute exposure internally via luminance pyramid (SPD)
+        // Recommended unless the application provides its own exposure value
+        FFX_FSR2_ENABLE_AUTO_EXPOSURE                   |
+        // Our motion vectors are in render-resolution screen space (not display)
+        // This is the default and matches our motionVectorScale setup below
+        // (no FFX_FSR2_ENABLE_DISPLAY_RESOLUTION_MOTION_VECTORS needed)
+        //
+        // Our camera is static so motion vectors are always zero.
+        // This flag tells FSR2 that our zero MVs are intentional -
+        // the jitter offset is baked into the projection, not the MVs.
+        FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION;
+
     fsr2Desc.maxRenderSize    = { renderW, renderH };
     fsr2Desc.displaySize      = { displayW, displayH };
     fsr2Desc.fpMessage        = FfxMessageCallback;
@@ -481,6 +524,8 @@ int main() {
     }
     std::cout << "[FSR2] Context created OK." << std::endl;
 
+    // Build FfxResource descriptors once - these reference the VkImage handles
+    // which remain valid for all 32 frames
     FfxResource colorRes2 = ffxGetResourceVK(colorImage,
         ffxGetImageResourceDescriptionVK(colorImage, colorInfo,
             FFX_RESOURCE_USAGE_READ_ONLY),
@@ -497,10 +542,11 @@ int main() {
         ffxGetImageResourceDescriptionVK(outputImage, outputInfo,
             FFX_RESOURCE_USAGE_UAV),
         L"FSR2_Output", FFX_RESOURCE_STATE_UNORDERED_ACCESS);
-    FfxResource expRes2 = ffxGetResourceVK(expImage,
-        ffxGetImageResourceDescriptionVK(expImage, expInfo,
-            FFX_RESOURCE_USAGE_READ_ONLY),
-        L"FSR2_Exposure", FFX_RESOURCE_STATE_COMPUTE_READ);
+
+    // With FFX_FSR2_ENABLE_AUTO_EXPOSURE, do NOT pass an exposure resource.
+    // FSR2 computes exposure internally via the luminance pyramid (SPD pass).
+    // Passing a manual exposure resource when AUTO_EXPOSURE is set will
+    // trigger a warning from the debug checker.
 
     int32_t phaseCount = ffxFsr2GetJitterPhaseCount(renderW, displayW);
     std::cout << "[FSR2] Jitter phase count: " << phaseCount << std::endl;
@@ -512,37 +558,44 @@ int main() {
         float jX = 0, jY = 0;
         ffxFsr2GetJitterOffset(&jX, &jY, i, phaseCount);
 
+        // Render scene with jitter applied to projection
+        // All inputs at render resolution are jittered except motion vectors
         std::vector<float> fColor(renderW * renderH * 4);
         std::vector<float> fDepth(renderW * renderH);
         renderScene(renderW, renderH, jX, jY, fColor.data(), fDepth.data());
 
+        // Upload color and depth to GPU
         vkMapMemory(device, uploadMemory, 0, uploadSize, 0, &mappedData);
-        memcpy(mappedData, fColor.data(), fColor.size() * sizeof(float));
-        memcpy((uint8_t*)mappedData + fColor.size()*sizeof(float),
+        memcpy(mappedData,
+            fColor.data(), fColor.size() * sizeof(float));
+        memcpy((uint8_t*)mappedData + fColor.size() * sizeof(float),
             fDepth.data(), fDepth.size() * sizeof(float));
         vkUnmapMemory(device, uploadMemory);
 
         vkResetCommandBuffer(cmd, 0);
         vkBeginCommandBuffer(cmd, &beginInfo);
 
+        // Transition images to transfer destinations
         transition(cmd, colorImage, colorLayout,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
         transition(cmd, depthImage, depthLayout,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
         transition(cmd, mvImage, mvLayout,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-        transition(cmd, expImage, expLayout,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+
+        // First frame: transition output to GENERAL for FSR2 UAV writes
         if (i == 0)
             transition(cmd, outputImage, outputLayout,
                 VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
 
+        // Copy color
         VkBufferImageCopy cR2 = {};
         cR2.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
         cR2.imageExtent = { renderW, renderH, 1 };
         vkCmdCopyBufferToImage(cmd, uploadBuffer, colorImage,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cR2);
 
+        // Copy depth
         VkBufferImageCopy dR2 = {};
         dR2.bufferOffset = fColor.size() * sizeof(float);
         dR2.imageSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 };
@@ -550,43 +603,68 @@ int main() {
         vkCmdCopyBufferToImage(cmd, uploadBuffer, depthImage,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &dR2);
 
-        VkClearColorValue mvClear  = {{ 0.0f, 0.0f, 0.0f, 0.0f }};
-        VkClearColorValue expClear = {{ 1.0f, 0.0f, 0.0f, 0.0f }};
+        // Clear motion vectors to zero - static camera has no motion
+        // FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION tells FSR2
+        // these zero MVs are correct for a jittered static camera
+        VkClearColorValue mvClear = {{ 0.0f, 0.0f, 0.0f, 0.0f }};
         vkCmdClearColorImage(cmd, mvImage,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &mvClear, 1, &colorRange);
-        vkCmdClearColorImage(cmd, expImage,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &expClear, 1, &colorRange);
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            &mvClear, 1, &colorRange);
 
+        // Transition to shader read
         transition(cmd, colorImage, colorLayout,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
         transition(cmd, depthImage, depthLayout,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
         transition(cmd, mvImage, mvLayout,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-        transition(cmd, expImage, expLayout,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
 
         FfxFsr2DispatchDescription dispatchDesc = {};
         memset(&dispatchDesc, 0, sizeof(dispatchDesc));
-        dispatchDesc.commandList         = ffxGetCommandListVK(cmd);
-        dispatchDesc.color               = colorRes2;
-        dispatchDesc.depth               = depthRes2;
-        dispatchDesc.motionVectors       = mvRes2;
-        dispatchDesc.exposure            = expRes2;
-        dispatchDesc.output              = outputRes2;
-        dispatchDesc.jitterOffset.x      = jX;
-        dispatchDesc.jitterOffset.y      = jY;
+        dispatchDesc.commandList   = ffxGetCommandListVK(cmd);
+        dispatchDesc.color         = colorRes2;
+        dispatchDesc.depth         = depthRes2;
+        dispatchDesc.motionVectors = mvRes2;
+        // exposure: left as zeroed/null - AUTO_EXPOSURE computes it internally
+        dispatchDesc.output        = outputRes2;
+
+        // Jitter offset from ffxFsr2GetJitterOffset (unit pixel space)
+        dispatchDesc.jitterOffset.x = jX;
+        dispatchDesc.jitterOffset.y = jY;
+
+        // Motion vector scale: converts our screen-space MVs to FSR2's
+        // expected [-width, width] x [-height, height] range.
+        // Our MVs are zero (static camera) so scale does not matter,
+        // but setting it correctly is required for non-static scenes.
         dispatchDesc.motionVectorScale.x = (float)renderW;
         dispatchDesc.motionVectorScale.y = (float)renderH;
-        dispatchDesc.renderSize          = { renderW, renderH };
-        dispatchDesc.enableSharpening    = false;
-        dispatchDesc.sharpness           = 0.0f;
-        dispatchDesc.frameTimeDelta      = 16.6f;
-        dispatchDesc.preExposure         = 1.0f;
-        dispatchDesc.reset               = (i == 0);
-        dispatchDesc.cameraNear          = 0.1f;
-        dispatchDesc.cameraFar           = 100.0f;
-        dispatchDesc.cameraFovAngleVertical  = 1.047f;
+
+        dispatchDesc.renderSize = { renderW, renderH };
+
+        // Enable RCAS sharpening post-upscale.
+        // Sharpness 0.0=maximum sharpness, 1.0=minimum (per AMD RCAS docs).
+        // 0.8 is the recommended default for strong but natural sharpening.
+        dispatchDesc.enableSharpening = true;
+        dispatchDesc.sharpness        = 0.8f;
+
+        // Frame time in milliseconds - used for temporal stability calculations
+        // 16.6ms = 60fps reference frame time
+        dispatchDesc.frameTimeDelta = 16.6f;
+
+        // Pre-exposure: 1.0 means input color is not pre-exposed.
+        // AUTO_EXPOSURE handles exposure internally so this stays at 1.0.
+        dispatchDesc.preExposure = 1.0f;
+
+        // Reset accumulation on first frame to flush any stale history
+        dispatchDesc.reset = (i == 0);
+
+        // Camera parameters for depth reconstruction
+        dispatchDesc.cameraNear             = 0.1f;
+        dispatchDesc.cameraFar              = 100.0f;
+        dispatchDesc.cameraFovAngleVertical = 1.04719755f; // 60 degrees in radians
+
+        // Scale factor for converting view-space units to meters.
+        // 1.0 means our world units are already in meters.
         dispatchDesc.viewSpaceToMetersFactor = 1.0f;
 
         if (ffxFsr2ContextDispatch(fsr2Context, &dispatchDesc) != FFX_OK) {
@@ -597,58 +675,18 @@ int main() {
 
         vkEndCommandBuffer(cmd);
 
-        // =====================================================================
-        // PHASE 3 GPU CRASH DIAGNOSTICS
-        // fpExecuteGpuJobs batches ALL passes into ONE command buffer.
-        // vkQueueSubmit submits that whole batch at once.
-        // We cannot split them per-pass without modifying the SDK.
-        //
-        // Strategy: submit the whole batch, then use per-pass fence isolation
-        // by splitting into separate command buffers - one per FSR2 pass.
-        // Since we cannot do that without SDK changes, instead we isolate
-        // by disabling passes one at a time via CMake to find which crashes.
-        //
-        // For now: confirm exactly which vkQueueWaitIdle result we get.
-        // =====================================================================
-
-        std::cout << "[GPU-DIAG] Frame " << i
-                  << ": Before vkQueueSubmit..." << std::endl;
-        std::cout.flush();
-
         VkResult submitResult = vkQueueSubmit(
             queue, 1, &submitInfo, VK_NULL_HANDLE);
-
-        std::cout << "[GPU-DIAG] Frame " << i
-                  << ": vkQueueSubmit returned: " << submitResult
-                  << (submitResult == VK_SUCCESS ? " (VK_SUCCESS)" : " (FAILED!)")
-                  << std::endl;
-        std::cout.flush();
-
         if (submitResult != VK_SUCCESS) {
-            std::cout << "[FATAL] vkQueueSubmit failed on frame " << i
-                      << " with VkResult=" << submitResult << std::endl;
+            std::cout << "[FATAL] vkQueueSubmit failed frame " << i
+                      << " VkResult=" << submitResult << std::endl;
             return 1;
         }
 
-        std::cout << "[GPU-DIAG] Frame " << i
-                  << ": Before vkQueueWaitIdle..." << std::endl;
-        std::cout.flush();
-
         VkResult waitResult = vkQueueWaitIdle(queue);
-
-        std::cout << "[GPU-DIAG] Frame " << i
-                  << ": vkQueueWaitIdle returned: " << waitResult
-                  << (waitResult == VK_SUCCESS ? " (VK_SUCCESS)" : " (FAILED!)")
-                  << std::endl;
-        std::cout.flush();
-
         if (waitResult != VK_SUCCESS) {
-            std::cout << "[FATAL] vkQueueWaitIdle failed on frame " << i
-                      << " with VkResult=" << waitResult << std::endl;
-            std::cout << "[FATAL] A GPU shader crashed during execution."
-                      << std::endl;
-            std::cout << "[FATAL] VkResult=" << waitResult
-                      << " (check Vulkan error codes)" << std::endl;
+            std::cout << "[FATAL] vkQueueWaitIdle failed frame " << i
+                      << " VkResult=" << waitResult << std::endl;
             return 1;
         }
 
@@ -656,7 +694,7 @@ int main() {
             std::cout << "[FSR2] Frame " << (i+1) << "/32 done" << std::endl;
     }
 
-    // Download result
+    // Download and save FSR2 result
     vkResetCommandBuffer(cmd, 0);
     vkBeginCommandBuffer(cmd, &beginInfo);
     transition(cmd, outputImage, outputLayout,
@@ -675,21 +713,21 @@ int main() {
     _aligned_free(fsr2Context);
     std::cout << "[FSR2] Done." << std::endl;
 
-    // Cleanup
+    // =========================================================================
+    // CLEANUP
+    // =========================================================================
     vkDestroyImage(device, colorImage,   nullptr);
-    vkFreeMemory(device, colorMem,       nullptr);
+    vkFreeMemory(device,   colorMem,     nullptr);
     vkDestroyImage(device, depthImage,   nullptr);
-    vkFreeMemory(device, depthMem,       nullptr);
+    vkFreeMemory(device,   depthMem,     nullptr);
     vkDestroyImage(device, mvImage,      nullptr);
-    vkFreeMemory(device, mvMem,          nullptr);
+    vkFreeMemory(device,   mvMem,        nullptr);
     vkDestroyImage(device, outputImage,  nullptr);
-    vkFreeMemory(device, outputMem,      nullptr);
-    vkDestroyImage(device, expImage,     nullptr);
-    vkFreeMemory(device, expImageMem,    nullptr);
-    vkDestroyBuffer(device, uploadBuffer,   nullptr);
-    vkFreeMemory(device, uploadMemory,      nullptr);
-    vkDestroyBuffer(device, downloadBuffer, nullptr);
-    vkFreeMemory(device, downloadMemory,    nullptr);
+    vkFreeMemory(device,   outputMem,    nullptr);
+    vkDestroyBuffer(device, uploadBuffer,    nullptr);
+    vkFreeMemory(device,    uploadMemory,    nullptr);
+    vkDestroyBuffer(device, downloadBuffer,  nullptr);
+    vkFreeMemory(device,    downloadMemory,  nullptr);
     vkDestroyCommandPool(device, commandPool, nullptr);
     vkDestroyDevice(device, nullptr);
     vkDestroyInstance(instance, nullptr);
