@@ -138,7 +138,7 @@ if(NOT ffx_sdk_v2_POPULATED)
 
     file(WRITE "${VK_BACKEND_FILE}" "${vk_code}")
     message(STATUS "[Diag-A] ffx_vk.cpp error line injector applied.")
-
+#[===[
     # =========================================================================
     # DIAGNOSTIC INJECTOR B: ffx_fsr2.cpp - checkpoints around SPD dispatch
     # Prints exactly which GPU job is being scheduled before the crash.
@@ -223,7 +223,7 @@ if(NOT ffx_sdk_v2_POPULATED)
 
     file(WRITE "${VK_BACKEND_FILE}" "${vk_code2}")
     message(STATUS "[Diag-C] ffx_vk.cpp vkQueueSubmit tracer applied.")
-
+]===]
     # =========================================================================
     # PATCH ffx_vk.cpp (Patches A, B, C, D) - all OFF
     # =========================================================================
