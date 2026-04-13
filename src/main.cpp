@@ -104,24 +104,33 @@ void transition(VkCommandBuffer cmd, VkImage image,
     currentLayout = newLayout;
 }
 
-// Renders the scene.
-// Depth convention: INVERTED, near=1.0, far=0.0
-// This gives much better depth precision near the camera.
-// FSR2 is told about this via FFX_FSR2_ENABLE_DEPTH_INVERTED.
-// With inverted depth and the near/far swap per AMD sample:
-//   dispatchDesc.cameraNear = zFar  (100.0)
-//   dispatchDesc.cameraFar  = zNear (0.1)
-void renderScene(int w, int h, float jx, float jy,
-    float* colorOut, float* depthOut) {
+// Renders the scene with inverted depth (near=1.0, far=0.0).
+// Also fills motion vectors encoding the de-jitter displacement.
+//
+// Motion vector convention matching FSR2 expectations:
+//   MV = position in previous frame - position in current frame
+//   For a static camera, MV encodes only the jitter change between frames.
+//   prevJX/prevJY = jitter offset of the previous frame.
+//   currJX/currJY = jitter offset of the current frame.
+//
+// The motion vector value stored is in the same units as motionVectorScale.
+// We set motionVectorScale = (renderW, renderH), so MVs are in pixel units.
+// For a static camera: MV.x = prevJX - currJX, MV.y = prevJY - currJY
+// This tells FSR2: "this pixel moved by (prevJ - currJ) pixels from last frame"
+// which is exactly the jitter delta, allowing FSR2 to correctly de-jitter.
+void renderScene(int w, int h,
+    float currJX, float currJY,
+    float prevJX, float prevJY,
+    float* colorOut, float* depthOut, float* mvOut) {
     float aspect = (float)w / (float)h;
-    float fovY = 1.04719755f; // 60 degrees
+    float fovY = 1.04719755f;
     float tanHalfFov = tanf(fovY / 2.0f);
     float zNear = 0.1f, zFar = 100.0f;
 
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
-            float ndcX = ((x + 0.5f + jx) / w) * 2.0f - 1.0f;
-            float ndcY = ((y + 0.5f + jy) / h) * 2.0f - 1.0f;
+            float ndcX = ((x + 0.5f + currJX) / w) * 2.0f - 1.0f;
+            float ndcY = ((y + 0.5f + currJY) / h) * 2.0f - 1.0f;
             float ro[3] = { 0.0f, 1.0f, 0.0f };
             float rd[3] = { ndcX * aspect * tanHalfFov,
                            -ndcY * tanHalfFov, 1.0f };
@@ -166,28 +175,24 @@ void renderScene(int w, int h, float jx, float jy,
                     r = g = b = cv;
                 }
             }
+
             int idx = y*w+x;
             colorOut[idx*4+0] = r;
             colorOut[idx*4+1] = g;
             colorOut[idx*4+2] = b;
             colorOut[idx*4+3] = 1.0f;
 
-            // Inverted non-linear depth: near=1.0, far=0.0
-            // This is the standard inverted-Z formula.
-            // At hitZ=zNear(0.1): depth = 1.0
-            // At hitZ=zFar(100):  depth = 0.0
-            // At hitZ=4.0 (sphere): depth = zNear/hitZ = 0.1/4.0 = 0.025
-            // The sphere and floor will show as clearly dark values (0.02-0.5)
-            // giving FSR2 excellent depth discrimination.
-            if (hitZ > 0.0f) {
-                // Standard inverted-Z: depth = zNear / hitZ
-                // This is the limit of the standard perspective formula
-                // as zFar -> infinity, which gives the best precision.
-                depthOut[idx] = zNear / hitZ;
-            } else {
-                // Sky: far plane = 0.0 in inverted depth
-                depthOut[idx] = 0.0f;
-            }
+            // Inverted depth: near=1.0, far=0.0
+            // zNear/hitZ gives excellent near-range precision.
+            depthOut[idx] = (hitZ > 0.0f) ? (zNear / hitZ) : 0.0f;
+
+            // Motion vectors in pixel units.
+            // Static camera: MV encodes only the jitter change.
+            // MV = prev_jitter - curr_jitter
+            // This is the displacement from current jittered position
+            // back to where the pixel was in the previous frame.
+            mvOut[idx*2+0] = prevJX - currJX;
+            mvOut[idx*2+1] = prevJY - currJY;
         }
     }
 }
@@ -340,24 +345,37 @@ int main() {
     // CPU REFERENCE RENDERS
     // =========================================================================
     std::cout << "\n[CPU] Rendering Native_1x.png (320x240)..." << std::endl;
-    std::vector<float> native1x(renderW * renderH * 4);
-    std::vector<float> depth1x(renderW * renderH);
-    renderScene(renderW, renderH, 0, 0, native1x.data(), depth1x.data());
-    saveFloatImage("Native_1x.png", renderW, renderH, native1x.data());
-    saveDepthImage("Native_1x_depth.png", renderW, renderH, depth1x.data());
+    {
+        std::vector<float> native1x(renderW * renderH * 4);
+        std::vector<float> depth1x(renderW * renderH);
+        std::vector<float> mv1x(renderW * renderH * 2);
+        renderScene(renderW, renderH, 0, 0, 0, 0,
+            native1x.data(), depth1x.data(), mv1x.data());
+        saveFloatImage("Native_1x.png", renderW, renderH, native1x.data());
+        saveDepthImage("Native_1x_depth.png", renderW, renderH, depth1x.data());
+    }
 
     std::cout << "[CPU] Rendering Native_2x.png (640x480)..." << std::endl;
-    std::vector<float> native2x(displayW * displayH * 4);
-    std::vector<float> depth2x(displayW * displayH);
-    renderScene(displayW, displayH, 0, 0, native2x.data(), depth2x.data());
-    saveFloatImage("Native_2x.png", displayW, displayH, native2x.data());
+    {
+        std::vector<float> native2x(displayW * displayH * 4);
+        std::vector<float> depth2x(displayW * displayH);
+        std::vector<float> mv2x(displayW * displayH * 2);
+        renderScene(displayW, displayH, 0, 0, 0, 0,
+            native2x.data(), depth2x.data(), mv2x.data());
+        saveFloatImage("Native_2x.png", displayW, displayH, native2x.data());
+    }
 
     // =========================================================================
     // SHARED VULKAN RESOURCES
     // =========================================================================
-    VkDeviceSize uploadSize =
-        (renderW * renderH * 4 * sizeof(float)) +
-        (renderW * renderH * sizeof(float));
+    // Upload buffer: color (RGBA32F) + depth (R32F) + motion vectors (RG32F)
+    // Motion vectors are RG32F so we can upload them as float pairs.
+    // We store them after depth in the upload buffer.
+    VkDeviceSize colorUploadSize = renderW * renderH * 4 * sizeof(float);
+    VkDeviceSize depthUploadSize = renderW * renderH * 1 * sizeof(float);
+    VkDeviceSize mvUploadSize    = renderW * renderH * 2 * sizeof(float);
+    VkDeviceSize uploadSize      = colorUploadSize + depthUploadSize + mvUploadSize;
+
     VkBuffer uploadBuffer; VkDeviceMemory uploadMemory;
     createBuffer(device, physicalDevice, uploadSize,
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
@@ -391,8 +409,10 @@ int main() {
         VK_IMAGE_USAGE_STORAGE_BIT,
         depthImage, depthMem);
 
+    // Motion vectors: R32G32_SFLOAT so we can upload float pairs directly.
+    // FSR2 reads MVs as a 2-channel texture.
     VkImageCreateInfo mvInfo = createImage(device, physicalDevice,
-        renderW, renderH, VK_FORMAT_R16G16_SFLOAT,
+        renderW, renderH, VK_FORMAT_R32G32_SFLOAT,
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
         VK_IMAGE_USAGE_STORAGE_BIT,
         mvImage, mvMem);
@@ -454,10 +474,19 @@ int main() {
         std::cout << "[FATAL] ffxFsr1ContextCreate failed!\n"; return 1;
     }
 
-    void* mappedData;
-    vkMapMemory(device, uploadMemory, 0, uploadSize, 0, &mappedData);
-    memcpy(mappedData, native1x.data(), native1x.size() * sizeof(float));
-    vkUnmapMemory(device, uploadMemory);
+    {
+        // Upload non-jittered frame for FSR1
+        std::vector<float> fsr1Color(renderW * renderH * 4);
+        std::vector<float> fsr1Depth(renderW * renderH);
+        std::vector<float> fsr1MV(renderW * renderH * 2);
+        renderScene(renderW, renderH, 0, 0, 0, 0,
+            fsr1Color.data(), fsr1Depth.data(), fsr1MV.data());
+
+        void* mappedData;
+        vkMapMemory(device, uploadMemory, 0, uploadSize, 0, &mappedData);
+        memcpy(mappedData, fsr1Color.data(), colorUploadSize);
+        vkUnmapMemory(device, uploadMemory);
+    }
 
     vkResetCommandBuffer(cmd, 0);
     vkBeginCommandBuffer(cmd, &beginInfo);
@@ -535,10 +564,6 @@ int main() {
         FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE |
         FFX_FSR2_ENABLE_AUTO_EXPOSURE      |
         FFX_FSR2_ENABLE_DEPTH_INVERTED;
-    // DEPTH_INVERTED: depth buffer near=1.0, far=0.0
-    // Per AMD sample with inverted depth:
-    //   dispatchDesc.cameraNear = zFar  (the geometric far distance)
-    //   dispatchDesc.cameraFar  = zNear (the geometric near distance)
 
     fsr2Desc.maxRenderSize    = { renderW, renderH };
     fsr2Desc.displaySize      = { displayW, displayH };
@@ -565,7 +590,6 @@ int main() {
         vkQueueWaitIdle(queue);
     }
 
-    // Reset layout tracking for FSR2 loop
     colorLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     depthLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     mvLayout    = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -596,19 +620,28 @@ int main() {
               << " temporal accumulation frames..." << std::endl;
     std::cout.flush();
 
+    float prevJX = 0.0f, prevJY = 0.0f;
+
     for (int i = 0; i < totalFrames; i++) {
         float jX = 0, jY = 0;
         ffxFsr2GetJitterOffset(&jX, &jY, i, phaseCount);
 
         std::vector<float> fColor(renderW * renderH * 4);
         std::vector<float> fDepth(renderW * renderH);
-        renderScene(renderW, renderH, jX, jY, fColor.data(), fDepth.data());
+        std::vector<float> fMV(renderW * renderH * 2);
 
+        // On frame 0, prevJ = currJ so MV = 0 (correct for reset frame)
+        renderScene(renderW, renderH, jX, jY, prevJX, prevJY,
+            fColor.data(), fDepth.data(), fMV.data());
+
+        void* mappedData;
         vkMapMemory(device, uploadMemory, 0, uploadSize, 0, &mappedData);
-        memcpy(mappedData,
-            fColor.data(), fColor.size() * sizeof(float));
-        memcpy((uint8_t*)mappedData + fColor.size() * sizeof(float),
-            fDepth.data(), fDepth.size() * sizeof(float));
+        memcpy((uint8_t*)mappedData,
+            fColor.data(), colorUploadSize);
+        memcpy((uint8_t*)mappedData + colorUploadSize,
+            fDepth.data(), depthUploadSize);
+        memcpy((uint8_t*)mappedData + colorUploadSize + depthUploadSize,
+            fMV.data(), mvUploadSize);
         vkUnmapMemory(device, uploadMemory);
 
         vkResetCommandBuffer(cmd, 0);
@@ -623,24 +656,31 @@ int main() {
         transition(cmd, expImage, expLayout,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
 
+        // Upload color
         VkBufferImageCopy cR2 = {};
+        cR2.bufferOffset = 0;
         cR2.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
         cR2.imageExtent = { renderW, renderH, 1 };
         vkCmdCopyBufferToImage(cmd, uploadBuffer, colorImage,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cR2);
 
+        // Upload depth
         VkBufferImageCopy dR2 = {};
-        dR2.bufferOffset = fColor.size() * sizeof(float);
+        dR2.bufferOffset = colorUploadSize;
         dR2.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
         dR2.imageExtent = { renderW, renderH, 1 };
         vkCmdCopyBufferToImage(cmd, uploadBuffer, depthImage,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &dR2);
 
-        VkClearColorValue mvClear = {{ 0.0f, 0.0f, 0.0f, 0.0f }};
-        vkCmdClearColorImage(cmd, mvImage,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            &mvClear, 1, &colorRange);
+        // Upload motion vectors
+        VkBufferImageCopy mR2 = {};
+        mR2.bufferOffset = colorUploadSize + depthUploadSize;
+        mR2.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        mR2.imageExtent = { renderW, renderH, 1 };
+        vkCmdCopyBufferToImage(cmd, uploadBuffer, mvImage,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &mR2);
 
+        // Exposure
         VkClearColorValue expClear = {{ 1.0f, 0.0f, 0.0f, 0.0f }};
         vkCmdClearColorImage(cmd, expImage,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -666,6 +706,8 @@ int main() {
         dispatchDesc.jitterOffset.x = jX;
         dispatchDesc.jitterOffset.y = jY;
 
+        // motionVectorScale matches the units of our MV data.
+        // Our MVs are in pixel units, scale = render dimensions.
         dispatchDesc.motionVectorScale.x = (float)renderW;
         dispatchDesc.motionVectorScale.y = (float)renderH;
 
@@ -677,11 +719,9 @@ int main() {
         dispatchDesc.preExposure      = 1.0f;
         dispatchDesc.reset            = (i == 0);
 
-        // With FFX_FSR2_ENABLE_DEPTH_INVERTED, per AMD sample:
-        // cameraNear receives the geometric FAR distance
-        // cameraFar  receives the geometric NEAR distance
-        dispatchDesc.cameraNear              = 100.0f; // geometric far
-        dispatchDesc.cameraFar               = 0.1f;   // geometric near
+        // Inverted depth: swap near/far per AMD sample
+        dispatchDesc.cameraNear              = 100.0f;
+        dispatchDesc.cameraFar               = 0.1f;
         dispatchDesc.cameraFovAngleVertical  = 1.04719755f;
         dispatchDesc.viewSpaceToMetersFactor = 1.0f;
 
@@ -707,6 +747,7 @@ int main() {
             return 1;
         }
 
+        // Save snapshots
         int frameNum = i + 1;
         if (frameNum == 32 || frameNum == 64 ||
             frameNum == 96 || frameNum == 128) {
@@ -731,13 +772,17 @@ int main() {
             saveFloatImage(fname, displayW, displayH, (float*)outData);
             vkUnmapMemory(device, downloadMemory);
 
-            std::cout << "[FSR2] Snapshot saved at frame " << frameNum
-                      << std::endl;
+            std::cout << "[FSR2] Snapshot saved at frame "
+                      << frameNum << std::endl;
         }
 
         if (frameNum % 32 == 0)
             std::cout << "[FSR2] Frame " << frameNum << "/"
                       << totalFrames << " done" << std::endl;
+
+        // Store current jitter as previous for next frame
+        prevJX = jX;
+        prevJY = jY;
     }
 
     // Final download
