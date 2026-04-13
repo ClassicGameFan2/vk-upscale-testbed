@@ -104,9 +104,9 @@ void transition(VkCommandBuffer cmd, VkImage image,
     currentLayout = newLayout;
 }
 
-// Renders the scene.
-// Standard (non-inverted) depth: near=0.0, far=1.0
-// jx, jy are sub-pixel jitter offsets in pixel units (range ~ -0.5 to +0.5)
+// Renders the scene with standard (non-inverted) depth.
+// depth output: 0.0=near, 1.0=far
+// jx, jy: sub-pixel jitter in pixel units (range ~ -0.5 to +0.5)
 void renderScene(int w, int h, float jx, float jy,
     float* colorOut, float* depthOut) {
     float aspect = (float)w / (float)h;
@@ -116,8 +116,6 @@ void renderScene(int w, int h, float jx, float jy,
 
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
-            // Apply jitter as sub-pixel offset in pixel coordinates.
-            // jx, jy from ffxFsr2GetJitterOffset are in pixel units.
             float ndcX = ((x + 0.5f + jx) / w) * 2.0f - 1.0f;
             float ndcY = ((y + 0.5f + jy) / h) * 2.0f - 1.0f;
             float ro[3] = { 0.0f, 1.0f, 0.0f };
@@ -131,7 +129,6 @@ void renderScene(int w, int h, float jx, float jy,
             float g = powf(206.0f/255.0f, 2.2f);
             float b = powf(235.0f/255.0f, 2.2f);
 
-            // Sphere intersection
             float oc[3] = { ro[0], ro[1]-1.0f, ro[2]-4.0f };
             float b_dot = rd[0]*oc[0] + rd[1]*oc[1] + rd[2]*oc[2];
             float c_val = oc[0]*oc[0] + oc[1]*oc[1] + oc[2]*oc[2] - 2.25f;
@@ -153,8 +150,6 @@ void renderScene(int w, int h, float jx, float jy,
                     b = powf(50.0f/255.0f,  2.2f) * ndotl;
                 }
             }
-
-            // Floor intersection
             if (rd[1] < 0.0f) {
                 float t = -ro[1] / rd[1];
                 if (t > zNear && t < zFar && (hitZ < 0.0f || t < hitZ)) {
@@ -167,24 +162,18 @@ void renderScene(int w, int h, float jx, float jy,
                     r = g = b = cv;
                 }
             }
-
             int idx = y*w+x;
             colorOut[idx*4+0] = r;
             colorOut[idx*4+1] = g;
             colorOut[idx*4+2] = b;
             colorOut[idx*4+3] = 1.0f;
 
-            // Standard depth: near=0.0, far=1.0
-            // At hitZ=zNear: depth=0.0, at hitZ=zFar: depth=1.0
-            // Formula: standard perspective depth remapped to [0,1]
-            // depth = (zFar * (hitZ - zNear)) / (hitZ * (zFar - zNear))
-            // Simplified: same as GL standard non-linear depth
+            // Standard non-linear depth: 0.0=near, 1.0=far
             if (hitZ > 0.0f) {
-                // Standard non-linear depth [0=near, 1=far]
-                depthOut[idx] = (zFar * (hitZ - zNear)) / (hitZ * (zFar - zNear));
+                depthOut[idx] = (zFar * (hitZ - zNear)) /
+                                (hitZ * (zFar - zNear));
             } else {
-                // Sky/background: max depth
-                depthOut[idx] = 1.0f;
+                depthOut[idx] = 1.0f; // sky = far
             }
         }
     }
@@ -206,6 +195,25 @@ void saveFloatImage(const std::string& filename, int w, int h,
     if (nanCount > 0)
         std::cout << "[WARNING] " << nanCount << " NaNs in "
                   << filename << std::endl;
+    stbi_write_png(filename.c_str(), w, h, 4, bytes.data(), w*4);
+    std::cout << "Saved: " << filename << std::endl;
+    std::cout.flush();
+}
+
+// Save a single-channel float image (like depth) as grayscale PNG
+void saveDepthImage(const std::string& filename, int w, int h,
+    const float* data) {
+    std::vector<unsigned char> bytes(w * h * 4);
+    for (int i = 0; i < w*h; i++) {
+        float v = data[i];
+        if (std::isnan(v)) v = 0.0f;
+        v = fmaxf(0.0f, fminf(1.0f, v));
+        unsigned char bv = (unsigned char)(v * 255.0f);
+        bytes[i*4+0] = bv;
+        bytes[i*4+1] = bv;
+        bytes[i*4+2] = bv;
+        bytes[i*4+3] = 255;
+    }
     stbi_write_png(filename.c_str(), w, h, 4, bytes.data(), w*4);
     std::cout << "Saved: " << filename << std::endl;
     std::cout.flush();
@@ -324,6 +332,7 @@ int main() {
     std::vector<float> depth1x(renderW * renderH);
     renderScene(renderW, renderH, 0, 0, native1x.data(), depth1x.data());
     saveFloatImage("Native_1x.png", renderW, renderH, native1x.data());
+    saveDepthImage("Native_1x_depth.png", renderW, renderH, depth1x.data());
 
     std::cout << "[CPU] Rendering Native_2x.png (640x480)..." << std::endl;
     std::vector<float> native2x(displayW * displayH * 4);
@@ -364,10 +373,8 @@ int main() {
         VK_IMAGE_USAGE_STORAGE_BIT,
         colorImage, colorMem);
 
-    // Depth image: use R32_SFLOAT instead of D32_SFLOAT.
-    // FSR2 reads depth as a shader resource (sampled texture), not as a
-    // depth-stencil attachment. D32_SFLOAT cannot be used as SAMPLED on
-    // many implementations without special extensions. R32_SFLOAT is safe.
+    // R32_SFLOAT for depth: FSR2 reads depth as compute shader resource.
+    // D32_SFLOAT cannot be used as SAMPLED in compute on many implementations.
     VkImageCreateInfo depthInfo = createImage(device, physicalDevice,
         renderW, renderH, VK_FORMAT_R32_SFLOAT,
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
@@ -423,8 +430,6 @@ int main() {
         scratchBuffer, safeBufferSize, 4);
 
     FfxFsr1ContextDescription fsr1Desc = {};
-    // FFX_FSR1_ENABLE_HIGH_DYNAMIC_RANGE: input is linear light
-    // FFX_FSR1_ENABLE_RCAS: enable RCAS sharpening pass after EASU
     fsr1Desc.flags        = FFX_FSR1_ENABLE_HIGH_DYNAMIC_RANGE |
                             FFX_FSR1_ENABLE_RCAS;
     fsr1Desc.outputFormat     = ffxGetSurfaceFormatVK(VK_FORMAT_R32G32B32A32_SFLOAT);
@@ -475,8 +480,6 @@ int main() {
     disp1.color            = colorRes1;
     disp1.output           = outputRes1;
     disp1.renderSize       = { renderW, renderH };
-    // FSR1 sharpness: 0.0 = no sharpening, 1.0 = maximum sharpening.
-    // 0.8 gives strong natural sharpening without over-sharpening artifacts.
     disp1.enableSharpening = true;
     disp1.sharpness        = 0.8f;
 
@@ -507,7 +510,7 @@ int main() {
     // FSR 2.3.3 - Temporal Upscaling
     // =========================================================================
     std::cout << "\n============================================" << std::endl;
-    std::cout << "  FSR 2.3.3 Temporal Upscaling Test (32 frames)" << std::endl;
+    std::cout << "  FSR 2.3.3 Temporal Upscaling Test (128 frames)" << std::endl;
     std::cout << "============================================" << std::endl;
     memset(scratchBuffer, 0, safeBufferSize);
 
@@ -518,12 +521,10 @@ int main() {
     FfxFsr2ContextDescription fsr2Desc = {};
     memset(&fsr2Desc, 0, sizeof(fsr2Desc));
     fsr2Desc.flags =
-        FFX_FSR2_ENABLE_DEBUG_CHECKING     |  // validation warnings to callback
-        FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE |  // input is linear light
-        FFX_FSR2_ENABLE_AUTO_EXPOSURE;        // SPD computes exposure internally
-    // NOTE: FFX_FSR2_ENABLE_DEPTH_INVERTED is NOT set.
-    // We use standard depth (near=0.0, far=1.0) to keep cameraNear/cameraFar
-    // straightforward and avoid the near/far swap required by inverted depth.
+        FFX_FSR2_ENABLE_DEBUG_CHECKING     |
+        FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE |
+        FFX_FSR2_ENABLE_AUTO_EXPOSURE;
+    // No DEPTH_INVERTED: using standard depth (0=near, 1=far)
 
     fsr2Desc.maxRenderSize    = { renderW, renderH };
     fsr2Desc.displaySize      = { displayW, displayH };
@@ -538,11 +539,13 @@ int main() {
     }
     std::cout << "[FSR2] Context created OK." << std::endl;
 
-    // Reset output layout for FSR2 use
-    outputLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    // Transition output to GENERAL before FSR2 loop
     {
         vkResetCommandBuffer(cmd, 0);
         vkBeginCommandBuffer(cmd, &beginInfo);
+        // outputLayout is currently TRANSFER_SRC_OPTIMAL from FSR1.
+        // Force it back to UNDEFINED so transition() will emit the barrier.
+        outputLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         transition(cmd, outputImage, outputLayout,
             VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
         vkEndCommandBuffer(cmd);
@@ -550,18 +553,20 @@ int main() {
         vkQueueWaitIdle(queue);
     }
 
+    // Reset layout tracking for FSR2 loop
+    colorLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    depthLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    mvLayout    = VK_IMAGE_LAYOUT_UNDEFINED;
+    expLayout   = VK_IMAGE_LAYOUT_UNDEFINED;
+
     FfxResource colorRes2 = ffxGetResourceVK(colorImage,
         ffxGetImageResourceDescriptionVK(colorImage, colorInfo,
             FFX_RESOURCE_USAGE_READ_ONLY),
         L"FSR2_Color", FFX_RESOURCE_STATE_COMPUTE_READ);
-
-    // Depth resource: R32_SFLOAT color image used as depth input to FSR2.
-    // FSR2 reads it as a shader resource, not a depth attachment.
     FfxResource depthRes2 = ffxGetResourceVK(depthImage,
         ffxGetImageResourceDescriptionVK(depthImage, depthInfo,
             FFX_RESOURCE_USAGE_READ_ONLY),
         L"FSR2_Depth", FFX_RESOURCE_STATE_COMPUTE_READ);
-
     FfxResource mvRes2 = ffxGetResourceVK(mvImage,
         ffxGetImageResourceDescriptionVK(mvImage, mvInfo,
             FFX_RESOURCE_USAGE_READ_ONLY),
@@ -573,23 +578,18 @@ int main() {
 
     int32_t phaseCount = ffxFsr2GetJitterPhaseCount(renderW, displayW);
     std::cout << "[FSR2] Jitter phase count: " << phaseCount << std::endl;
-    std::cout << "[FSR2] Running 32 temporal accumulation frames..."
-              << std::endl;
+
+    // Run 128 frames (4 complete jitter cycles) for full convergence.
+    // Save snapshots at frames 32, 64, 96, 128.
+    const int totalFrames = 128;
+    std::cout << "[FSR2] Running " << totalFrames
+              << " temporal accumulation frames..." << std::endl;
     std::cout.flush();
 
-    // Reset color/depth/mv layouts for FSR2 loop
-    colorLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    depthLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    mvLayout    = VK_IMAGE_LAYOUT_UNDEFINED;
-    expLayout   = VK_IMAGE_LAYOUT_UNDEFINED;
-
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < totalFrames; i++) {
         float jX = 0, jY = 0;
         ffxFsr2GetJitterOffset(&jX, &jY, i, phaseCount);
 
-        // Render jittered frame.
-        // jX, jY are in pixel units (Halton sequence, range ~ -0.5..+0.5).
-        // We apply them directly as sub-pixel offsets in renderScene.
         std::vector<float> fColor(renderW * renderH * 4);
         std::vector<float> fDepth(renderW * renderH);
         renderScene(renderW, renderH, jX, jY, fColor.data(), fDepth.data());
@@ -620,7 +620,7 @@ int main() {
         vkCmdCopyBufferToImage(cmd, uploadBuffer, colorImage,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cR2);
 
-        // Upload depth (now R32_SFLOAT color image, use COLOR aspect)
+        // Upload depth (R32_SFLOAT, COLOR aspect)
         VkBufferImageCopy dR2 = {};
         dR2.bufferOffset = fColor.size() * sizeof(float);
         dR2.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
@@ -628,13 +628,13 @@ int main() {
         vkCmdCopyBufferToImage(cmd, uploadBuffer, depthImage,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &dR2);
 
-        // Motion vectors: zero for static camera
+        // Motion vectors: zero (static camera)
         VkClearColorValue mvClear = {{ 0.0f, 0.0f, 0.0f, 0.0f }};
         vkCmdClearColorImage(cmd, mvImage,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             &mvClear, 1, &colorRange);
 
-        // Exposure image: cleared to 1.0 (not used, AUTO_EXPOSURE is on)
+        // Exposure: cleared to 1.0 (unused, AUTO_EXPOSURE is on)
         VkClearColorValue expClear = {{ 1.0f, 0.0f, 0.0f, 0.0f }};
         vkCmdClearColorImage(cmd, expImage,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -655,38 +655,27 @@ int main() {
         dispatchDesc.color         = colorRes2;
         dispatchDesc.depth         = depthRes2;
         dispatchDesc.motionVectors = mvRes2;
-        // exposure left null: AUTO_EXPOSURE computes it via SPD
         dispatchDesc.output        = outputRes2;
 
         dispatchDesc.jitterOffset.x = jX;
         dispatchDesc.jitterOffset.y = jY;
 
-        // Motion vector scale: our MVs are zero (static camera).
-        // Scale values tell FSR2 the range of MV values.
-        // Standard: screen-space pixel units -> scale = render dimensions.
         dispatchDesc.motionVectorScale.x = (float)renderW;
         dispatchDesc.motionVectorScale.y = (float)renderH;
 
         dispatchDesc.renderSize = { renderW, renderH };
 
-        // RCAS sharpening
         dispatchDesc.enableSharpening = true;
         dispatchDesc.sharpness        = 0.8f;
 
-        // 16.6ms = 60fps
-        dispatchDesc.frameTimeDelta = 16.6f;
+        dispatchDesc.frameTimeDelta  = 16.6f;
+        dispatchDesc.preExposure     = 1.0f;
+        dispatchDesc.reset           = (i == 0);
 
-        // preExposure: 1.0 = no pre-exposure applied
-        dispatchDesc.preExposure = 1.0f;
-
-        // Reset history on first frame
-        dispatchDesc.reset = (i == 0);
-
-        // Camera parameters matching renderScene exactly.
-        // Standard (non-inverted) depth: pass near and far as-is.
-        dispatchDesc.cameraNear             = 0.1f;
-        dispatchDesc.cameraFar              = 100.0f;
-        dispatchDesc.cameraFovAngleVertical = 1.04719755f; // 60 degrees
+        // Standard depth: pass near/far as-is (no swap needed)
+        dispatchDesc.cameraNear              = 0.1f;
+        dispatchDesc.cameraFar               = 100.0f;
+        dispatchDesc.cameraFovAngleVertical  = 1.04719755f;
         dispatchDesc.viewSpaceToMetersFactor = 1.0f;
 
         if (ffxFsr2ContextDispatch(fsr2Context, &dispatchDesc) != FFX_OK) {
@@ -711,11 +700,45 @@ int main() {
             return 1;
         }
 
-        if ((i+1) % 8 == 0)
-            std::cout << "[FSR2] Frame " << (i+1) << "/32 done" << std::endl;
+        // Save snapshots at end of each 32-frame cycle
+        int frameNum = i + 1;
+        if (frameNum == 32 || frameNum == 64 ||
+            frameNum == 96 || frameNum == 128) {
+
+            // Download current output
+            vkResetCommandBuffer(cmd, 0);
+            vkBeginCommandBuffer(cmd, &beginInfo);
+            // Temporarily transition to TRANSFER_SRC for download
+            VkImageLayout savedLayout = outputLayout;
+            transition(cmd, outputImage, outputLayout,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                VK_IMAGE_ASPECT_COLOR_BIT);
+            vkCmdCopyImageToBuffer(cmd, outputImage,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                downloadBuffer, 1, &outRegion);
+            // Transition back to GENERAL for next FSR2 frame
+            transition(cmd, outputImage, outputLayout,
+                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
+            vkEndCommandBuffer(cmd);
+            vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
+            vkQueueWaitIdle(queue);
+
+            vkMapMemory(device, downloadMemory, 0, outSize, 0, &outData);
+            std::string fname = "FSR_2.3.3_frame" +
+                                std::to_string(frameNum) + ".png";
+            saveFloatImage(fname, displayW, displayH, (float*)outData);
+            vkUnmapMemory(device, downloadMemory);
+
+            std::cout << "[FSR2] Snapshot saved at frame " << frameNum
+                      << std::endl;
+        }
+
+        if (frameNum % 32 == 0)
+            std::cout << "[FSR2] Frame " << frameNum << "/"
+                      << totalFrames << " done" << std::endl;
     }
 
-    // Download FSR2 result
+    // Final download
     vkResetCommandBuffer(cmd, 0);
     vkBeginCommandBuffer(cmd, &beginInfo);
     transition(cmd, outputImage, outputLayout,
