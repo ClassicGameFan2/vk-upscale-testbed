@@ -104,9 +104,13 @@ void transition(VkCommandBuffer cmd, VkImage image,
     currentLayout = newLayout;
 }
 
-// Renders the scene with standard (non-inverted) depth.
-// depth output: 0.0=near, 1.0=far
-// jx, jy: sub-pixel jitter in pixel units (range ~ -0.5 to +0.5)
+// Renders the scene.
+// Depth convention: INVERTED, near=1.0, far=0.0
+// This gives much better depth precision near the camera.
+// FSR2 is told about this via FFX_FSR2_ENABLE_DEPTH_INVERTED.
+// With inverted depth and the near/far swap per AMD sample:
+//   dispatchDesc.cameraNear = zFar  (100.0)
+//   dispatchDesc.cameraFar  = zNear (0.1)
 void renderScene(int w, int h, float jx, float jy,
     float* colorOut, float* depthOut) {
     float aspect = (float)w / (float)h;
@@ -168,12 +172,21 @@ void renderScene(int w, int h, float jx, float jy,
             colorOut[idx*4+2] = b;
             colorOut[idx*4+3] = 1.0f;
 
-            // Standard non-linear depth: 0.0=near, 1.0=far
+            // Inverted non-linear depth: near=1.0, far=0.0
+            // This is the standard inverted-Z formula.
+            // At hitZ=zNear(0.1): depth = 1.0
+            // At hitZ=zFar(100):  depth = 0.0
+            // At hitZ=4.0 (sphere): depth = zNear/hitZ = 0.1/4.0 = 0.025
+            // The sphere and floor will show as clearly dark values (0.02-0.5)
+            // giving FSR2 excellent depth discrimination.
             if (hitZ > 0.0f) {
-                depthOut[idx] = (zFar * (hitZ - zNear)) /
-                                (hitZ * (zFar - zNear));
+                // Standard inverted-Z: depth = zNear / hitZ
+                // This is the limit of the standard perspective formula
+                // as zFar -> infinity, which gives the best precision.
+                depthOut[idx] = zNear / hitZ;
             } else {
-                depthOut[idx] = 1.0f; // sky = far
+                // Sky: far plane = 0.0 in inverted depth
+                depthOut[idx] = 0.0f;
             }
         }
     }
@@ -200,7 +213,6 @@ void saveFloatImage(const std::string& filename, int w, int h,
     std::cout.flush();
 }
 
-// Save a single-channel float image (like depth) as grayscale PNG
 void saveDepthImage(const std::string& filename, int w, int h,
     const float* data) {
     std::vector<unsigned char> bytes(w * h * 4);
@@ -373,8 +385,6 @@ int main() {
         VK_IMAGE_USAGE_STORAGE_BIT,
         colorImage, colorMem);
 
-    // R32_SFLOAT for depth: FSR2 reads depth as compute shader resource.
-    // D32_SFLOAT cannot be used as SAMPLED in compute on many implementations.
     VkImageCreateInfo depthInfo = createImage(device, physicalDevice,
         renderW, renderH, VK_FORMAT_R32_SFLOAT,
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
@@ -523,8 +533,12 @@ int main() {
     fsr2Desc.flags =
         FFX_FSR2_ENABLE_DEBUG_CHECKING     |
         FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE |
-        FFX_FSR2_ENABLE_AUTO_EXPOSURE;
-    // No DEPTH_INVERTED: using standard depth (0=near, 1=far)
+        FFX_FSR2_ENABLE_AUTO_EXPOSURE      |
+        FFX_FSR2_ENABLE_DEPTH_INVERTED;
+    // DEPTH_INVERTED: depth buffer near=1.0, far=0.0
+    // Per AMD sample with inverted depth:
+    //   dispatchDesc.cameraNear = zFar  (the geometric far distance)
+    //   dispatchDesc.cameraFar  = zNear (the geometric near distance)
 
     fsr2Desc.maxRenderSize    = { renderW, renderH };
     fsr2Desc.displaySize      = { displayW, displayH };
@@ -543,8 +557,6 @@ int main() {
     {
         vkResetCommandBuffer(cmd, 0);
         vkBeginCommandBuffer(cmd, &beginInfo);
-        // outputLayout is currently TRANSFER_SRC_OPTIMAL from FSR1.
-        // Force it back to UNDEFINED so transition() will emit the barrier.
         outputLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         transition(cmd, outputImage, outputLayout,
             VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
@@ -579,8 +591,6 @@ int main() {
     int32_t phaseCount = ffxFsr2GetJitterPhaseCount(renderW, displayW);
     std::cout << "[FSR2] Jitter phase count: " << phaseCount << std::endl;
 
-    // Run 128 frames (4 complete jitter cycles) for full convergence.
-    // Save snapshots at frames 32, 64, 96, 128.
     const int totalFrames = 128;
     std::cout << "[FSR2] Running " << totalFrames
               << " temporal accumulation frames..." << std::endl;
@@ -613,14 +623,12 @@ int main() {
         transition(cmd, expImage, expLayout,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
 
-        // Upload color
         VkBufferImageCopy cR2 = {};
         cR2.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
         cR2.imageExtent = { renderW, renderH, 1 };
         vkCmdCopyBufferToImage(cmd, uploadBuffer, colorImage,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cR2);
 
-        // Upload depth (R32_SFLOAT, COLOR aspect)
         VkBufferImageCopy dR2 = {};
         dR2.bufferOffset = fColor.size() * sizeof(float);
         dR2.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
@@ -628,13 +636,11 @@ int main() {
         vkCmdCopyBufferToImage(cmd, uploadBuffer, depthImage,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &dR2);
 
-        // Motion vectors: zero (static camera)
         VkClearColorValue mvClear = {{ 0.0f, 0.0f, 0.0f, 0.0f }};
         vkCmdClearColorImage(cmd, mvImage,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             &mvClear, 1, &colorRange);
 
-        // Exposure: cleared to 1.0 (unused, AUTO_EXPOSURE is on)
         VkClearColorValue expClear = {{ 1.0f, 0.0f, 0.0f, 0.0f }};
         vkCmdClearColorImage(cmd, expImage,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -667,14 +673,15 @@ int main() {
 
         dispatchDesc.enableSharpening = true;
         dispatchDesc.sharpness        = 0.8f;
+        dispatchDesc.frameTimeDelta   = 16.6f;
+        dispatchDesc.preExposure      = 1.0f;
+        dispatchDesc.reset            = (i == 0);
 
-        dispatchDesc.frameTimeDelta  = 16.6f;
-        dispatchDesc.preExposure     = 1.0f;
-        dispatchDesc.reset           = (i == 0);
-
-        // Standard depth: pass near/far as-is (no swap needed)
-        dispatchDesc.cameraNear              = 0.1f;
-        dispatchDesc.cameraFar               = 100.0f;
+        // With FFX_FSR2_ENABLE_DEPTH_INVERTED, per AMD sample:
+        // cameraNear receives the geometric FAR distance
+        // cameraFar  receives the geometric NEAR distance
+        dispatchDesc.cameraNear              = 100.0f; // geometric far
+        dispatchDesc.cameraFar               = 0.1f;   // geometric near
         dispatchDesc.cameraFovAngleVertical  = 1.04719755f;
         dispatchDesc.viewSpaceToMetersFactor = 1.0f;
 
@@ -700,23 +707,18 @@ int main() {
             return 1;
         }
 
-        // Save snapshots at end of each 32-frame cycle
         int frameNum = i + 1;
         if (frameNum == 32 || frameNum == 64 ||
             frameNum == 96 || frameNum == 128) {
 
-            // Download current output
             vkResetCommandBuffer(cmd, 0);
             vkBeginCommandBuffer(cmd, &beginInfo);
-            // Temporarily transition to TRANSFER_SRC for download
-            VkImageLayout savedLayout = outputLayout;
             transition(cmd, outputImage, outputLayout,
                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                 VK_IMAGE_ASPECT_COLOR_BIT);
             vkCmdCopyImageToBuffer(cmd, outputImage,
                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                 downloadBuffer, 1, &outRegion);
-            // Transition back to GENERAL for next FSR2 frame
             transition(cmd, outputImage, outputLayout,
                 VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
             vkEndCommandBuffer(cmd);
