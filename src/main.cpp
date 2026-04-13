@@ -105,26 +105,9 @@ void transition(VkCommandBuffer cmd, VkImage image,
 }
 
 // Renders the scene with inverted depth (near=1.0, far=0.0).
-//
-// Motion vector convention:
-// FSR2 with FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION expects MVs
-// that include the jitter displacement, i.e. MVs computed using the jittered
-// projection matrix as a rasterizer would naturally produce.
-//
-// For a static camera (no object or camera motion), the only displacement
-// between frames is the jitter change. The MV for each pixel is:
-//   MV = (current jitter) - (previous jitter)
-//
-// This is because the pixel was rendered at (x + currJX, y + currJY) this
-// frame, and at (x + prevJX, y + prevJY) last frame. The displacement in
-// screen space from previous to current is (currJX - prevJX, currJY - prevJY).
-//
-// The sign convention for FSR2 MVs is: MV points from current to previous,
-// i.e. MV = previous_position - current_position.
-// For jitter-only motion: MV = prevJ - currJ.
-//
-// With MOTION_VECTORS_JITTER_CANCELLATION set, FSR2 knows MVs contain jitter
-// and will correctly cancel it without double-correcting.
+// MVs encode jitter delta: prevJ - currJ in pixel units.
+// jitterOffset is NOT reported to FSR2 (set to zero in dispatch).
+// FSR2 gets all jitter information solely from the MVs.
 void renderScene(int w, int h,
     float currJX, float currJY,
     float prevJX, float prevJY,
@@ -192,10 +175,10 @@ void renderScene(int w, int h,
             // Inverted depth: near=1.0, far=0.0
             depthOut[idx] = (hitZ > 0.0f) ? (zNear / hitZ) : 0.0f;
 
-            // Motion vectors in pixel units.
-            // With MOTION_VECTORS_JITTER_CANCELLATION:
-            //   MV = prevJ - currJ (points from current to previous position)
-            // For frame 0: prevJ == currJ so MV == 0. Correct.
+            // MV = prevJ - currJ in pixel units.
+            // Encodes the full jitter displacement between frames.
+            // FSR2 jitterOffset is set to zero so FSR2 does not
+            // double-correct. All jitter info comes from MVs alone.
             mvOut[idx*2+0] = prevJX - currJX;
             mvOut[idx*2+1] = prevJY - currJY;
         }
@@ -423,7 +406,6 @@ int main() {
         VK_IMAGE_USAGE_STORAGE_BIT,
         depthImage, depthMem);
 
-    // R32G32_SFLOAT for MVs: upload float pairs directly.
     VkImageCreateInfo mvInfo = createImage(device, physicalDevice,
         renderW, renderH, VK_FORMAT_R32G32_SFLOAT,
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
@@ -571,14 +553,14 @@ int main() {
     FfxFsr2ContextDescription fsr2Desc = {};
     memset(&fsr2Desc, 0, sizeof(fsr2Desc));
     fsr2Desc.flags =
-        FFX_FSR2_ENABLE_DEBUG_CHECKING                  |
-        FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE              |
-        FFX_FSR2_ENABLE_AUTO_EXPOSURE                   |
-        FFX_FSR2_ENABLE_DEPTH_INVERTED                  |
-        FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION;
-    // MOTION_VECTORS_JITTER_CANCELLATION: our MVs contain the jitter
-    // displacement (prevJ - currJ). FSR2 will use this to cancel jitter
-    // without double-correcting via jitterOffset.
+        FFX_FSR2_ENABLE_DEBUG_CHECKING     |
+        FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE |
+        FFX_FSR2_ENABLE_AUTO_EXPOSURE      |
+        FFX_FSR2_ENABLE_DEPTH_INVERTED;
+    // No MOTION_VECTORS_JITTER_CANCELLATION.
+    // jitterOffset is set to zero in dispatch.
+    // All jitter information comes from MVs (prevJ - currJ).
+    // FSR2 will not attempt additional jitter removal via jitterOffset.
 
     fsr2Desc.maxRenderSize    = { renderW, renderH };
     fsr2Desc.displaySize      = { displayW, displayH };
@@ -649,8 +631,7 @@ int main() {
 
         void* mappedData;
         vkMapMemory(device, uploadMemory, 0, uploadSize, 0, &mappedData);
-        memcpy((uint8_t*)mappedData,
-            fColor.data(), colorUploadSize);
+        memcpy((uint8_t*)mappedData, fColor.data(), colorUploadSize);
         memcpy((uint8_t*)mappedData + colorUploadSize,
             fDepth.data(), depthUploadSize);
         memcpy((uint8_t*)mappedData + colorUploadSize + depthUploadSize,
@@ -712,8 +693,10 @@ int main() {
         dispatchDesc.motionVectors = mvRes2;
         dispatchDesc.output        = outputRes2;
 
-        dispatchDesc.jitterOffset.x = jX;
-        dispatchDesc.jitterOffset.y = jY;
+        // jitterOffset is zero: FSR2 must not apply additional jitter
+        // correction on top of the jitter already encoded in our MVs.
+        dispatchDesc.jitterOffset.x = 0.0f;
+        dispatchDesc.jitterOffset.y = 0.0f;
 
         dispatchDesc.motionVectorScale.x = (float)renderW;
         dispatchDesc.motionVectorScale.y = (float)renderH;
