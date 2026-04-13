@@ -9,6 +9,7 @@
 #include <malloc.h>
 #include <string>
 #include <cmath>
+#include <cfloat>
 
 #include "stb_image_write.h"
 
@@ -103,15 +104,20 @@ void transition(VkCommandBuffer cmd, VkImage image,
     currentLayout = newLayout;
 }
 
+// Renders the scene.
+// Standard (non-inverted) depth: near=0.0, far=1.0
+// jx, jy are sub-pixel jitter offsets in pixel units (range ~ -0.5 to +0.5)
 void renderScene(int w, int h, float jx, float jy,
     float* colorOut, float* depthOut) {
     float aspect = (float)w / (float)h;
-    float fovY = 1.04719755f;
+    float fovY = 1.04719755f; // 60 degrees
     float tanHalfFov = tanf(fovY / 2.0f);
     float zNear = 0.1f, zFar = 100.0f;
 
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
+            // Apply jitter as sub-pixel offset in pixel coordinates.
+            // jx, jy from ffxFsr2GetJitterOffset are in pixel units.
             float ndcX = ((x + 0.5f + jx) / w) * 2.0f - 1.0f;
             float ndcY = ((y + 0.5f + jy) / h) * 2.0f - 1.0f;
             float ro[3] = { 0.0f, 1.0f, 0.0f };
@@ -125,6 +131,7 @@ void renderScene(int w, int h, float jx, float jy,
             float g = powf(206.0f/255.0f, 2.2f);
             float b = powf(235.0f/255.0f, 2.2f);
 
+            // Sphere intersection
             float oc[3] = { ro[0], ro[1]-1.0f, ro[2]-4.0f };
             float b_dot = rd[0]*oc[0] + rd[1]*oc[1] + rd[2]*oc[2];
             float c_val = oc[0]*oc[0] + oc[1]*oc[1] + oc[2]*oc[2] - 2.25f;
@@ -146,6 +153,8 @@ void renderScene(int w, int h, float jx, float jy,
                     b = powf(50.0f/255.0f,  2.2f) * ndotl;
                 }
             }
+
+            // Floor intersection
             if (rd[1] < 0.0f) {
                 float t = -ro[1] / rd[1];
                 if (t > zNear && t < zFar && (hitZ < 0.0f || t < hitZ)) {
@@ -158,15 +167,25 @@ void renderScene(int w, int h, float jx, float jy,
                     r = g = b = cv;
                 }
             }
+
             int idx = y*w+x;
             colorOut[idx*4+0] = r;
             colorOut[idx*4+1] = g;
             colorOut[idx*4+2] = b;
             colorOut[idx*4+3] = 1.0f;
-            // Inverted depth: near=1.0, far=0.0
-            // Matches FFX_FSR2_ENABLE_DEPTH_INVERTED flag
-            depthOut[idx] = (hitZ > 0.0f) ?
-                (zNear*(zFar-hitZ))/(hitZ*(zFar-zNear)) : 0.0f;
+
+            // Standard depth: near=0.0, far=1.0
+            // At hitZ=zNear: depth=0.0, at hitZ=zFar: depth=1.0
+            // Formula: standard perspective depth remapped to [0,1]
+            // depth = (zFar * (hitZ - zNear)) / (hitZ * (zFar - zNear))
+            // Simplified: same as GL standard non-linear depth
+            if (hitZ > 0.0f) {
+                // Standard non-linear depth [0=near, 1=far]
+                depthOut[idx] = (zFar * (hitZ - zNear)) / (hitZ * (zFar - zNear));
+            } else {
+                // Sky/background: max depth
+                depthOut[idx] = 1.0f;
+            }
         }
     }
 }
@@ -337,28 +356,36 @@ int main() {
     VkImage depthImage;  VkDeviceMemory depthMem;
     VkImage mvImage;     VkDeviceMemory mvMem;
     VkImage outputImage; VkDeviceMemory outputMem;
-    // 1x1 R32_SFLOAT exposure image for manual exposure (FSR2 non-auto path)
     VkImage expImage;    VkDeviceMemory expMem;
 
     VkImageCreateInfo colorInfo = createImage(device, physicalDevice,
         renderW, renderH, VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+        VK_IMAGE_USAGE_STORAGE_BIT,
         colorImage, colorMem);
+
+    // Depth image: use R32_SFLOAT instead of D32_SFLOAT.
+    // FSR2 reads depth as a shader resource (sampled texture), not as a
+    // depth-stencil attachment. D32_SFLOAT cannot be used as SAMPLED on
+    // many implementations without special extensions. R32_SFLOAT is safe.
     VkImageCreateInfo depthInfo = createImage(device, physicalDevice,
-        renderW, renderH, VK_FORMAT_D32_SFLOAT,
-        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        renderW, renderH, VK_FORMAT_R32_SFLOAT,
+        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+        VK_IMAGE_USAGE_STORAGE_BIT,
         depthImage, depthMem);
+
     VkImageCreateInfo mvInfo = createImage(device, physicalDevice,
         renderW, renderH, VK_FORMAT_R16G16_SFLOAT,
-        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+        VK_IMAGE_USAGE_STORAGE_BIT,
         mvImage, mvMem);
+
     VkImageCreateInfo outputInfo = createImage(device, physicalDevice,
         displayW, displayH, VK_FORMAT_R32G32B32A32_SFLOAT,
         VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
         VK_IMAGE_USAGE_SAMPLED_BIT,
         outputImage, outputMem);
-    // Exposure image: 1x1 R32_SFLOAT, cleared to 1.0 (neutral exposure)
-    // Used by FSR2 when NOT using auto-exposure
+
     VkImageCreateInfo expInfo = createImage(device, physicalDevice,
         1, 1, VK_FORMAT_R32_SFLOAT,
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
@@ -491,14 +518,12 @@ int main() {
     FfxFsr2ContextDescription fsr2Desc = {};
     memset(&fsr2Desc, 0, sizeof(fsr2Desc));
     fsr2Desc.flags =
-        FFX_FSR2_ENABLE_DEBUG_CHECKING    |  // validation warnings to callback
-        FFX_FSR2_ENABLE_DEPTH_INVERTED    |  // depth is near=1, far=0
-        FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE|  // input is linear light
-        FFX_FSR2_ENABLE_AUTO_EXPOSURE;       // SPD computes exposure internally
-    // Note: FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION is NOT set.
-    // Our motion vectors are zero (static camera, no jitter in MVs).
-    // Jitter cancellation would incorrectly subtract jitter from our zero MVs,
-    // causing an apparent camera shift in the output.
+        FFX_FSR2_ENABLE_DEBUG_CHECKING     |  // validation warnings to callback
+        FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE |  // input is linear light
+        FFX_FSR2_ENABLE_AUTO_EXPOSURE;        // SPD computes exposure internally
+    // NOTE: FFX_FSR2_ENABLE_DEPTH_INVERTED is NOT set.
+    // We use standard depth (near=0.0, far=1.0) to keep cameraNear/cameraFar
+    // straightforward and avoid the near/far swap required by inverted depth.
 
     fsr2Desc.maxRenderSize    = { renderW, renderH };
     fsr2Desc.displaySize      = { displayW, displayH };
@@ -513,14 +538,30 @@ int main() {
     }
     std::cout << "[FSR2] Context created OK." << std::endl;
 
+    // Reset output layout for FSR2 use
+    outputLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    {
+        vkResetCommandBuffer(cmd, 0);
+        vkBeginCommandBuffer(cmd, &beginInfo);
+        transition(cmd, outputImage, outputLayout,
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
+        vkEndCommandBuffer(cmd);
+        vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
+        vkQueueWaitIdle(queue);
+    }
+
     FfxResource colorRes2 = ffxGetResourceVK(colorImage,
         ffxGetImageResourceDescriptionVK(colorImage, colorInfo,
             FFX_RESOURCE_USAGE_READ_ONLY),
         L"FSR2_Color", FFX_RESOURCE_STATE_COMPUTE_READ);
+
+    // Depth resource: R32_SFLOAT color image used as depth input to FSR2.
+    // FSR2 reads it as a shader resource, not a depth attachment.
     FfxResource depthRes2 = ffxGetResourceVK(depthImage,
         ffxGetImageResourceDescriptionVK(depthImage, depthInfo,
             FFX_RESOURCE_USAGE_READ_ONLY),
         L"FSR2_Depth", FFX_RESOURCE_STATE_COMPUTE_READ);
+
     FfxResource mvRes2 = ffxGetResourceVK(mvImage,
         ffxGetImageResourceDescriptionVK(mvImage, mvInfo,
             FFX_RESOURCE_USAGE_READ_ONLY),
@@ -530,21 +571,25 @@ int main() {
             FFX_RESOURCE_USAGE_UAV),
         L"FSR2_Output", FFX_RESOURCE_STATE_UNORDERED_ACCESS);
 
-    // AUTO_EXPOSURE is enabled so we do not pass a manual exposure resource.
-    // FSR2 will compute exposure internally via the SPD luminance pyramid pass.
-
     int32_t phaseCount = ffxFsr2GetJitterPhaseCount(renderW, displayW);
     std::cout << "[FSR2] Jitter phase count: " << phaseCount << std::endl;
     std::cout << "[FSR2] Running 32 temporal accumulation frames..."
               << std::endl;
     std::cout.flush();
 
+    // Reset color/depth/mv layouts for FSR2 loop
+    colorLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    depthLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    mvLayout    = VK_IMAGE_LAYOUT_UNDEFINED;
+    expLayout   = VK_IMAGE_LAYOUT_UNDEFINED;
+
     for (int i = 0; i < 32; i++) {
         float jX = 0, jY = 0;
         ffxFsr2GetJitterOffset(&jX, &jY, i, phaseCount);
 
-        // Render jittered frame - jitter applied to pixel coordinates
-        // which matches applying it to the projection matrix
+        // Render jittered frame.
+        // jX, jY are in pixel units (Halton sequence, range ~ -0.5..+0.5).
+        // We apply them directly as sub-pixel offsets in renderScene.
         std::vector<float> fColor(renderW * renderH * 4);
         std::vector<float> fDepth(renderW * renderH);
         renderScene(renderW, renderH, jX, jY, fColor.data(), fDepth.data());
@@ -562,14 +607,11 @@ int main() {
         transition(cmd, colorImage, colorLayout,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
         transition(cmd, depthImage, depthLayout,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
         transition(cmd, mvImage, mvLayout,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
         transition(cmd, expImage, expLayout,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-        if (i == 0)
-            transition(cmd, outputImage, outputLayout,
-                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
 
         // Upload color
         VkBufferImageCopy cR2 = {};
@@ -578,10 +620,10 @@ int main() {
         vkCmdCopyBufferToImage(cmd, uploadBuffer, colorImage,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cR2);
 
-        // Upload depth
+        // Upload depth (now R32_SFLOAT color image, use COLOR aspect)
         VkBufferImageCopy dR2 = {};
         dR2.bufferOffset = fColor.size() * sizeof(float);
-        dR2.imageSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 };
+        dR2.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
         dR2.imageExtent = { renderW, renderH, 1 };
         vkCmdCopyBufferToImage(cmd, uploadBuffer, depthImage,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &dR2);
@@ -592,8 +634,7 @@ int main() {
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             &mvClear, 1, &colorRange);
 
-        // Exposure: cleared to 1.0 but not passed to FSR2
-        // (AUTO_EXPOSURE handles this internally)
+        // Exposure image: cleared to 1.0 (not used, AUTO_EXPOSURE is on)
         VkClearColorValue expClear = {{ 1.0f, 0.0f, 0.0f, 0.0f }};
         vkCmdClearColorImage(cmd, expImage,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -602,7 +643,7 @@ int main() {
         transition(cmd, colorImage, colorLayout,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
         transition(cmd, depthImage, depthLayout,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
         transition(cmd, mvImage, mvLayout,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
         transition(cmd, expImage, expLayout,
@@ -614,38 +655,38 @@ int main() {
         dispatchDesc.color         = colorRes2;
         dispatchDesc.depth         = depthRes2;
         dispatchDesc.motionVectors = mvRes2;
-        // exposure left as zero/null: AUTO_EXPOSURE computes it via SPD
+        // exposure left null: AUTO_EXPOSURE computes it via SPD
         dispatchDesc.output        = outputRes2;
 
         dispatchDesc.jitterOffset.x = jX;
         dispatchDesc.jitterOffset.y = jY;
 
-        // Motion vector scale: our MVs are in screen-space pixel units
-        // FSR2 expects range [-width..width] x [-height..height]
+        // Motion vector scale: our MVs are zero (static camera).
+        // Scale values tell FSR2 the range of MV values.
+        // Standard: screen-space pixel units -> scale = render dimensions.
         dispatchDesc.motionVectorScale.x = (float)renderW;
         dispatchDesc.motionVectorScale.y = (float)renderH;
 
         dispatchDesc.renderSize = { renderW, renderH };
 
-        // RCAS sharpening: 0.0=no sharpening, 1.0=maximum sharpening
-        // 0.8 gives strong but natural result
+        // RCAS sharpening
         dispatchDesc.enableSharpening = true;
         dispatchDesc.sharpness        = 0.8f;
 
-        // 16.6ms = 60fps, used for temporal stability tuning
+        // 16.6ms = 60fps
         dispatchDesc.frameTimeDelta = 16.6f;
 
-        // preExposure: multiplier already applied to input color.
-        // 1.0 = no pre-exposure applied, AUTO_EXPOSURE handles it
+        // preExposure: 1.0 = no pre-exposure applied
         dispatchDesc.preExposure = 1.0f;
 
         // Reset history on first frame
         dispatchDesc.reset = (i == 0);
 
-        // Camera parameters - must match renderScene exactly
-        dispatchDesc.cameraNear              = 0.1f;
-        dispatchDesc.cameraFar               = 100.0f;
-        dispatchDesc.cameraFovAngleVertical  = 1.04719755f; // 60 degrees
+        // Camera parameters matching renderScene exactly.
+        // Standard (non-inverted) depth: pass near and far as-is.
+        dispatchDesc.cameraNear             = 0.1f;
+        dispatchDesc.cameraFar              = 100.0f;
+        dispatchDesc.cameraFovAngleVertical = 1.04719755f; // 60 degrees
         dispatchDesc.viewSpaceToMetersFactor = 1.0f;
 
         if (ffxFsr2ContextDispatch(fsr2Context, &dispatchDesc) != FFX_OK) {
