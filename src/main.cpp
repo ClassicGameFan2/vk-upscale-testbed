@@ -105,23 +105,11 @@ void transition(VkCommandBuffer cmd, VkImage image,
 }
 
 // Renders the scene with inverted depth (near=1.0, far=0.0).
-// Also fills motion vectors encoding the de-jitter displacement.
-//
-// Motion vector convention matching FSR2 expectations:
-//   MV = position in previous frame - position in current frame
-//   For a static camera, MV encodes only the jitter change between frames.
-//   prevJX/prevJY = jitter offset of the previous frame.
-//   currJX/currJY = jitter offset of the current frame.
-//
-// The motion vector value stored is in the same units as motionVectorScale.
-// We set motionVectorScale = (renderW, renderH), so MVs are in pixel units.
-// For a static camera: MV.x = prevJX - currJX, MV.y = prevJY - currJY
-// This tells FSR2: "this pixel moved by (prevJ - currJ) pixels from last frame"
-// which is exactly the jitter delta, allowing FSR2 to correctly de-jitter.
-void renderScene(int w, int h,
-    float currJX, float currJY,
-    float prevJX, float prevJY,
-    float* colorOut, float* depthOut, float* mvOut) {
+// Motion vectors are zero: static camera with no object motion.
+// FSR2 uses jitterOffset to handle de-jittering internally.
+// MVs only need to encode actual camera or object motion.
+void renderScene(int w, int h, float jx, float jy,
+    float* colorOut, float* depthOut) {
     float aspect = (float)w / (float)h;
     float fovY = 1.04719755f;
     float tanHalfFov = tanf(fovY / 2.0f);
@@ -129,8 +117,8 @@ void renderScene(int w, int h,
 
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
-            float ndcX = ((x + 0.5f + currJX) / w) * 2.0f - 1.0f;
-            float ndcY = ((y + 0.5f + currJY) / h) * 2.0f - 1.0f;
+            float ndcX = ((x + 0.5f + jx) / w) * 2.0f - 1.0f;
+            float ndcY = ((y + 0.5f + jy) / h) * 2.0f - 1.0f;
             float ro[3] = { 0.0f, 1.0f, 0.0f };
             float rd[3] = { ndcX * aspect * tanHalfFov,
                            -ndcY * tanHalfFov, 1.0f };
@@ -183,16 +171,8 @@ void renderScene(int w, int h,
             colorOut[idx*4+3] = 1.0f;
 
             // Inverted depth: near=1.0, far=0.0
-            // zNear/hitZ gives excellent near-range precision.
+            // zNear/hitZ: sphere at distance 4 -> 0.025
             depthOut[idx] = (hitZ > 0.0f) ? (zNear / hitZ) : 0.0f;
-
-            // Motion vectors in pixel units.
-            // Static camera: MV encodes only the jitter change.
-            // MV = prev_jitter - curr_jitter
-            // This is the displacement from current jittered position
-            // back to where the pixel was in the previous frame.
-            mvOut[idx*2+0] = prevJX - currJX;
-            mvOut[idx*2+1] = prevJY - currJY;
         }
     }
 }
@@ -220,10 +200,26 @@ void saveFloatImage(const std::string& filename, int w, int h,
 
 void saveDepthImage(const std::string& filename, int w, int h,
     const float* data) {
+    // Visualize depth with contrast stretch so near objects are visible.
+    // Inverted depth: near=1.0 (bright), far=0.0 (dark).
+    // We invert for display: near=dark, far=bright, then stretch contrast.
     std::vector<unsigned char> bytes(w * h * 4);
+    // Find min/max for contrast stretch
+    float minV = 1e30f, maxV = -1e30f;
+    for (int i = 0; i < w*h; i++) {
+        float v = data[i];
+        if (!std::isnan(v) && !std::isinf(v)) {
+            if (v < minV) minV = v;
+            if (v > maxV) maxV = v;
+        }
+    }
+    std::cout << "[Depth] min=" << minV << " max=" << maxV << std::endl;
+    float range = (maxV > minV) ? (maxV - minV) : 1.0f;
     for (int i = 0; i < w*h; i++) {
         float v = data[i];
         if (std::isnan(v)) v = 0.0f;
+        // Contrast stretch
+        v = (v - minV) / range;
         v = fmaxf(0.0f, fminf(1.0f, v));
         unsigned char bv = (unsigned char)(v * 255.0f);
         bytes[i*4+0] = bv;
@@ -348,9 +344,7 @@ int main() {
     {
         std::vector<float> native1x(renderW * renderH * 4);
         std::vector<float> depth1x(renderW * renderH);
-        std::vector<float> mv1x(renderW * renderH * 2);
-        renderScene(renderW, renderH, 0, 0, 0, 0,
-            native1x.data(), depth1x.data(), mv1x.data());
+        renderScene(renderW, renderH, 0, 0, native1x.data(), depth1x.data());
         saveFloatImage("Native_1x.png", renderW, renderH, native1x.data());
         saveDepthImage("Native_1x_depth.png", renderW, renderH, depth1x.data());
     }
@@ -359,22 +353,16 @@ int main() {
     {
         std::vector<float> native2x(displayW * displayH * 4);
         std::vector<float> depth2x(displayW * displayH);
-        std::vector<float> mv2x(displayW * displayH * 2);
-        renderScene(displayW, displayH, 0, 0, 0, 0,
-            native2x.data(), depth2x.data(), mv2x.data());
+        renderScene(displayW, displayH, 0, 0, native2x.data(), depth2x.data());
         saveFloatImage("Native_2x.png", displayW, displayH, native2x.data());
     }
 
     // =========================================================================
     // SHARED VULKAN RESOURCES
     // =========================================================================
-    // Upload buffer: color (RGBA32F) + depth (R32F) + motion vectors (RG32F)
-    // Motion vectors are RG32F so we can upload them as float pairs.
-    // We store them after depth in the upload buffer.
     VkDeviceSize colorUploadSize = renderW * renderH * 4 * sizeof(float);
     VkDeviceSize depthUploadSize = renderW * renderH * 1 * sizeof(float);
-    VkDeviceSize mvUploadSize    = renderW * renderH * 2 * sizeof(float);
-    VkDeviceSize uploadSize      = colorUploadSize + depthUploadSize + mvUploadSize;
+    VkDeviceSize uploadSize      = colorUploadSize + depthUploadSize;
 
     VkBuffer uploadBuffer; VkDeviceMemory uploadMemory;
     createBuffer(device, physicalDevice, uploadSize,
@@ -409,10 +397,11 @@ int main() {
         VK_IMAGE_USAGE_STORAGE_BIT,
         depthImage, depthMem);
 
-    // Motion vectors: R32G32_SFLOAT so we can upload float pairs directly.
-    // FSR2 reads MVs as a 2-channel texture.
+    // Motion vectors: R16G16_SFLOAT.
+    // Zero MVs for static camera - cleared each frame.
+    // FSR2 handles jitter de-jittering via jitterOffset, not via MVs.
     VkImageCreateInfo mvInfo = createImage(device, physicalDevice,
-        renderW, renderH, VK_FORMAT_R32G32_SFLOAT,
+        renderW, renderH, VK_FORMAT_R16G16_SFLOAT,
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
         VK_IMAGE_USAGE_STORAGE_BIT,
         mvImage, mvMem);
@@ -475,13 +464,10 @@ int main() {
     }
 
     {
-        // Upload non-jittered frame for FSR1
         std::vector<float> fsr1Color(renderW * renderH * 4);
         std::vector<float> fsr1Depth(renderW * renderH);
-        std::vector<float> fsr1MV(renderW * renderH * 2);
-        renderScene(renderW, renderH, 0, 0, 0, 0,
-            fsr1Color.data(), fsr1Depth.data(), fsr1MV.data());
-
+        renderScene(renderW, renderH, 0, 0,
+            fsr1Color.data(), fsr1Depth.data());
         void* mappedData;
         vkMapMemory(device, uploadMemory, 0, uploadSize, 0, &mappedData);
         memcpy(mappedData, fsr1Color.data(), colorUploadSize);
@@ -578,7 +564,6 @@ int main() {
     }
     std::cout << "[FSR2] Context created OK." << std::endl;
 
-    // Transition output to GENERAL before FSR2 loop
     {
         vkResetCommandBuffer(cmd, 0);
         vkBeginCommandBuffer(cmd, &beginInfo);
@@ -620,28 +605,19 @@ int main() {
               << " temporal accumulation frames..." << std::endl;
     std::cout.flush();
 
-    float prevJX = 0.0f, prevJY = 0.0f;
-
     for (int i = 0; i < totalFrames; i++) {
         float jX = 0, jY = 0;
         ffxFsr2GetJitterOffset(&jX, &jY, i, phaseCount);
 
         std::vector<float> fColor(renderW * renderH * 4);
         std::vector<float> fDepth(renderW * renderH);
-        std::vector<float> fMV(renderW * renderH * 2);
-
-        // On frame 0, prevJ = currJ so MV = 0 (correct for reset frame)
-        renderScene(renderW, renderH, jX, jY, prevJX, prevJY,
-            fColor.data(), fDepth.data(), fMV.data());
+        renderScene(renderW, renderH, jX, jY, fColor.data(), fDepth.data());
 
         void* mappedData;
         vkMapMemory(device, uploadMemory, 0, uploadSize, 0, &mappedData);
-        memcpy((uint8_t*)mappedData,
-            fColor.data(), colorUploadSize);
+        memcpy((uint8_t*)mappedData, fColor.data(), colorUploadSize);
         memcpy((uint8_t*)mappedData + colorUploadSize,
             fDepth.data(), depthUploadSize);
-        memcpy((uint8_t*)mappedData + colorUploadSize + depthUploadSize,
-            fMV.data(), mvUploadSize);
         vkUnmapMemory(device, uploadMemory);
 
         vkResetCommandBuffer(cmd, 0);
@@ -672,13 +648,12 @@ int main() {
         vkCmdCopyBufferToImage(cmd, uploadBuffer, depthImage,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &dR2);
 
-        // Upload motion vectors
-        VkBufferImageCopy mR2 = {};
-        mR2.bufferOffset = colorUploadSize + depthUploadSize;
-        mR2.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-        mR2.imageExtent = { renderW, renderH, 1 };
-        vkCmdCopyBufferToImage(cmd, uploadBuffer, mvImage,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &mR2);
+        // Motion vectors: zero (static camera).
+        // FSR2 uses jitterOffset for de-jittering, not MVs.
+        VkClearColorValue mvClear = {{ 0.0f, 0.0f, 0.0f, 0.0f }};
+        vkCmdClearColorImage(cmd, mvImage,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            &mvClear, 1, &colorRange);
 
         // Exposure
         VkClearColorValue expClear = {{ 1.0f, 0.0f, 0.0f, 0.0f }};
@@ -706,8 +681,8 @@ int main() {
         dispatchDesc.jitterOffset.x = jX;
         dispatchDesc.jitterOffset.y = jY;
 
-        // motionVectorScale matches the units of our MV data.
-        // Our MVs are in pixel units, scale = render dimensions.
+        // motionVectorScale: since MVs are zero this value does not
+        // affect the result, but must be non-zero for FSR2 internals.
         dispatchDesc.motionVectorScale.x = (float)renderW;
         dispatchDesc.motionVectorScale.y = (float)renderH;
 
@@ -747,7 +722,6 @@ int main() {
             return 1;
         }
 
-        // Save snapshots
         int frameNum = i + 1;
         if (frameNum == 32 || frameNum == 64 ||
             frameNum == 96 || frameNum == 128) {
@@ -779,10 +753,6 @@ int main() {
         if (frameNum % 32 == 0)
             std::cout << "[FSR2] Frame " << frameNum << "/"
                       << totalFrames << " done" << std::endl;
-
-        // Store current jitter as previous for next frame
-        prevJX = jX;
-        prevJY = jY;
     }
 
     // Final download
