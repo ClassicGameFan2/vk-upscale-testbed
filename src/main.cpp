@@ -104,26 +104,24 @@ void transition(VkCommandBuffer cmd, VkImage image,
     currentLayout = newLayout;
 }
 
-// Renders the scene at render resolution with sub-pixel jitter applied.
-// Motion vectors are in screen-space pixel units [-renderW..renderW, -renderH..renderH].
-// For a static scene with a static camera, motion vectors are zero EXCEPT for
-// the jitter displacement between frames, which FSR2 handles via jitterOffset.
-// We do NOT bake jitter into motion vectors - FSR2 removes jitter itself using
-// the jitterOffset values we report in the dispatch description.
+// Renders the scene with jitter applied to sample positions.
+// Motion vectors encode the jitter delta (prevJX-currJX, prevJY-currJY)
+// in pixel units. FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION is
+// set in the context, so FSR2 will subtract the jitter from the MVs
+// internally before using them for reprojection.
 void renderScene(int w, int h,
-    float jX, float jY,
+    float currJX, float currJY,
+    float prevJX, float prevJY,
     float* colorOut, float* depthOut, float* mvOut) {
     float aspect = (float)w / (float)h;
-    float fovY = 1.04719755f; // 60 degrees
+    float fovY = 1.04719755f;
     float tanHalfFov = tanf(fovY / 2.0f);
     float zNear = 0.1f, zFar = 100.0f;
 
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
-            // Apply jitter to sample position (matches AMD's jittered projection matrix)
-            float ndcX = ((x + 0.5f + jX) / w) * 2.0f - 1.0f;
-            float ndcY = ((y + 0.5f + jY) / h) * 2.0f - 1.0f;
-
+            float ndcX = ((x + 0.5f + currJX) / w) * 2.0f - 1.0f;
+            float ndcY = ((y + 0.5f + currJY) / h) * 2.0f - 1.0f;
             float ro[3] = { 0.0f, 1.0f, 0.0f };
             float rd[3] = { ndcX * aspect * tanHalfFov,
                            -ndcY * tanHalfFov, 1.0f };
@@ -135,7 +133,6 @@ void renderScene(int w, int h,
             float g = powf(206.0f/255.0f, 2.2f);
             float b = powf(235.0f/255.0f, 2.2f);
 
-            // Sphere
             float oc[3] = { ro[0], ro[1]-1.0f, ro[2]-4.0f };
             float b_dot = rd[0]*oc[0] + rd[1]*oc[1] + rd[2]*oc[2];
             float c_val = oc[0]*oc[0] + oc[1]*oc[1] + oc[2]*oc[2] - 2.25f;
@@ -157,8 +154,6 @@ void renderScene(int w, int h,
                     b = powf(50.0f/255.0f,  2.2f) * ndotl;
                 }
             }
-
-            // Floor
             if (rd[1] < 0.0f) {
                 float t = -ro[1] / rd[1];
                 if (t > zNear && t < zFar && (hitZ < 0.0f || t < hitZ)) {
@@ -181,10 +176,11 @@ void renderScene(int w, int h,
             // Inverted depth: near=1.0, far=0.0
             depthOut[idx] = (hitZ > 0.0f) ? (zNear / hitZ) : 0.0f;
 
-            // Static scene, static camera: motion vectors are zero.
-            // FSR2 will handle jitter removal using jitterOffset from dispatch.
-            mvOut[idx*2+0] = 0.0f;
-            mvOut[idx*2+1] = 0.0f;
+            // Motion vector = jitter delta in pixel units.
+            // Static scene: the only per-pixel motion is the jitter shift.
+            // FSR2 will cancel the jitter component (JITTER_CANCELLATION flag set).
+            mvOut[idx*2+0] = prevJX - currJX;
+            mvOut[idx*2+1] = prevJY - currJY;
         }
     }
 }
@@ -352,7 +348,7 @@ int main() {
         std::vector<float> native1x(renderW * renderH * 4);
         std::vector<float> depth1x(renderW * renderH);
         std::vector<float> mv1x(renderW * renderH * 2, 0.0f);
-        renderScene(renderW, renderH, 0.0f, 0.0f,
+        renderScene(renderW, renderH, 0.0f, 0.0f, 0.0f, 0.0f,
             native1x.data(), depth1x.data(), mv1x.data());
         saveFloatImage("Native_1x.png", renderW, renderH, native1x.data());
         saveDepthImage("Native_1x_depth.png", renderW, renderH, depth1x.data());
@@ -363,7 +359,7 @@ int main() {
         std::vector<float> native2x(displayW * displayH * 4);
         std::vector<float> depth2x(displayW * displayH);
         std::vector<float> mv2x(displayW * displayH * 2, 0.0f);
-        renderScene(displayW, displayH, 0.0f, 0.0f,
+        renderScene(displayW, displayH, 0.0f, 0.0f, 0.0f, 0.0f,
             native2x.data(), depth2x.data(), mv2x.data());
         saveFloatImage("Native_2x.png", displayW, displayH, native2x.data());
     }
@@ -477,7 +473,7 @@ int main() {
         std::vector<float> fsr1Color(renderW * renderH * 4);
         std::vector<float> fsr1Depth(renderW * renderH);
         std::vector<float> fsr1MV(renderW * renderH * 2, 0.0f);
-        renderScene(renderW, renderH, 0.0f, 0.0f,
+        renderScene(renderW, renderH, 0.0f, 0.0f, 0.0f, 0.0f,
             fsr1Color.data(), fsr1Depth.data(), fsr1MV.data());
         void* mappedData;
         vkMapMemory(device, uploadMemory, 0, uploadSize, 0, &mappedData);
@@ -560,10 +556,8 @@ int main() {
         FFX_FSR2_ENABLE_DEBUG_CHECKING     |
         FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE |
         FFX_FSR2_ENABLE_AUTO_EXPOSURE      |
+        FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION |
         FFX_FSR2_ENABLE_DEPTH_INVERTED;
-    // Note: FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION is NOT set.
-    // We report jitterOffset in each dispatch so FSR2 removes jitter itself.
-    // Motion vectors are zero for this static scene (no camera or object motion).
 
     fsr2Desc.maxRenderSize    = { renderW, renderH };
     fsr2Desc.displaySize      = { displayW, displayH };
@@ -619,24 +613,20 @@ int main() {
               << " temporal accumulation frames..." << std::endl;
     std::cout.flush();
 
-    // Jitter index incremented each frame, matching AMD's sample exactly
     int32_t jitterIndex = 0;
+    float prevJX = 0.0f, prevJY = 0.0f;
 
     for (int i = 0; i < totalFrames; i++) {
-        // Increment jitter index before use, matching AMD's sample:
-        // "++m_JitterIndex" before ffxFsr2GetJitterOffset
         ++jitterIndex;
 
         float jX = 0.0f, jY = 0.0f;
         ffxFsr2GetJitterOffset(&jX, &jY, jitterIndex, phaseCount);
 
-        // Render at render resolution with jitter applied to sample positions.
-        // Motion vectors are zero: static scene, static camera.
         std::vector<float> fColor(renderW * renderH * 4);
         std::vector<float> fDepth(renderW * renderH);
-        std::vector<float> fMV(renderW * renderH * 2, 0.0f);
+        std::vector<float> fMV(renderW * renderH * 2);
 
-        renderScene(renderW, renderH, jX, jY,
+        renderScene(renderW, renderH, jX, jY, prevJX, prevJY,
             fColor.data(), fDepth.data(), fMV.data());
 
         void* mappedData;
@@ -703,19 +693,12 @@ int main() {
         dispatchDesc.motionVectors = mvRes2;
         dispatchDesc.output        = outputRes2;
 
-        // Report the jitter offset we applied during rendering.
-        // FSR2 uses this to remove jitter from the accumulated history.
-        // This matches AMD's sample exactly:
-        //   dispatchParameters.jitterOffset.x = jitterX;
-        //   dispatchParameters.jitterOffset.y = jitterY;
+        // Report current jitter to FSR2.
+        // FSR2 uses this together with JITTER_CANCELLATION flag to remove
+        // the jitter component from our motion vectors before reprojection.
         dispatchDesc.jitterOffset.x = jX;
         dispatchDesc.jitterOffset.y = jY;
 
-        // Motion vector scale: converts our MV units to FSR2's expected range.
-        // Our MVs are in screen-space pixels, FSR2 expects [-width..width, -height..height].
-        // This matches AMD's sample:
-        //   dispatchParameters.motionVectorScale.x = resInfo.fRenderWidth();
-        //   dispatchParameters.motionVectorScale.y = resInfo.fRenderHeight();
         dispatchDesc.motionVectorScale.x = (float)renderW;
         dispatchDesc.motionVectorScale.y = (float)renderH;
 
@@ -727,13 +710,6 @@ int main() {
         dispatchDesc.preExposure      = 1.0f;
         dispatchDesc.reset            = (i == 0);
 
-        // Inverted depth: cameraNear and cameraFar must match AMD's sample
-        // convention for FFX_FSR2_ENABLE_DEPTH_INVERTED:
-        //   dispatchParameters.cameraFar  = pCamera->GetNearPlane(); // actual near = 0.1
-        //   dispatchParameters.cameraNear = FLT_MAX;                 // infinite far
-        // The field NAMES are counterintuitive when depth is inverted:
-        // cameraNear receives the far-plane value (FLT_MAX = infinite)
-        // cameraFar  receives the near-plane value (0.1f)
         dispatchDesc.cameraNear             = FLT_MAX;
         dispatchDesc.cameraFar              = 0.1f;
         dispatchDesc.cameraFovAngleVertical = 1.04719755f;
@@ -792,6 +768,9 @@ int main() {
         if (frameNum % 32 == 0)
             std::cout << "[FSR2] Frame " << frameNum << "/"
                       << totalFrames << " done" << std::endl;
+
+        prevJX = jX;
+        prevJY = jY;
     }
 
     // Final download
