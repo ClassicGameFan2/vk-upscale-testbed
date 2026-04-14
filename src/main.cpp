@@ -105,18 +105,9 @@ void transition(VkCommandBuffer cmd, VkImage image,
 }
 
 // Renders the scene with inverted depth (near=1.0, far=0.0).
-//
-// Motion vector convention matching a rasterizer with jittered projection:
-// In a rasterizer, MVs = clipPos_current - clipPos_previous (in NDC).
-// For a static camera, the only motion is the jitter change between frames.
-// clipPos_current = original_pos + currJ
-// clipPos_previous = original_pos + prevJ
-// MV = clipPos_current - clipPos_previous = currJ - prevJ
-//
-// We report jitterOffset correctly to FSR2 so it can do its internal
-// jitter handling. No MOTION_VECTORS_JITTER_CANCELLATION flag.
-// FSR2 will subtract jitterOffset from the MVs internally to get
-// the true camera/object motion (which is zero for static camera).
+// MVs encode jitter delta: prevJ - currJ in pixel units.
+// jitterOffset is NOT reported to FSR2 (set to zero in dispatch).
+// FSR2 gets all jitter information solely from the MVs.
 void renderScene(int w, int h,
     float currJX, float currJY,
     float prevJX, float prevJY,
@@ -184,14 +175,12 @@ void renderScene(int w, int h,
             // Inverted depth: near=1.0, far=0.0
             depthOut[idx] = (hitZ > 0.0f) ? (zNear / hitZ) : 0.0f;
 
-            // MV = currJ - prevJ in pixel units.
-            // Matches rasterizer convention: current - previous.
-            // FSR2 will subtract jitterOffset internally to recover
-            // true motion (zero for static camera).
-            // Scale factor: 0.0 = zero MVs (blurry, no shift)
-            float mvScale = 0.5f;
-            mvOut[idx*2+0] = (prevJX - currJX) * mvScale;
-            mvOut[idx*2+1] = (prevJY - currJY) * mvScale;
+            // MV = prevJ - currJ in pixel units.
+            // Encodes the full jitter displacement between frames.
+            // FSR2 jitterOffset is set to zero so FSR2 does not
+            // double-correct. All jitter info comes from MVs alone.
+            mvOut[idx*2+0] = prevJX - currJX;
+            mvOut[idx*2+1] = prevJY - currJY;
         }
     }
 }
@@ -569,9 +558,9 @@ int main() {
         FFX_FSR2_ENABLE_AUTO_EXPOSURE      |
         FFX_FSR2_ENABLE_DEPTH_INVERTED;
     // No MOTION_VECTORS_JITTER_CANCELLATION.
-    // MVs = currJ - prevJ (rasterizer convention).
-    // jitterOffset reported correctly.
-    // FSR2 subtracts jitter from MVs internally to get true motion.
+    // jitterOffset is set to zero in dispatch.
+    // All jitter information comes from MVs (prevJ - currJ).
+    // FSR2 will not attempt additional jitter removal via jitterOffset.
 
     fsr2Desc.maxRenderSize    = { renderW, renderH };
     fsr2Desc.displaySize      = { displayW, displayH };
@@ -704,11 +693,10 @@ int main() {
         dispatchDesc.motionVectors = mvRes2;
         dispatchDesc.output        = outputRes2;
 
-        // Report jitterOffset correctly.
-        // FSR2 uses this to subtract jitter from MVs internally,
-        // recovering true motion (zero for static camera).
-        dispatchDesc.jitterOffset.x = jX;
-        dispatchDesc.jitterOffset.y = jY;
+        // jitterOffset is zero: FSR2 must not apply additional jitter
+        // correction on top of the jitter already encoded in our MVs.
+        dispatchDesc.jitterOffset.x = 0.0f;
+        dispatchDesc.jitterOffset.y = 0.0f;
 
         dispatchDesc.motionVectorScale.x = (float)renderW;
         dispatchDesc.motionVectorScale.y = (float)renderH;
