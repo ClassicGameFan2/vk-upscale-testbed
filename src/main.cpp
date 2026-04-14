@@ -188,8 +188,10 @@ void renderScene(int w, int h,
             // Matches rasterizer convention: current - previous.
             // FSR2 will subtract jitterOffset internally to recover
             // true motion (zero for static camera).
-            mvOut[idx*2+0] = currJX - prevJX;
-            mvOut[idx*2+1] = currJY - prevJY;
+            // Scale factor: 0.0 = zero MVs (blurry, no shift)
+            float mvScale = 0.0f;
+            mvOut[idx*2+0] = (prevJX - currJX) * mvScale;
+            mvOut[idx*2+1] = (prevJY - currJY) * mvScale;
         }
     }
 }
