@@ -1100,7 +1100,7 @@ int main() {
         dispatchDesc.renderSize = { sImgW, sImgH };
 
         dispatchDesc.enableSharpening = true;
-        dispatchDesc.sharpness        = 1.0f;
+        dispatchDesc.sharpness        = 0.8f;
         dispatchDesc.frameTimeDelta   = 16.6f;
         dispatchDesc.preExposure      = 1.0f;
         dispatchDesc.reset            = (i == 0);
