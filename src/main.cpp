@@ -179,7 +179,7 @@ void renderScene(int w, int h,
             // Encodes the full jitter displacement between frames.
             // FSR2 jitterOffset is set to zero so FSR2 does not
             // double-correct. All jitter info comes from MVs alone.
-            float mvScale = 0.0f;
+            float mvScale = 2.0f;
             mvOut[idx*2+0] = (prevJX - currJX) * mvScale;
             mvOut[idx*2+1] = (prevJY - currJY) * mvScale;
         }
