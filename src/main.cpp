@@ -189,7 +189,7 @@ void renderScene(int w, int h,
             // FSR2 will subtract jitterOffset internally to recover
             // true motion (zero for static camera).
             // Scale factor: 0.0 = zero MVs (blurry, no shift)
-            float mvScale = 0.0f;
+            float mvScale = 0.5f;
             mvOut[idx*2+0] = (prevJX - currJX) * mvScale;
             mvOut[idx*2+1] = (prevJY - currJY) * mvScale;
         }
