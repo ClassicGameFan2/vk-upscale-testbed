@@ -557,7 +557,6 @@ int main() {
         FFX_FSR2_ENABLE_DEBUG_CHECKING     |
         FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE |
         FFX_FSR2_ENABLE_AUTO_EXPOSURE      |
-        FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION |
         FFX_FSR2_ENABLE_DEPTH_INVERTED;
     // No MOTION_VECTORS_JITTER_CANCELLATION.
     // jitterOffset is set to zero in dispatch.
@@ -673,10 +672,10 @@ int main() {
         vkCmdCopyBufferToImage(cmd, uploadBuffer, mvImage,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &mR2);
 
-        VkClearColorValue expClear = {{ 1.0f, 0.0f, 0.0f, 0.0f }};
-        vkCmdClearColorImage(cmd, expImage,
+        VkClearColorValue mvClear = {{ 0.0f, 0.0f, 0.0f, 0.0f }};
+        vkCmdClearColorImage(cmd, mvImage,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            &expClear, 1, &colorRange);
+            &mvClear, 1, &colorRange);
 
         transition(cmd, colorImage, colorLayout,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
@@ -697,11 +696,11 @@ int main() {
 
         // jitterOffset is zero: FSR2 must not apply additional jitter
         // correction on top of the jitter already encoded in our MVs.
-        dispatchDesc.jitterOffset.x = 0.0f;
-        dispatchDesc.jitterOffset.y = 0.0f;
+        dispatchDesc.jitterOffset.x = jX;
+        dispatchDesc.jitterOffset.y = jY;
 
-        dispatchDesc.motionVectorScale.x = (float)renderW;
-        dispatchDesc.motionVectorScale.y = (float)renderH;
+        dispatchDesc.motionVectorScale.x = (float)displayW;
+        dispatchDesc.motionVectorScale.y = (float)displayH;
 
         dispatchDesc.renderSize = { renderW, renderH };
 
