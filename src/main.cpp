@@ -179,7 +179,8 @@ void renderScene(int w, int h,
             // Encodes the full jitter displacement between frames.
             // FSR2 jitterOffset is set to zero so FSR2 does not
             // double-correct. All jitter info comes from MVs alone.
-            float mvScale = 2.0f;
+            // mvScale was added for debugging purposes. When it is set to 0, output is blurry.
+            float mvScale = 1.0f;
             mvOut[idx*2+0] = (prevJX - currJX) * mvScale;
             mvOut[idx*2+1] = (prevJY - currJY) * mvScale;
         }
@@ -557,6 +558,7 @@ int main() {
         FFX_FSR2_ENABLE_DEBUG_CHECKING     |
         FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE |
         FFX_FSR2_ENABLE_AUTO_EXPOSURE      |
+        FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION |
         FFX_FSR2_ENABLE_DEPTH_INVERTED;
     // No MOTION_VECTORS_JITTER_CANCELLATION.
     // jitterOffset is set to zero in dispatch.
@@ -672,10 +674,10 @@ int main() {
         vkCmdCopyBufferToImage(cmd, uploadBuffer, mvImage,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &mR2);
 
-        VkClearColorValue mvClear = {{ 0.0f, 0.0f, 0.0f, 0.0f }};
-        vkCmdClearColorImage(cmd, mvImage,
+        VkClearColorValue expClear = {{ 1.0f, 0.0f, 0.0f, 0.0f }};
+        vkCmdClearColorImage(cmd, expImage,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            &mvClear, 1, &colorRange);
+            &expClear, 1, &colorRange);
 
         transition(cmd, colorImage, colorLayout,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
@@ -696,11 +698,11 @@ int main() {
 
         // jitterOffset is zero: FSR2 must not apply additional jitter
         // correction on top of the jitter already encoded in our MVs.
-        dispatchDesc.jitterOffset.x = jX;
-        dispatchDesc.jitterOffset.y = jY;
+        dispatchDesc.jitterOffset.x = 0.0f;
+        dispatchDesc.jitterOffset.y = 0.0f;
 
-        dispatchDesc.motionVectorScale.x = (float)displayW;
-        dispatchDesc.motionVectorScale.y = (float)displayH;
+        dispatchDesc.motionVectorScale.x = (float)renderW;
+        dispatchDesc.motionVectorScale.y = (float)renderH;
 
         dispatchDesc.renderSize = { renderW, renderH };
 
