@@ -3,6 +3,7 @@
 #include "volk.h"
 #include <FidelityFX/host/ffx_fsr1.h>
 #include <FidelityFX/host/ffx_fsr2.h>
+#include <FidelityFX/host/ffx_fsr3upscaler.h>
 #include <FidelityFX/host/backends/vk/ffx_vk.h>
 #include <iostream>
 #include <vector>
@@ -12,8 +13,6 @@
 #include <cfloat>
 
 #include "stb_image_write.h"
-#define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
 
 static void AssertCallback(const char* message) {
     std::cout << "\n[AMD SDK ASSERT] " << message << std::endl;
@@ -23,6 +22,16 @@ static void AssertCallback(const char* message) {
 static void FfxMessageCallback(FfxMsgType type, const wchar_t* message) {
     if (message) {
         std::cout << "[AMD MSG] ";
+        for (int i = 0; i < 2048 && message[i] != 0; ++i)
+            std::cout << (char)message[i];
+        std::cout << std::endl;
+        std::cout.flush();
+    }
+}
+
+static void Fsr3MessageCallback(FfxMsgType type, const wchar_t* message) {
+    if (message) {
+        std::cout << "[FSR3 MSG] ";
         for (int i = 0; i < 2048 && message[i] != 0; ++i)
             std::cout << (char)message[i];
         std::cout << std::endl;
@@ -86,9 +95,108 @@ VkImageCreateInfo createImage(VkDevice device, VkPhysicalDevice physicalDevice,
     return imageInfo;
 }
 
+// Create a VkImage from an FfxCreateResourceDescription.
+// Maps FfxSurfaceFormat -> VkFormat and FfxResourceUsage -> VkImageUsageFlags.
+static VkFormat ffxFormatToVk(FfxSurfaceFormat fmt) {
+    switch (fmt) {
+    case FFX_SURFACE_FORMAT_R32G32B32A32_FLOAT:   return VK_FORMAT_R32G32B32A32_SFLOAT;
+    case FFX_SURFACE_FORMAT_R32G32B32A32_UINT:    return VK_FORMAT_R32G32B32A32_UINT;
+    case FFX_SURFACE_FORMAT_R16G16B16A16_FLOAT:   return VK_FORMAT_R16G16B16A16_SFLOAT;
+    case FFX_SURFACE_FORMAT_R32G32_FLOAT:         return VK_FORMAT_R32G32_SFLOAT;
+    case FFX_SURFACE_FORMAT_R32G32_TYPELESS:      return VK_FORMAT_R32G32_SFLOAT;
+    case FFX_SURFACE_FORMAT_R8_UINT:              return VK_FORMAT_R8_UINT;
+    case FFX_SURFACE_FORMAT_R32_UINT:             return VK_FORMAT_R32_UINT;
+    case FFX_SURFACE_FORMAT_R8G8B8A8_UNORM:       return VK_FORMAT_R8G8B8A8_UNORM;
+    case FFX_SURFACE_FORMAT_R8G8B8A8_SRGB:        return VK_FORMAT_R8G8B8A8_SRGB;
+    case FFX_SURFACE_FORMAT_R11G11B10_FLOAT:      return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+    case FFX_SURFACE_FORMAT_R16G16_FLOAT:         return VK_FORMAT_R16G16_SFLOAT;
+    case FFX_SURFACE_FORMAT_R16G16_UINT:          return VK_FORMAT_R16G16_UINT;
+    case FFX_SURFACE_FORMAT_R16G16_SINT:          return VK_FORMAT_R16G16_SINT;
+    case FFX_SURFACE_FORMAT_R16_FLOAT:            return VK_FORMAT_R16_SFLOAT;
+    case FFX_SURFACE_FORMAT_R16_UINT:             return VK_FORMAT_R16_UINT;
+    case FFX_SURFACE_FORMAT_R16_UNORM:            return VK_FORMAT_R16_UNORM;
+    case FFX_SURFACE_FORMAT_R16_SNORM:            return VK_FORMAT_R16_SNORM;
+    case FFX_SURFACE_FORMAT_R8_UNORM:             return VK_FORMAT_R8_UNORM;
+    case FFX_SURFACE_FORMAT_R32_FLOAT:            return VK_FORMAT_R32_SFLOAT;
+    case FFX_SURFACE_FORMAT_R8G8_UNORM:           return VK_FORMAT_R8G8_UNORM;
+    case FFX_SURFACE_FORMAT_R8G8_UINT:            return VK_FORMAT_R8G8_UINT;
+    case FFX_SURFACE_FORMAT_R32G32B32_FLOAT:      return VK_FORMAT_R32G32B32_SFLOAT;
+    case FFX_SURFACE_FORMAT_R16G16B16A16_TYPELESS:return VK_FORMAT_R16G16B16A16_SFLOAT;
+    case FFX_SURFACE_FORMAT_R10G10B10A2_UNORM:    return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+    case FFX_SURFACE_FORMAT_R9G9B9E5_SHAREDEXP:   return VK_FORMAT_E5B9G9R9_UFLOAT_PACK32;
+    default:
+        std::cout << "[WARN] Unknown FfxSurfaceFormat " << (int)fmt
+                  << ", falling back to R32_SFLOAT" << std::endl;
+        return VK_FORMAT_R32_SFLOAT;
+    }
+}
+
+static VkImageUsageFlags ffxUsageToVk(FfxResourceUsage usage) {
+    VkImageUsageFlags flags =
+        VK_IMAGE_USAGE_SAMPLED_BIT |        // always SRV-able
+        VK_IMAGE_USAGE_TRANSFER_DST_BIT |   // for clears/uploads
+        VK_IMAGE_USAGE_TRANSFER_SRC_BIT;    // for readback
+    if (usage & FFX_RESOURCE_USAGE_UAV)
+        flags |= VK_IMAGE_USAGE_STORAGE_BIT;
+    if (usage & FFX_RESOURCE_USAGE_RENDERTARGET)
+        flags |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    return flags;
+}
+
+struct SharedImage {
+    VkImage        image  = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkImageCreateInfo info = {};
+    VkImageLayout  layout = VK_IMAGE_LAYOUT_UNDEFINED;
+};
+
+static SharedImage createSharedImage(VkDevice device, VkPhysicalDevice physicalDevice,
+    const FfxCreateResourceDescription& desc)
+{
+    SharedImage si;
+    VkFormat fmt = ffxFormatToVk(desc.resourceDescription.format);
+    VkImageUsageFlags usage = ffxUsageToVk(desc.resourceDescription.usage);
+
+    uint32_t w = desc.resourceDescription.width;
+    uint32_t h = desc.resourceDescription.height;
+    uint32_t mips = desc.resourceDescription.mipCount;
+    if (mips == 0) {
+        mips = 1;
+        uint32_t tw = w, th = h;
+        while (tw > 1 || th > 1) { tw >>= 1; th >>= 1; mips++; }
+    }
+
+    VkImageCreateInfo imageInfo = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    imageInfo.imageType   = VK_IMAGE_TYPE_2D;
+    imageInfo.extent      = { w, h, 1 };
+    imageInfo.mipLevels   = mips;
+    imageInfo.arrayLayers = 1;
+    imageInfo.format      = fmt;
+    imageInfo.tiling      = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    imageInfo.usage       = usage;
+    imageInfo.samples     = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    vkCreateImage(device, &imageInfo, nullptr, &si.image);
+
+    VkMemoryRequirements memReq;
+    vkGetImageMemoryRequirements(device, si.image, &memReq);
+    VkMemoryAllocateInfo allocInfo = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    allocInfo.allocationSize  = memReq.size;
+    allocInfo.memoryTypeIndex = findMemoryType(physicalDevice,
+        memReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    vkAllocateMemory(device, &allocInfo, nullptr, &si.memory);
+    vkBindImageMemory(device, si.image, si.memory, 0);
+
+    si.info   = imageInfo;
+    si.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    return si;
+}
+
 void transition(VkCommandBuffer cmd, VkImage image,
     VkImageLayout& currentLayout, VkImageLayout newLayout,
-    VkImageAspectFlags aspectMask) {
+    VkImageAspectFlags aspectMask, uint32_t mipLevels = 1) {
     if (currentLayout == newLayout) return;
     VkImageMemoryBarrier barrier = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
     barrier.oldLayout = currentLayout;
@@ -96,7 +204,7 @@ void transition(VkCommandBuffer cmd, VkImage image,
     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.image = image;
-    barrier.subresourceRange = { aspectMask, 0, 1, 0, 1 };
+    barrier.subresourceRange = { aspectMask, 0, mipLevels, 0, 1 };
     barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT;
     barrier.dstAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT;
     vkCmdPipelineBarrier(cmd,
@@ -174,49 +282,6 @@ void renderScene(int w, int h,
 
             mvOut[idx*2+0] = prevJX - currJX;
             mvOut[idx*2+1] = prevJY - currJY;
-        }
-    }
-}
-
-void sampleStaticImageJittered(
-    const float* srcLinear,
-    int w, int h,
-    float currJX, float currJY,
-    float prevJX, float prevJY,
-    float* colorOut, float* depthOut, float* mvOut) {
-
-    for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-            float sx = (float)x - currJX;
-            float sy = (float)y - currJY;
-
-            int x0 = (int)floorf(sx);
-            int y0 = (int)floorf(sy);
-            int x1 = x0 + 1;
-            int y1 = y0 + 1;
-
-            float fx = sx - (float)x0;
-            float fy = sy - (float)y0;
-
-            x0 = x0 < 0 ? 0 : (x0 >= w ? w-1 : x0);
-            x1 = x1 < 0 ? 0 : (x1 >= w ? w-1 : x1);
-            y0 = y0 < 0 ? 0 : (y0 >= h ? h-1 : y0);
-            y1 = y1 < 0 ? 0 : (y1 >= h ? h-1 : y1);
-
-            for (int c = 0; c < 4; c++) {
-                float v00 = srcLinear[(y0*w + x0)*4 + c];
-                float v10 = srcLinear[(y0*w + x1)*4 + c];
-                float v01 = srcLinear[(y1*w + x0)*4 + c];
-                float v11 = srcLinear[(y1*w + x1)*4 + c];
-                float v = v00*(1-fx)*(1-fy) + v10*fx*(1-fy)
-                        + v01*(1-fx)*fy     + v11*fx*fy;
-                colorOut[(y*w+x)*4+c] = v;
-            }
-
-            depthOut[y*w+x] = 0.5f;
-
-            mvOut[(y*w+x)*2+0] = prevJX - currJX;
-            mvOut[(y*w+x)*2+1] = prevJY - currJY;
         }
     }
 }
@@ -401,7 +466,7 @@ int main() {
     }
 
     // =========================================================================
-    // SHARED VULKAN RESOURCES (sized for 3D scene: renderW x renderH)
+    // SHARED VULKAN RESOURCES
     // =========================================================================
     VkDeviceSize colorUploadSize = renderW * renderH * 4 * sizeof(float);
     VkDeviceSize depthUploadSize = renderW * renderH * 1 * sizeof(float);
@@ -470,9 +535,18 @@ int main() {
 
     VkDeviceContext vkDeviceContext = {
         device, physicalDevice, vkGetDeviceProcAddr };
+
+    // We need separate scratch buffers for FSR1, FSR2, and FSR3 because
+    // each effect context uses its own scratch allocation internally.
+    // Using a single buffer shared between multiple contexts would
+    // cause memory corruption as each call to ffxGetInterfaceVK
+    // sets up its own internal allocator within the same memory region.
     size_t safeBufferSize =
         ffxGetScratchMemorySizeVK(physicalDevice, 4) * 2;
-    void* scratchBuffer = _aligned_malloc(safeBufferSize, 64);
+
+    void* scratchBuffer1 = _aligned_malloc(safeBufferSize, 64);
+    void* scratchBuffer2 = _aligned_malloc(safeBufferSize, 64);
+    void* scratchBuffer3 = _aligned_malloc(safeBufferSize, 64);
 
     VkBufferImageCopy outRegion = {};
     outRegion.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
@@ -484,11 +558,11 @@ int main() {
     std::cout << "\n============================================" << std::endl;
     std::cout << "  FSR 1.2 Spatial Upscaling Test" << std::endl;
     std::cout << "============================================" << std::endl;
-    memset(scratchBuffer, 0, safeBufferSize);
+    memset(scratchBuffer1, 0, safeBufferSize);
 
     FfxInterface ffxInterface1 = {};
     ffxGetInterfaceVK(&ffxInterface1, ffxGetDeviceVK(&vkDeviceContext),
-        scratchBuffer, safeBufferSize, 4);
+        scratchBuffer1, safeBufferSize, 4);
 
     FfxFsr1ContextDescription fsr1Desc = {};
     fsr1Desc.flags        = FFX_FSR1_ENABLE_HIGH_DYNAMIC_RANGE |
@@ -575,16 +649,16 @@ int main() {
     std::cout << "[FSR1] Done." << std::endl;
 
     // =========================================================================
-    // FSR 2.3.3 - Temporal Upscaling (3D scene)
+    // FSR 2.3.3 - Temporal Upscaling
     // =========================================================================
     std::cout << "\n============================================" << std::endl;
     std::cout << "  FSR 2.3.3 Temporal Upscaling Test (128 frames)" << std::endl;
     std::cout << "============================================" << std::endl;
-    memset(scratchBuffer, 0, safeBufferSize);
+    memset(scratchBuffer2, 0, safeBufferSize);
 
     FfxInterface ffxInterface2 = {};
     ffxGetInterfaceVK(&ffxInterface2, ffxGetDeviceVK(&vkDeviceContext),
-        scratchBuffer, safeBufferSize, 4);
+        scratchBuffer2, safeBufferSize, 4);
 
     FfxFsr2ContextDescription fsr2Desc = {};
     memset(&fsr2Desc, 0, sizeof(fsr2Desc));
@@ -826,364 +900,368 @@ int main() {
     std::cout << "[FSR2] Done." << std::endl;
 
     // =========================================================================
-    // FSR 2.3.3 - Static Image Upscaling
-    // Loads Native_1x.png, reads its actual dimensions, and upscales 2x.
-    // All Vulkan resources for this section are created fresh from the
-    // image dimensions so any PNG can be dropped in.
+    // FSR 3.1.4 - Temporal Upscaling (upscaler only, no frame generation)
     // =========================================================================
     std::cout << "\n============================================" << std::endl;
-    std::cout << "  FSR 2.3.3 Static Image Upscaling Test (128 frames)" << std::endl;
+    std::cout << "  FSR 3.1.4 Temporal Upscaling Test (128 frames)" << std::endl;
     std::cout << "============================================" << std::endl;
-
-    // ------------------------------------------------------------------
-    // Load the image and read its dimensions
-    // ------------------------------------------------------------------
-    int imgW = 0, imgH = 0, imgChannels = 0;
-    unsigned char* imgData = stbi_load("Native_1x.png",
-        &imgW, &imgH, &imgChannels, 4);
-    if (!imgData) {
-        std::cout << "[FATAL] Could not load Native_1x.png" << std::endl;
-        return 1;
-    }
-    std::cout << "[Static] Loaded Native_1x.png ("
-              << imgW << "x" << imgH << ")" << std::endl;
-
-    // Output is exactly 2x in each dimension
-    const uint32_t sImgW  = (uint32_t)imgW;
-    const uint32_t sImgH  = (uint32_t)imgH;
-    const uint32_t sOutW  = sImgW * 2;
-    const uint32_t sOutH  = sImgH * 2;
-
-    std::cout << "[Static] Input:  " << sImgW << "x" << sImgH << std::endl;
-    std::cout << "[Static] Output: " << sOutW << "x" << sOutH << std::endl;
-
-    // Convert sRGB uint8 -> linear float RGBA
-    std::vector<float> staticImageLinear(sImgW * sImgH * 4);
-    for (int i = 0; i < (int)(sImgW * sImgH); i++) {
-        for (int c = 0; c < 3; c++) {
-            float srgb = imgData[i*4+c] / 255.0f;
-            staticImageLinear[i*4+c] = powf(srgb, 2.2f);
-        }
-        staticImageLinear[i*4+3] = 1.0f;
-    }
-    stbi_image_free(imgData);
-
-    // ------------------------------------------------------------------
-    // Vulkan resources sized for this image
-    // ------------------------------------------------------------------
-    VkDeviceSize sColorUploadSize = sImgW * sImgH * 4 * sizeof(float);
-    VkDeviceSize sDepthUploadSize = sImgW * sImgH * 1 * sizeof(float);
-    VkDeviceSize sMvUploadSize    = sImgW * sImgH * 2 * sizeof(float);
-    VkDeviceSize sUploadSize      = sColorUploadSize + sDepthUploadSize
-                                    + sMvUploadSize;
-    VkDeviceSize sOutSize         = sOutW * sOutH * 4 * sizeof(float);
-
-    VkBuffer sUploadBuffer; VkDeviceMemory sUploadMemory;
-    createBuffer(device, physicalDevice, sUploadSize,
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        sUploadBuffer, sUploadMemory);
-
-    VkBuffer sDownloadBuffer; VkDeviceMemory sDownloadMemory;
-    createBuffer(device, physicalDevice, sOutSize,
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        sDownloadBuffer, sDownloadMemory);
-
-    VkImage sColorImage;  VkDeviceMemory sColorMem;
-    VkImage sDepthImage;  VkDeviceMemory sDepthMem;
-    VkImage sMvImage;     VkDeviceMemory sMvMem;
-    VkImage sOutputImage; VkDeviceMemory sOutputMem;
-    VkImage sExpImage;    VkDeviceMemory sExpMem;
-
-    VkImageCreateInfo sColorInfo = createImage(device, physicalDevice,
-        sImgW, sImgH, VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-        VK_IMAGE_USAGE_STORAGE_BIT,
-        sColorImage, sColorMem);
-
-    VkImageCreateInfo sDepthInfo = createImage(device, physicalDevice,
-        sImgW, sImgH, VK_FORMAT_R32_SFLOAT,
-        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-        VK_IMAGE_USAGE_STORAGE_BIT,
-        sDepthImage, sDepthMem);
-
-    VkImageCreateInfo sMvInfo = createImage(device, physicalDevice,
-        sImgW, sImgH, VK_FORMAT_R32G32_SFLOAT,
-        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-        VK_IMAGE_USAGE_STORAGE_BIT,
-        sMvImage, sMvMem);
-
-    VkImageCreateInfo sOutputInfo = createImage(device, physicalDevice,
-        sOutW, sOutH, VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
-        VK_IMAGE_USAGE_SAMPLED_BIT,
-        sOutputImage, sOutputMem);
-
-    VkImageCreateInfo sExpInfo = createImage(device, physicalDevice,
-        1, 1, VK_FORMAT_R32_SFLOAT,
-        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-        sExpImage, sExpMem);
-
-    VkImageLayout sColorLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
-    VkImageLayout sDepthLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
-    VkImageLayout sMvLayout     = VK_IMAGE_LAYOUT_UNDEFINED;
-    VkImageLayout sOutputLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    VkImageLayout sExpLayout    = VK_IMAGE_LAYOUT_UNDEFINED;
-
-    VkImageSubresourceRange sColorRange = {
-        VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-
-    VkBufferImageCopy sOutRegion = {};
-    sOutRegion.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-    sOutRegion.imageExtent = { sOutW, sOutH, 1 };
-
-    // ------------------------------------------------------------------
-    // FSR2 context for static image
-    // ------------------------------------------------------------------
-    memset(scratchBuffer, 0, safeBufferSize);
+    memset(scratchBuffer3, 0, safeBufferSize);
 
     FfxInterface ffxInterface3 = {};
     ffxGetInterfaceVK(&ffxInterface3, ffxGetDeviceVK(&vkDeviceContext),
-        scratchBuffer, safeBufferSize, 4);
+        scratchBuffer3, safeBufferSize, 4);
 
-    FfxFsr2ContextDescription fsr2StaticDesc = {};
-    memset(&fsr2StaticDesc, 0, sizeof(fsr2StaticDesc));
-    fsr2StaticDesc.flags =
-        FFX_FSR2_ENABLE_DEBUG_CHECKING     |
-        FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE |
-        FFX_FSR2_ENABLE_AUTO_EXPOSURE      |
-        FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION;
-    // No DEPTH_INVERTED: depth is constant 0.5 in standard [0..1] range.
+    // Create FSR3 upscaler context description.
+    // We use FFX_FSR3UPSCALER_ENABLE_UPSCALING_ONLY via the upscaler-specific
+    // flags. Frame generation and optical flow are not used in this testbed.
+    FfxFsr3UpscalerContextDescription fsr3Desc = {};
+    memset(&fsr3Desc, 0, sizeof(fsr3Desc));
+    fsr3Desc.flags =
+        FFX_FSR3UPSCALER_ENABLE_HIGH_DYNAMIC_RANGE |
+        FFX_FSR3UPSCALER_ENABLE_AUTO_EXPOSURE      |
+        FFX_FSR3UPSCALER_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION |
+        FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED     |
+        FFX_FSR3UPSCALER_ENABLE_DEBUG_CHECKING;
+    fsr3Desc.maxRenderSize  = { renderW, renderH };
+    fsr3Desc.maxUpscaleSize = { displayW, displayH };
+    fsr3Desc.fpMessage      = Fsr3MessageCallback;
+    fsr3Desc.backendInterface = ffxInterface3;
 
-    fsr2StaticDesc.maxRenderSize    = { sImgW, sImgH };
-    fsr2StaticDesc.displaySize      = { sOutW, sOutH };
-    fsr2StaticDesc.fpMessage        = FfxMessageCallback;
-    fsr2StaticDesc.backendInterface = ffxInterface3;
+    FfxFsr3UpscalerContext* fsr3Context =
+        (FfxFsr3UpscalerContext*)_aligned_malloc(
+            sizeof(FfxFsr3UpscalerContext), 64);
+    memset(fsr3Context, 0, sizeof(FfxFsr3UpscalerContext));
 
-    FfxFsr2Context* fsr2StaticContext =
-        (FfxFsr2Context*)_aligned_malloc(sizeof(FfxFsr2Context), 64);
-    memset(fsr2StaticContext, 0, sizeof(FfxFsr2Context));
-    if (ffxFsr2ContextCreate(fsr2StaticContext, &fsr2StaticDesc) != FFX_OK) {
-        std::cout << "[FATAL] ffxFsr2ContextCreate (static) failed!\n";
+    if (ffxFsr3UpscalerContextCreate(fsr3Context, &fsr3Desc) != FFX_OK) {
+        std::cout << "[FATAL] ffxFsr3UpscalerContextCreate failed!\n";
         return 1;
     }
-    std::cout << "[Static] FSR2 context created OK." << std::endl;
+    std::cout << "[FSR3] Context created OK." << std::endl;
 
-    // Transition output image to GENERAL
+    // Query shared resource descriptions.
+    // FSR3 requires three externally-allocated shared resources:
+    //   - reconstructedPrevNearestDepth
+    //   - dilatedDepth
+    //   - dilatedMotionVectors
+    // These are written by the upscaler and can be read by frame generation
+    // (which we don't use here, but we must still allocate them).
+    FfxFsr3UpscalerSharedResourceDescriptions sharedResDescs = {};
+    if (ffxFsr3UpscalerGetSharedResourceDescriptions(
+            fsr3Context, &sharedResDescs) != FFX_OK) {
+        std::cout << "[FATAL] ffxFsr3UpscalerGetSharedResourceDescriptions failed!\n";
+        return 1;
+    }
+
+    std::cout << "[FSR3] Shared resource descriptions:" << std::endl;
+    std::cout << "[FSR3]   reconstructedPrevNearestDepth: "
+              << sharedResDescs.reconstructedPrevNearestDepth.resourceDescription.width
+              << "x"
+              << sharedResDescs.reconstructedPrevNearestDepth.resourceDescription.height
+              << " fmt=" << (int)sharedResDescs.reconstructedPrevNearestDepth.resourceDescription.format
+              << std::endl;
+    std::cout << "[FSR3]   dilatedDepth: "
+              << sharedResDescs.dilatedDepth.resourceDescription.width
+              << "x"
+              << sharedResDescs.dilatedDepth.resourceDescription.height
+              << " fmt=" << (int)sharedResDescs.dilatedDepth.resourceDescription.format
+              << std::endl;
+    std::cout << "[FSR3]   dilatedMotionVectors: "
+              << sharedResDescs.dilatedMotionVectors.resourceDescription.width
+              << "x"
+              << sharedResDescs.dilatedMotionVectors.resourceDescription.height
+              << " fmt=" << (int)sharedResDescs.dilatedMotionVectors.resourceDescription.format
+              << std::endl;
+    std::cout.flush();
+
+    // Allocate the three shared images from the descriptions returned by the SDK.
+    SharedImage siReconstructed = createSharedImage(device, physicalDevice,
+        sharedResDescs.reconstructedPrevNearestDepth);
+    SharedImage siDilatedDepth  = createSharedImage(device, physicalDevice,
+        sharedResDescs.dilatedDepth);
+    SharedImage siDilatedMV     = createSharedImage(device, physicalDevice,
+        sharedResDescs.dilatedMotionVectors);
+
+    std::cout << "[FSR3] Shared images allocated OK." << std::endl;
+
+    // Transition all shared images to GENERAL so FSR3 can read/write freely.
     {
         vkResetCommandBuffer(cmd, 0);
         vkBeginCommandBuffer(cmd, &beginInfo);
-        transition(cmd, sOutputImage, sOutputLayout,
+
+        transition(cmd, siReconstructed.image, siReconstructed.layout,
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT,
+            siReconstructed.info.mipLevels);
+        transition(cmd, siDilatedDepth.image, siDilatedDepth.layout,
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT,
+            siDilatedDepth.info.mipLevels);
+        transition(cmd, siDilatedMV.image, siDilatedMV.layout,
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT,
+            siDilatedMV.info.mipLevels);
+
+        // Also reset output image layout for FSR3.
+        outputLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        transition(cmd, outputImage, outputLayout,
             VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
+
         vkEndCommandBuffer(cmd);
         vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
         vkQueueWaitIdle(queue);
     }
 
-    FfxResource sColorRes = ffxGetResourceVK(sColorImage,
-        ffxGetImageResourceDescriptionVK(sColorImage, sColorInfo,
+    // Reset input image layouts for FSR3 frame loop.
+    colorLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    depthLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    mvLayout    = VK_IMAGE_LAYOUT_UNDEFINED;
+    expLayout   = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    // Build FfxResource wrappers for the fixed images.
+    // The shared resources need UAV usage since FSR3 writes into them.
+    FfxResource colorRes3 = ffxGetResourceVK(colorImage,
+        ffxGetImageResourceDescriptionVK(colorImage, colorInfo,
             FFX_RESOURCE_USAGE_READ_ONLY),
-        L"FSR2Static_Color", FFX_RESOURCE_STATE_COMPUTE_READ);
-    FfxResource sDepthRes = ffxGetResourceVK(sDepthImage,
-        ffxGetImageResourceDescriptionVK(sDepthImage, sDepthInfo,
+        L"FSR3_Color", FFX_RESOURCE_STATE_COMPUTE_READ);
+    FfxResource depthRes3 = ffxGetResourceVK(depthImage,
+        ffxGetImageResourceDescriptionVK(depthImage, depthInfo,
             FFX_RESOURCE_USAGE_READ_ONLY),
-        L"FSR2Static_Depth", FFX_RESOURCE_STATE_COMPUTE_READ);
-    FfxResource sMvRes = ffxGetResourceVK(sMvImage,
-        ffxGetImageResourceDescriptionVK(sMvImage, sMvInfo,
+        L"FSR3_Depth", FFX_RESOURCE_STATE_COMPUTE_READ);
+    FfxResource mvRes3 = ffxGetResourceVK(mvImage,
+        ffxGetImageResourceDescriptionVK(mvImage, mvInfo,
             FFX_RESOURCE_USAGE_READ_ONLY),
-        L"FSR2Static_MVs", FFX_RESOURCE_STATE_COMPUTE_READ);
-    FfxResource sOutputRes = ffxGetResourceVK(sOutputImage,
-        ffxGetImageResourceDescriptionVK(sOutputImage, sOutputInfo,
+        L"FSR3_MVs", FFX_RESOURCE_STATE_COMPUTE_READ);
+    FfxResource outputRes3 = ffxGetResourceVK(outputImage,
+        ffxGetImageResourceDescriptionVK(outputImage, outputInfo,
             FFX_RESOURCE_USAGE_UAV),
-        L"FSR2Static_Output", FFX_RESOURCE_STATE_UNORDERED_ACCESS);
+        L"FSR3_Output", FFX_RESOURCE_STATE_UNORDERED_ACCESS);
 
-    int32_t staticPhaseCount = ffxFsr2GetJitterPhaseCount(sImgW, sOutW);
-    std::cout << "[Static] Jitter phase count: " << staticPhaseCount << std::endl;
+    // Build FfxResource wrappers for shared resources.
+    // We pass the VkImageCreateInfo from createSharedImage so the description
+    // is accurate for the actual allocated image.
+    FfxResource reconRes = ffxGetResourceVK(siReconstructed.image,
+        ffxGetImageResourceDescriptionVK(siReconstructed.image,
+            siReconstructed.info, FFX_RESOURCE_USAGE_UAV),
+        L"FSR3_ReconPrevDepth", FFX_RESOURCE_STATE_UNORDERED_ACCESS);
+    FfxResource dilDepthRes = ffxGetResourceVK(siDilatedDepth.image,
+        ffxGetImageResourceDescriptionVK(siDilatedDepth.image,
+            siDilatedDepth.info, FFX_RESOURCE_USAGE_UAV),
+        L"FSR3_DilatedDepth", FFX_RESOURCE_STATE_UNORDERED_ACCESS);
+    FfxResource dilMVRes = ffxGetResourceVK(siDilatedMV.image,
+        ffxGetImageResourceDescriptionVK(siDilatedMV.image,
+            siDilatedMV.info, FFX_RESOURCE_USAGE_UAV),
+        L"FSR3_DilatedMV", FFX_RESOURCE_STATE_UNORDERED_ACCESS);
 
-    const int staticTotalFrames = 128;
-    std::cout << "[Static] Running " << staticTotalFrames
+    int32_t phaseCount3 =
+        ffxFsr3UpscalerGetJitterPhaseCount(renderW, displayW);
+    std::cout << "[FSR3] Jitter phase count: " << phaseCount3 << std::endl;
+
+    const int totalFrames3 = 128;
+    std::cout << "[FSR3] Running " << totalFrames3
               << " temporal accumulation frames..." << std::endl;
     std::cout.flush();
 
-    int32_t staticJitterIndex = 0;
-    float staticPrevJX = 0.0f, staticPrevJY = 0.0f;
+    int32_t jitterIndex3 = 0;
+    float prevJX3 = 0.0f, prevJY3 = 0.0f;
 
-    for (int i = 0; i < staticTotalFrames; i++) {
-        ++staticJitterIndex;
+    for (int i = 0; i < totalFrames3; i++) {
+        ++jitterIndex3;
 
-        float jX = 0.0f, jY = 0.0f;
-        ffxFsr2GetJitterOffset(&jX, &jY, staticJitterIndex, staticPhaseCount);
+        float jX3 = 0.0f, jY3 = 0.0f;
+        ffxFsr3UpscalerGetJitterOffset(&jX3, &jY3, jitterIndex3, phaseCount3);
 
-        std::vector<float> fColor(sImgW * sImgH * 4);
-        std::vector<float> fDepth(sImgW * sImgH);
-        std::vector<float> fMV(sImgW * sImgH * 2);
+        std::vector<float> fColor3(renderW * renderH * 4);
+        std::vector<float> fDepth3(renderW * renderH);
+        std::vector<float> fMV3(renderW * renderH * 2);
 
-        sampleStaticImageJittered(
-            staticImageLinear.data(), sImgW, sImgH,
-            jX, jY, staticPrevJX, staticPrevJY,
-            fColor.data(), fDepth.data(), fMV.data());
+        renderScene(renderW, renderH, jX3, jY3, prevJX3, prevJY3,
+            fColor3.data(), fDepth3.data(), fMV3.data());
 
-        void* mappedData;
-        vkMapMemory(device, sUploadMemory, 0, sUploadSize, 0, &mappedData);
-        memcpy((uint8_t*)mappedData,
-            fColor.data(), sColorUploadSize);
-        memcpy((uint8_t*)mappedData + sColorUploadSize,
-            fDepth.data(), sDepthUploadSize);
-        memcpy((uint8_t*)mappedData + sColorUploadSize + sDepthUploadSize,
-            fMV.data(), sMvUploadSize);
-        vkUnmapMemory(device, sUploadMemory);
+        void* mappedData3;
+        vkMapMemory(device, uploadMemory, 0, uploadSize, 0, &mappedData3);
+        memcpy((uint8_t*)mappedData3, fColor3.data(), colorUploadSize);
+        memcpy((uint8_t*)mappedData3 + colorUploadSize,
+            fDepth3.data(), depthUploadSize);
+        memcpy((uint8_t*)mappedData3 + colorUploadSize + depthUploadSize,
+            fMV3.data(), mvUploadSize);
+        vkUnmapMemory(device, uploadMemory);
 
         vkResetCommandBuffer(cmd, 0);
         vkBeginCommandBuffer(cmd, &beginInfo);
 
-        transition(cmd, sColorImage, sColorLayout,
+        // Upload inputs.
+        transition(cmd, colorImage, colorLayout,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-        transition(cmd, sDepthImage, sDepthLayout,
+        transition(cmd, depthImage, depthLayout,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-        transition(cmd, sMvImage, sMvLayout,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-        transition(cmd, sExpImage, sExpLayout,
+        transition(cmd, mvImage, mvLayout,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
 
-        VkBufferImageCopy cR = {};
-        cR.bufferOffset = 0;
-        cR.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-        cR.imageExtent = { sImgW, sImgH, 1 };
-        vkCmdCopyBufferToImage(cmd, sUploadBuffer, sColorImage,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cR);
+        VkBufferImageCopy cR3 = {};
+        cR3.bufferOffset = 0;
+        cR3.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        cR3.imageExtent = { renderW, renderH, 1 };
+        vkCmdCopyBufferToImage(cmd, uploadBuffer, colorImage,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cR3);
 
-        VkBufferImageCopy dR = {};
-        dR.bufferOffset = sColorUploadSize;
-        dR.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-        dR.imageExtent = { sImgW, sImgH, 1 };
-        vkCmdCopyBufferToImage(cmd, sUploadBuffer, sDepthImage,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &dR);
+        VkBufferImageCopy dR3 = {};
+        dR3.bufferOffset = colorUploadSize;
+        dR3.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        dR3.imageExtent = { renderW, renderH, 1 };
+        vkCmdCopyBufferToImage(cmd, uploadBuffer, depthImage,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &dR3);
 
-        VkBufferImageCopy mR = {};
-        mR.bufferOffset = sColorUploadSize + sDepthUploadSize;
-        mR.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-        mR.imageExtent = { sImgW, sImgH, 1 };
-        vkCmdCopyBufferToImage(cmd, sUploadBuffer, sMvImage,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &mR);
+        VkBufferImageCopy mR3 = {};
+        mR3.bufferOffset = colorUploadSize + depthUploadSize;
+        mR3.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        mR3.imageExtent = { renderW, renderH, 1 };
+        vkCmdCopyBufferToImage(cmd, uploadBuffer, mvImage,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &mR3);
 
-        VkClearColorValue sExpClear = {{ 1.0f, 0.0f, 0.0f, 0.0f }};
-        vkCmdClearColorImage(cmd, sExpImage,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            &sExpClear, 1, &sColorRange);
-
-        transition(cmd, sColorImage, sColorLayout,
+        transition(cmd, colorImage, colorLayout,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-        transition(cmd, sDepthImage, sDepthLayout,
+        transition(cmd, depthImage, depthLayout,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-        transition(cmd, sMvImage, sMvLayout,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-        transition(cmd, sExpImage, sExpLayout,
+        transition(cmd, mvImage, mvLayout,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
 
-        FfxFsr2DispatchDescription dispatchDesc = {};
-        memset(&dispatchDesc, 0, sizeof(dispatchDesc));
-        dispatchDesc.commandList   = ffxGetCommandListVK(cmd);
-        dispatchDesc.color         = sColorRes;
-        dispatchDesc.depth         = sDepthRes;
-        dispatchDesc.motionVectors = sMvRes;
-        dispatchDesc.output        = sOutputRes;
+        // Fill in FSR3 upscaler dispatch description.
+        // Key differences from FSR2:
+        //   - dilatedDepth, dilatedMotionVectors, reconstructedPrevNearestDepth
+        //     are explicit external resources the caller manages.
+        //   - upscaleSize replaces displaySize (FSR3 supports asymmetric output).
+        //   - No separate exposure resource needed when AUTO_EXPOSURE is set.
+        //   - frameID is not present in FfxFsr3UpscalerDispatchDescription
+        //     (it is only in FfxFsr3DispatchUpscaleDescription used by the
+        //     full FSR3 context which includes frame generation).
+        FfxFsr3UpscalerDispatchDescription dispatchDesc3 = {};
+        memset(&dispatchDesc3, 0, sizeof(dispatchDesc3));
 
-        dispatchDesc.jitterOffset.x = jX;
-        dispatchDesc.jitterOffset.y = jY;
+        dispatchDesc3.commandList    = ffxGetCommandListVK(cmd);
+        dispatchDesc3.color          = colorRes3;
+        dispatchDesc3.depth          = depthRes3;
+        dispatchDesc3.motionVectors  = mvRes3;
+        dispatchDesc3.output         = outputRes3;
 
-        dispatchDesc.motionVectorScale.x = (float)sImgW;
-        dispatchDesc.motionVectorScale.y = (float)sImgH;
+        // Shared resources (written by this pass, potentially read by FG).
+        dispatchDesc3.dilatedDepth               = dilDepthRes;
+        dispatchDesc3.dilatedMotionVectors        = dilMVRes;
+        dispatchDesc3.reconstructedPrevNearestDepth = reconRes;
 
-        dispatchDesc.renderSize = { sImgW, sImgH };
+        // Optional resources - pass null (zero-initialised FfxResource).
+        // exposure:                 not provided, AUTO_EXPOSURE flag is set.
+        // reactive:                 not provided (no reactive mask).
+        // transparencyAndComposition: not provided.
+        // These are already zero from memset above.
 
-        dispatchDesc.enableSharpening = true;
-        dispatchDesc.sharpness        = 0.8f;
-        dispatchDesc.frameTimeDelta   = 16.6f;
-        dispatchDesc.preExposure      = 1.0f;
-        dispatchDesc.reset            = (i == 0);
+        dispatchDesc3.jitterOffset.x = jX3;
+        dispatchDesc3.jitterOffset.y = jY3;
 
-        dispatchDesc.cameraNear             = 0.1f;
-        dispatchDesc.cameraFar              = 100.0f;
-        dispatchDesc.cameraFovAngleVertical = 1.04719755f;
-        dispatchDesc.viewSpaceToMetersFactor = 1.0f;
+        dispatchDesc3.motionVectorScale.x = (float)renderW;
+        dispatchDesc3.motionVectorScale.y = (float)renderH;
 
-        if (ffxFsr2ContextDispatch(fsr2StaticContext, &dispatchDesc) != FFX_OK) {
-            std::cout << "[FATAL] FSR2 static dispatch failed frame "
+        dispatchDesc3.renderSize  = { renderW,  renderH  };
+        dispatchDesc3.upscaleSize = { displayW, displayH };
+
+        dispatchDesc3.enableSharpening = true;
+        dispatchDesc3.sharpness        = 0.8f;
+        dispatchDesc3.frameTimeDelta   = 16.6f;
+        dispatchDesc3.preExposure      = 1.0f;
+        dispatchDesc3.reset            = (i == 0);
+
+        // Inverted depth: near=FLT_MAX, far=actual near plane value.
+        dispatchDesc3.cameraNear             = FLT_MAX;
+        dispatchDesc3.cameraFar              = 0.1f;
+        dispatchDesc3.cameraFovAngleVertical = 1.04719755f;
+        dispatchDesc3.viewSpaceToMetersFactor = 1.0f;
+
+        dispatchDesc3.flags = 0; // no debug view
+
+        if (ffxFsr3UpscalerContextDispatch(fsr3Context, &dispatchDesc3)
+                != FFX_OK) {
+            std::cout << "[FATAL] FSR3 dispatch failed frame "
                       << i << std::endl;
             return 1;
         }
 
         vkEndCommandBuffer(cmd);
 
-        VkResult submitResult = vkQueueSubmit(
+        VkResult submitResult3 = vkQueueSubmit(
             queue, 1, &submitInfo, VK_NULL_HANDLE);
-        if (submitResult != VK_SUCCESS) {
+        if (submitResult3 != VK_SUCCESS) {
             std::cout << "[FATAL] vkQueueSubmit failed frame " << i
-                      << " VkResult=" << submitResult << std::endl;
+                      << " VkResult=" << submitResult3 << std::endl;
             return 1;
         }
-        VkResult waitResult = vkQueueWaitIdle(queue);
-        if (waitResult != VK_SUCCESS) {
+        VkResult waitResult3 = vkQueueWaitIdle(queue);
+        if (waitResult3 != VK_SUCCESS) {
             std::cout << "[FATAL] vkQueueWaitIdle failed frame " << i
-                      << " VkResult=" << waitResult << std::endl;
+                      << " VkResult=" << waitResult3 << std::endl;
             return 1;
         }
 
-        int frameNum = i + 1;
-        if (frameNum % 32 == 0)
-            std::cout << "[Static] Frame " << frameNum << "/"
-                      << staticTotalFrames << " done" << std::endl;
+        int frameNum3 = i + 1;
+        if (frameNum3 == 32 || frameNum3 == 64 ||
+            frameNum3 == 96 || frameNum3 == 128) {
 
-        staticPrevJX = jX;
-        staticPrevJY = jY;
+            vkResetCommandBuffer(cmd, 0);
+            vkBeginCommandBuffer(cmd, &beginInfo);
+            transition(cmd, outputImage, outputLayout,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                VK_IMAGE_ASPECT_COLOR_BIT);
+            vkCmdCopyImageToBuffer(cmd, outputImage,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                downloadBuffer, 1, &outRegion);
+            transition(cmd, outputImage, outputLayout,
+                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
+            vkEndCommandBuffer(cmd);
+            vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
+            vkQueueWaitIdle(queue);
+
+            vkMapMemory(device, downloadMemory, 0, outSize, 0, &outData);
+            std::string fname3 = "FSR_3.1.4_frame" +
+                                 std::to_string(frameNum3) + ".png";
+            saveFloatImage(fname3, displayW, displayH, (float*)outData);
+            vkUnmapMemory(device, downloadMemory);
+
+            std::cout << "[FSR3] Snapshot saved at frame "
+                      << frameNum3 << std::endl;
+        }
+
+        if (frameNum3 % 32 == 0)
+            std::cout << "[FSR3] Frame " << frameNum3 << "/"
+                      << totalFrames3 << " done" << std::endl;
+
+        prevJX3 = jX3;
+        prevJY3 = jY3;
     }
 
-    // Download and save
+    // Final FSR3 download.
     vkResetCommandBuffer(cmd, 0);
     vkBeginCommandBuffer(cmd, &beginInfo);
-    transition(cmd, sOutputImage, sOutputLayout,
+    transition(cmd, outputImage, outputLayout,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-    vkCmdCopyImageToBuffer(cmd, sOutputImage,
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        sDownloadBuffer, 1, &sOutRegion);
+    vkCmdCopyImageToBuffer(cmd, outputImage,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, downloadBuffer, 1, &outRegion);
     vkEndCommandBuffer(cmd);
     vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
     vkQueueWaitIdle(queue);
 
-    void* sOutData;
-    vkMapMemory(device, sDownloadMemory, 0, sOutSize, 0, &sOutData);
-    saveFloatImage("FSR_2.3.3_static_2x.png", sOutW, sOutH,
-        (float*)sOutData);
-    vkUnmapMemory(device, sDownloadMemory);
+    vkMapMemory(device, downloadMemory, 0, outSize, 0, &outData);
+    saveFloatImage("FSR_3.1.4_2x.png", displayW, displayH, (float*)outData);
+    vkUnmapMemory(device, downloadMemory);
 
-    ffxFsr2ContextDestroy(fsr2StaticContext);
-    _aligned_free(fsr2StaticContext);
-    std::cout << "[Static] Done." << std::endl;
-
-    // ------------------------------------------------------------------
-    // Cleanup static image resources
-    // ------------------------------------------------------------------
-    vkDestroyImage(device, sColorImage,  nullptr);
-    vkFreeMemory(device,   sColorMem,    nullptr);
-    vkDestroyImage(device, sDepthImage,  nullptr);
-    vkFreeMemory(device,   sDepthMem,    nullptr);
-    vkDestroyImage(device, sMvImage,     nullptr);
-    vkFreeMemory(device,   sMvMem,       nullptr);
-    vkDestroyImage(device, sOutputImage, nullptr);
-    vkFreeMemory(device,   sOutputMem,   nullptr);
-    vkDestroyImage(device, sExpImage,    nullptr);
-    vkFreeMemory(device,   sExpMem,      nullptr);
-    vkDestroyBuffer(device, sUploadBuffer,   nullptr);
-    vkFreeMemory(device,    sUploadMemory,   nullptr);
-    vkDestroyBuffer(device, sDownloadBuffer, nullptr);
-    vkFreeMemory(device,    sDownloadMemory, nullptr);
+    ffxFsr3UpscalerContextDestroy(fsr3Context);
+    _aligned_free(fsr3Context);
+    std::cout << "[FSR3] Done." << std::endl;
 
     // =========================================================================
-    // CLEANUP (3D scene resources)
+    // CLEANUP
     // =========================================================================
+    vkDestroyImage(device, siReconstructed.image, nullptr);
+    vkFreeMemory(device,   siReconstructed.memory, nullptr);
+    vkDestroyImage(device, siDilatedDepth.image, nullptr);
+    vkFreeMemory(device,   siDilatedDepth.memory, nullptr);
+    vkDestroyImage(device, siDilatedMV.image, nullptr);
+    vkFreeMemory(device,   siDilatedMV.memory, nullptr);
+
     vkDestroyImage(device, colorImage,   nullptr);
     vkFreeMemory(device,   colorMem,     nullptr);
     vkDestroyImage(device, depthImage,   nullptr);
@@ -1201,7 +1279,9 @@ int main() {
     vkDestroyCommandPool(device, commandPool, nullptr);
     vkDestroyDevice(device, nullptr);
     vkDestroyInstance(instance, nullptr);
-    _aligned_free(scratchBuffer);
+    _aligned_free(scratchBuffer1);
+    _aligned_free(scratchBuffer2);
+    _aligned_free(scratchBuffer3);
 
     std::cout << "\n[Done] All tests complete." << std::endl;
     return 0;
