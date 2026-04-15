@@ -95,35 +95,33 @@ VkImageCreateInfo createImage(VkDevice device, VkPhysicalDevice physicalDevice,
     return imageInfo;
 }
 
-// Create a VkImage from an FfxCreateResourceDescription.
-// Maps FfxSurfaceFormat -> VkFormat and FfxResourceUsage -> VkImageUsageFlags.
 static VkFormat ffxFormatToVk(FfxSurfaceFormat fmt) {
     switch (fmt) {
-    case FFX_SURFACE_FORMAT_R32G32B32A32_FLOAT:   return VK_FORMAT_R32G32B32A32_SFLOAT;
-    case FFX_SURFACE_FORMAT_R32G32B32A32_UINT:    return VK_FORMAT_R32G32B32A32_UINT;
-    case FFX_SURFACE_FORMAT_R16G16B16A16_FLOAT:   return VK_FORMAT_R16G16B16A16_SFLOAT;
-    case FFX_SURFACE_FORMAT_R32G32_FLOAT:         return VK_FORMAT_R32G32_SFLOAT;
-    case FFX_SURFACE_FORMAT_R32G32_TYPELESS:      return VK_FORMAT_R32G32_SFLOAT;
-    case FFX_SURFACE_FORMAT_R8_UINT:              return VK_FORMAT_R8_UINT;
-    case FFX_SURFACE_FORMAT_R32_UINT:             return VK_FORMAT_R32_UINT;
-    case FFX_SURFACE_FORMAT_R8G8B8A8_UNORM:       return VK_FORMAT_R8G8B8A8_UNORM;
-    case FFX_SURFACE_FORMAT_R8G8B8A8_SRGB:        return VK_FORMAT_R8G8B8A8_SRGB;
-    case FFX_SURFACE_FORMAT_R11G11B10_FLOAT:      return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
-    case FFX_SURFACE_FORMAT_R16G16_FLOAT:         return VK_FORMAT_R16G16_SFLOAT;
-    case FFX_SURFACE_FORMAT_R16G16_UINT:          return VK_FORMAT_R16G16_UINT;
-    case FFX_SURFACE_FORMAT_R16G16_SINT:          return VK_FORMAT_R16G16_SINT;
-    case FFX_SURFACE_FORMAT_R16_FLOAT:            return VK_FORMAT_R16_SFLOAT;
-    case FFX_SURFACE_FORMAT_R16_UINT:             return VK_FORMAT_R16_UINT;
-    case FFX_SURFACE_FORMAT_R16_UNORM:            return VK_FORMAT_R16_UNORM;
-    case FFX_SURFACE_FORMAT_R16_SNORM:            return VK_FORMAT_R16_SNORM;
-    case FFX_SURFACE_FORMAT_R8_UNORM:             return VK_FORMAT_R8_UNORM;
-    case FFX_SURFACE_FORMAT_R32_FLOAT:            return VK_FORMAT_R32_SFLOAT;
-    case FFX_SURFACE_FORMAT_R8G8_UNORM:           return VK_FORMAT_R8G8_UNORM;
-    case FFX_SURFACE_FORMAT_R8G8_UINT:            return VK_FORMAT_R8G8_UINT;
-    case FFX_SURFACE_FORMAT_R32G32B32_FLOAT:      return VK_FORMAT_R32G32B32_SFLOAT;
-    case FFX_SURFACE_FORMAT_R16G16B16A16_TYPELESS:return VK_FORMAT_R16G16B16A16_SFLOAT;
-    case FFX_SURFACE_FORMAT_R10G10B10A2_UNORM:    return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
-    case FFX_SURFACE_FORMAT_R9G9B9E5_SHAREDEXP:   return VK_FORMAT_E5B9G9R9_UFLOAT_PACK32;
+    case FFX_SURFACE_FORMAT_R32G32B32A32_FLOAT:    return VK_FORMAT_R32G32B32A32_SFLOAT;
+    case FFX_SURFACE_FORMAT_R32G32B32A32_UINT:     return VK_FORMAT_R32G32B32A32_UINT;
+    case FFX_SURFACE_FORMAT_R16G16B16A16_FLOAT:    return VK_FORMAT_R16G16B16A16_SFLOAT;
+    case FFX_SURFACE_FORMAT_R32G32_FLOAT:          return VK_FORMAT_R32G32_SFLOAT;
+    case FFX_SURFACE_FORMAT_R32G32_TYPELESS:       return VK_FORMAT_R32G32_SFLOAT;
+    case FFX_SURFACE_FORMAT_R8_UINT:               return VK_FORMAT_R8_UINT;
+    case FFX_SURFACE_FORMAT_R32_UINT:              return VK_FORMAT_R32_UINT;
+    case FFX_SURFACE_FORMAT_R8G8B8A8_UNORM:        return VK_FORMAT_R8G8B8A8_UNORM;
+    case FFX_SURFACE_FORMAT_R8G8B8A8_SRGB:         return VK_FORMAT_R8G8B8A8_SRGB;
+    case FFX_SURFACE_FORMAT_R11G11B10_FLOAT:       return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+    case FFX_SURFACE_FORMAT_R16G16_FLOAT:          return VK_FORMAT_R16G16_SFLOAT;
+    case FFX_SURFACE_FORMAT_R16G16_UINT:           return VK_FORMAT_R16G16_UINT;
+    case FFX_SURFACE_FORMAT_R16G16_SINT:           return VK_FORMAT_R16G16_SINT;
+    case FFX_SURFACE_FORMAT_R16_FLOAT:             return VK_FORMAT_R16_SFLOAT;
+    case FFX_SURFACE_FORMAT_R16_UINT:              return VK_FORMAT_R16_UINT;
+    case FFX_SURFACE_FORMAT_R16_UNORM:             return VK_FORMAT_R16_UNORM;
+    case FFX_SURFACE_FORMAT_R16_SNORM:             return VK_FORMAT_R16_SNORM;
+    case FFX_SURFACE_FORMAT_R8_UNORM:              return VK_FORMAT_R8_UNORM;
+    case FFX_SURFACE_FORMAT_R32_FLOAT:             return VK_FORMAT_R32_SFLOAT;
+    case FFX_SURFACE_FORMAT_R8G8_UNORM:            return VK_FORMAT_R8G8_UNORM;
+    case FFX_SURFACE_FORMAT_R8G8_UINT:             return VK_FORMAT_R8G8_UINT;
+    case FFX_SURFACE_FORMAT_R32G32B32_FLOAT:       return VK_FORMAT_R32G32B32_SFLOAT;
+    case FFX_SURFACE_FORMAT_R16G16B16A16_TYPELESS: return VK_FORMAT_R16G16B16A16_SFLOAT;
+    case FFX_SURFACE_FORMAT_R10G10B10A2_UNORM:     return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+    case FFX_SURFACE_FORMAT_R9G9B9E5_SHAREDEXP:    return VK_FORMAT_E5B9G9R9_UFLOAT_PACK32;
     default:
         std::cout << "[WARN] Unknown FfxSurfaceFormat " << (int)fmt
                   << ", falling back to R32_SFLOAT" << std::endl;
@@ -133,9 +131,9 @@ static VkFormat ffxFormatToVk(FfxSurfaceFormat fmt) {
 
 static VkImageUsageFlags ffxUsageToVk(FfxResourceUsage usage) {
     VkImageUsageFlags flags =
-        VK_IMAGE_USAGE_SAMPLED_BIT |        // always SRV-able
-        VK_IMAGE_USAGE_TRANSFER_DST_BIT |   // for clears/uploads
-        VK_IMAGE_USAGE_TRANSFER_SRC_BIT;    // for readback
+        VK_IMAGE_USAGE_SAMPLED_BIT |
+        VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+        VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     if (usage & FFX_RESOURCE_USAGE_UAV)
         flags |= VK_IMAGE_USAGE_STORAGE_BIT;
     if (usage & FFX_RESOURCE_USAGE_RENDERTARGET)
@@ -150,15 +148,16 @@ struct SharedImage {
     VkImageLayout  layout = VK_IMAGE_LAYOUT_UNDEFINED;
 };
 
-static SharedImage createSharedImage(VkDevice device, VkPhysicalDevice physicalDevice,
+static SharedImage createSharedImage(VkDevice device,
+    VkPhysicalDevice physicalDevice,
     const FfxCreateResourceDescription& desc)
 {
     SharedImage si;
     VkFormat fmt = ffxFormatToVk(desc.resourceDescription.format);
     VkImageUsageFlags usage = ffxUsageToVk(desc.resourceDescription.usage);
 
-    uint32_t w = desc.resourceDescription.width;
-    uint32_t h = desc.resourceDescription.height;
+    uint32_t w    = desc.resourceDescription.width;
+    uint32_t h    = desc.resourceDescription.height;
     uint32_t mips = desc.resourceDescription.mipCount;
     if (mips == 0) {
         mips = 1;
@@ -167,16 +166,16 @@ static SharedImage createSharedImage(VkDevice device, VkPhysicalDevice physicalD
     }
 
     VkImageCreateInfo imageInfo = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-    imageInfo.imageType   = VK_IMAGE_TYPE_2D;
-    imageInfo.extent      = { w, h, 1 };
-    imageInfo.mipLevels   = mips;
-    imageInfo.arrayLayers = 1;
-    imageInfo.format      = fmt;
-    imageInfo.tiling      = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.imageType    = VK_IMAGE_TYPE_2D;
+    imageInfo.extent       = { w, h, 1 };
+    imageInfo.mipLevels    = mips;
+    imageInfo.arrayLayers  = 1;
+    imageInfo.format       = fmt;
+    imageInfo.tiling       = VK_IMAGE_TILING_OPTIMAL;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    imageInfo.usage       = usage;
-    imageInfo.samples     = VK_SAMPLE_COUNT_1_BIT;
-    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imageInfo.usage        = usage;
+    imageInfo.samples      = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.sharingMode  = VK_SHARING_MODE_EXCLUSIVE;
 
     vkCreateImage(device, &imageInfo, nullptr, &si.image);
 
@@ -536,11 +535,6 @@ int main() {
     VkDeviceContext vkDeviceContext = {
         device, physicalDevice, vkGetDeviceProcAddr };
 
-    // We need separate scratch buffers for FSR1, FSR2, and FSR3 because
-    // each effect context uses its own scratch allocation internally.
-    // Using a single buffer shared between multiple contexts would
-    // cause memory corruption as each call to ffxGetInterfaceVK
-    // sets up its own internal allocator within the same memory region.
     size_t safeBufferSize =
         ffxGetScratchMemorySizeVK(physicalDevice, 4) * 2;
 
@@ -911,9 +905,6 @@ int main() {
     ffxGetInterfaceVK(&ffxInterface3, ffxGetDeviceVK(&vkDeviceContext),
         scratchBuffer3, safeBufferSize, 4);
 
-    // Create FSR3 upscaler context description.
-    // We use FFX_FSR3UPSCALER_ENABLE_UPSCALING_ONLY via the upscaler-specific
-    // flags. Frame generation and optical flow are not used in this testbed.
     FfxFsr3UpscalerContextDescription fsr3Desc = {};
     memset(&fsr3Desc, 0, sizeof(fsr3Desc));
     fsr3Desc.flags =
@@ -938,13 +929,6 @@ int main() {
     }
     std::cout << "[FSR3] Context created OK." << std::endl;
 
-    // Query shared resource descriptions.
-    // FSR3 requires three externally-allocated shared resources:
-    //   - reconstructedPrevNearestDepth
-    //   - dilatedDepth
-    //   - dilatedMotionVectors
-    // These are written by the upscaler and can be read by frame generation
-    // (which we don't use here, but we must still allocate them).
     FfxFsr3UpscalerSharedResourceDescriptions sharedResDescs = {};
     if (ffxFsr3UpscalerGetSharedResourceDescriptions(
             fsr3Context, &sharedResDescs) != FFX_OK) {
@@ -973,7 +957,6 @@ int main() {
               << std::endl;
     std::cout.flush();
 
-    // Allocate the three shared images from the descriptions returned by the SDK.
     SharedImage siReconstructed = createSharedImage(device, physicalDevice,
         sharedResDescs.reconstructedPrevNearestDepth);
     SharedImage siDilatedDepth  = createSharedImage(device, physicalDevice,
@@ -983,7 +966,12 @@ int main() {
 
     std::cout << "[FSR3] Shared images allocated OK." << std::endl;
 
-    // Transition all shared images to GENERAL so FSR3 can read/write freely.
+    // Transition shared images and output to GENERAL before the frame loop.
+    // We keep them in GENERAL permanently - FSR3 internally manages barriers
+    // between its passes via the backend, which expects the app-provided
+    // resources to start in the state declared in the FfxResource wrapper.
+    // By keeping them GENERAL and declaring UAV state in the wrappers, the
+    // backend's barrier logic will always see a consistent starting point.
     {
         vkResetCommandBuffer(cmd, 0);
         vkBeginCommandBuffer(cmd, &beginInfo);
@@ -998,7 +986,6 @@ int main() {
             VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT,
             siDilatedMV.info.mipLevels);
 
-        // Also reset output image layout for FSR3.
         outputLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         transition(cmd, outputImage, outputLayout,
             VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
@@ -1008,46 +995,36 @@ int main() {
         vkQueueWaitIdle(queue);
     }
 
-    // Reset input image layouts for FSR3 frame loop.
+    // Reset input layouts for the FSR3 frame loop.
     colorLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     depthLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     mvLayout    = VK_IMAGE_LAYOUT_UNDEFINED;
-    expLayout   = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    // Build FfxResource wrappers for the fixed images.
-    // The shared resources need UAV usage since FSR3 writes into them.
-    FfxResource colorRes3 = ffxGetResourceVK(colorImage,
+    // Pre-build the resource descriptions for the images whose VkImageCreateInfo
+    // is known and does not change frame to frame. We rebuild the FfxResource
+    // wrappers inside the loop each frame so that the state field accurately
+    // reflects the actual image layout at the point of dispatch.
+    FfxResourceDescription colorDesc3 =
         ffxGetImageResourceDescriptionVK(colorImage, colorInfo,
-            FFX_RESOURCE_USAGE_READ_ONLY),
-        L"FSR3_Color", FFX_RESOURCE_STATE_COMPUTE_READ);
-    FfxResource depthRes3 = ffxGetResourceVK(depthImage,
+            FFX_RESOURCE_USAGE_READ_ONLY);
+    FfxResourceDescription depthDesc3 =
         ffxGetImageResourceDescriptionVK(depthImage, depthInfo,
-            FFX_RESOURCE_USAGE_READ_ONLY),
-        L"FSR3_Depth", FFX_RESOURCE_STATE_COMPUTE_READ);
-    FfxResource mvRes3 = ffxGetResourceVK(mvImage,
+            FFX_RESOURCE_USAGE_READ_ONLY);
+    FfxResourceDescription mvDesc3 =
         ffxGetImageResourceDescriptionVK(mvImage, mvInfo,
-            FFX_RESOURCE_USAGE_READ_ONLY),
-        L"FSR3_MVs", FFX_RESOURCE_STATE_COMPUTE_READ);
-    FfxResource outputRes3 = ffxGetResourceVK(outputImage,
+            FFX_RESOURCE_USAGE_READ_ONLY);
+    FfxResourceDescription outputDesc3 =
         ffxGetImageResourceDescriptionVK(outputImage, outputInfo,
-            FFX_RESOURCE_USAGE_UAV),
-        L"FSR3_Output", FFX_RESOURCE_STATE_UNORDERED_ACCESS);
-
-    // Build FfxResource wrappers for shared resources.
-    // We pass the VkImageCreateInfo from createSharedImage so the description
-    // is accurate for the actual allocated image.
-    FfxResource reconRes = ffxGetResourceVK(siReconstructed.image,
+            FFX_RESOURCE_USAGE_UAV);
+    FfxResourceDescription reconDesc3 =
         ffxGetImageResourceDescriptionVK(siReconstructed.image,
-            siReconstructed.info, FFX_RESOURCE_USAGE_UAV),
-        L"FSR3_ReconPrevDepth", FFX_RESOURCE_STATE_UNORDERED_ACCESS);
-    FfxResource dilDepthRes = ffxGetResourceVK(siDilatedDepth.image,
+            siReconstructed.info, FFX_RESOURCE_USAGE_UAV);
+    FfxResourceDescription dilDepthDesc3 =
         ffxGetImageResourceDescriptionVK(siDilatedDepth.image,
-            siDilatedDepth.info, FFX_RESOURCE_USAGE_UAV),
-        L"FSR3_DilatedDepth", FFX_RESOURCE_STATE_UNORDERED_ACCESS);
-    FfxResource dilMVRes = ffxGetResourceVK(siDilatedMV.image,
+            siDilatedDepth.info, FFX_RESOURCE_USAGE_UAV);
+    FfxResourceDescription dilMVDesc3 =
         ffxGetImageResourceDescriptionVK(siDilatedMV.image,
-            siDilatedMV.info, FFX_RESOURCE_USAGE_UAV),
-        L"FSR3_DilatedMV", FFX_RESOURCE_STATE_UNORDERED_ACCESS);
+            siDilatedMV.info, FFX_RESOURCE_USAGE_UAV);
 
     int32_t phaseCount3 =
         ffxFsr3UpscalerGetJitterPhaseCount(renderW, displayW);
@@ -1086,7 +1063,7 @@ int main() {
         vkResetCommandBuffer(cmd, 0);
         vkBeginCommandBuffer(cmd, &beginInfo);
 
-        // Upload inputs.
+        // Upload inputs and transition to shader-read.
         transition(cmd, colorImage, colorLayout,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
         transition(cmd, depthImage, depthLayout,
@@ -1122,15 +1099,39 @@ int main() {
         transition(cmd, mvImage, mvLayout,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
 
-        // Fill in FSR3 upscaler dispatch description.
-        // Key differences from FSR2:
-        //   - dilatedDepth, dilatedMotionVectors, reconstructedPrevNearestDepth
-        //     are explicit external resources the caller manages.
-        //   - upscaleSize replaces displaySize (FSR3 supports asymmetric output).
-        //   - No separate exposure resource needed when AUTO_EXPOSURE is set.
-        //   - frameID is not present in FfxFsr3UpscalerDispatchDescription
-        //     (it is only in FfxFsr3DispatchUpscaleDescription used by the
-        //     full FSR3 context which includes frame generation).
+        // Rebuild FfxResource wrappers every frame.
+        //
+        // The state field in FfxResource tells the FSR3 backend what layout
+        // the resource is currently in so it can emit the correct barriers
+        // before its first use. If we keep stale wrappers from the previous
+        // frame the backend will emit wrong src-layout barriers on Lavapipe,
+        // which causes the resource contents to appear unchanged (validation
+        // may silently ignore the mismatch but Lavapipe reads the wrong data).
+        //
+        // Input images: after our upload they are in SHADER_READ_ONLY ->
+        //   FFX_RESOURCE_STATE_COMPUTE_READ.
+        // Output image: we keep it in GENERAL between frames ->
+        //   FFX_RESOURCE_STATE_UNORDERED_ACCESS.
+        // Shared images: we keep them in GENERAL permanently ->
+        //   FFX_RESOURCE_STATE_UNORDERED_ACCESS.
+        FfxResource colorRes3 = ffxGetResourceVK(colorImage,
+            colorDesc3, L"FSR3_Color", FFX_RESOURCE_STATE_COMPUTE_READ);
+        FfxResource depthRes3 = ffxGetResourceVK(depthImage,
+            depthDesc3, L"FSR3_Depth", FFX_RESOURCE_STATE_COMPUTE_READ);
+        FfxResource mvRes3 = ffxGetResourceVK(mvImage,
+            mvDesc3, L"FSR3_MVs", FFX_RESOURCE_STATE_COMPUTE_READ);
+        FfxResource outputRes3 = ffxGetResourceVK(outputImage,
+            outputDesc3, L"FSR3_Output", FFX_RESOURCE_STATE_UNORDERED_ACCESS);
+        FfxResource reconRes3 = ffxGetResourceVK(siReconstructed.image,
+            reconDesc3, L"FSR3_ReconPrevDepth",
+            FFX_RESOURCE_STATE_UNORDERED_ACCESS);
+        FfxResource dilDepthRes3 = ffxGetResourceVK(siDilatedDepth.image,
+            dilDepthDesc3, L"FSR3_DilatedDepth",
+            FFX_RESOURCE_STATE_UNORDERED_ACCESS);
+        FfxResource dilMVRes3 = ffxGetResourceVK(siDilatedMV.image,
+            dilMVDesc3, L"FSR3_DilatedMV",
+            FFX_RESOURCE_STATE_UNORDERED_ACCESS);
+
         FfxFsr3UpscalerDispatchDescription dispatchDesc3 = {};
         memset(&dispatchDesc3, 0, sizeof(dispatchDesc3));
 
@@ -1140,16 +1141,9 @@ int main() {
         dispatchDesc3.motionVectors  = mvRes3;
         dispatchDesc3.output         = outputRes3;
 
-        // Shared resources (written by this pass, potentially read by FG).
-        dispatchDesc3.dilatedDepth               = dilDepthRes;
-        dispatchDesc3.dilatedMotionVectors        = dilMVRes;
-        dispatchDesc3.reconstructedPrevNearestDepth = reconRes;
-
-        // Optional resources - pass null (zero-initialised FfxResource).
-        // exposure:                 not provided, AUTO_EXPOSURE flag is set.
-        // reactive:                 not provided (no reactive mask).
-        // transparencyAndComposition: not provided.
-        // These are already zero from memset above.
+        dispatchDesc3.dilatedDepth                  = dilDepthRes3;
+        dispatchDesc3.dilatedMotionVectors           = dilMVRes3;
+        dispatchDesc3.reconstructedPrevNearestDepth  = reconRes3;
 
         dispatchDesc3.jitterOffset.x = jX3;
         dispatchDesc3.jitterOffset.y = jY3;
@@ -1166,13 +1160,12 @@ int main() {
         dispatchDesc3.preExposure      = 1.0f;
         dispatchDesc3.reset            = (i == 0);
 
-        // Inverted depth: near=FLT_MAX, far=actual near plane value.
         dispatchDesc3.cameraNear             = FLT_MAX;
         dispatchDesc3.cameraFar              = 0.1f;
         dispatchDesc3.cameraFovAngleVertical = 1.04719755f;
         dispatchDesc3.viewSpaceToMetersFactor = 1.0f;
 
-        dispatchDesc3.flags = 0; // no debug view
+        dispatchDesc3.flags = 0;
 
         if (ffxFsr3UpscalerContextDispatch(fsr3Context, &dispatchDesc3)
                 != FFX_OK) {
@@ -1201,6 +1194,8 @@ int main() {
         if (frameNum3 == 32 || frameNum3 == 64 ||
             frameNum3 == 96 || frameNum3 == 128) {
 
+            // For readback: transition output to TRANSFER_SRC, copy, then
+            // return to GENERAL so the next dispatch sees it in UAV state.
             vkResetCommandBuffer(cmd, 0);
             vkBeginCommandBuffer(cmd, &beginInfo);
             transition(cmd, outputImage, outputLayout,
