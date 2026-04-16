@@ -2,7 +2,7 @@
 #define VOLK_IMPLEMENTATION
 #include "common.h"
 
-// Forward declarations of pass functions
+//  Forward declarations of pass functions
 void RunFsr1Pass(
     VkDevice, VkPhysicalDevice, VkQueue, VkCommandBuffer,
     VkBuffer, VkDeviceMemory, VkBuffer, VkDeviceMemory,
