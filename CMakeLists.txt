@@ -131,7 +131,7 @@ if(NOT ffx_sdk_v2_POPULATED)
     message(STATUS "[Diag-A] ffx_vk.cpp error line injector applied.")
 
     # =========================================================================
-    # PATCH ffx_vk.cpp (Patches A, B, C, D) - all OFF
+    # PATCH ffx_vk.cpp (Patches A, B, C, D)
     # =========================================================================
     file(READ "${VK_BACKEND_FILE}" vk_code)
 
@@ -276,6 +276,45 @@ if(NOT ffx_sdk_v2_POPULATED)
 
     file(WRITE "${FSR2_CPP_FILE}" "${fsr2_isolation_code}")
     message(STATUS "[Isolate] Pass isolation applied.")
+
+    # =========================================================================
+    # DIAGNOSTIC INJECTOR B: ffx_fsr3upscaler.cpp - trace every scheduled pass
+    # =========================================================================
+    set(FSR3UP_CPP_FILE
+        "${ffx_sdk_v2_SOURCE_DIR}/sdk/src/components/fsr3upscaler/ffx_fsr3upscaler.cpp"
+    )
+    file(READ "${FSR3UP_CPP_FILE}" fsr3up_code)
+
+    # Inject stdio include at top
+    string(PREPEND fsr3up_code "#include <stdio.h>\n")
+
+    # The FSR3 upscaler schedules GPU jobs via scheduleDispatch (or similar).
+    # We inject a printf wherever ffxFsr3UpscalerContextDispatch is defined
+    # to announce entry, and trace each pipeline dispatch.
+    # First: announce dispatch entry
+    string(REPLACE
+        "FfxErrorCode ffxFsr3UpscalerContextDispatch("
+        "FfxErrorCode ffxFsr3UpscalerContextDispatch_ORIG(\0"  # dummy to find it
+        fsr3up_code_test "${fsr3up_code}"
+    )
+    # Instead, inject at the top of the dispatch function body.
+    # We look for a unique string near the start of the dispatch function.
+    string(REPLACE
+        "FFX_RETURN_ON_ERROR(pContext, FFX_ERROR_INVALID_POINTER);"
+        "FFX_RETURN_ON_ERROR(pContext, FFX_ERROR_INVALID_POINTER); printf(\"[FSR3-DIAG] ffxFsr3UpscalerContextDispatch ENTERED frame reset=%d sharpen=%d\\n\", (int)pDispatchDescription->reset, (int)pDispatchDescription->enableSharpening); fflush(stdout);"
+        fsr3up_code "${fsr3up_code}"
+    )
+
+    # Trace when the RCAS pipeline is scheduled - look for the RCAS dispatch call.
+    # In the FSR3 source, RCAS is dispatched with pipelineRCAS or similar name.
+    string(REPLACE
+        "pipelineRCAS"
+        "pipelineRCAS); printf(\"[FSR3-DIAG] RCAS pass scheduled\\n\"); fflush(stdout); (void)(0"
+        fsr3up_code "${fsr3up_code}"
+    )
+
+    file(WRITE "${FSR3UP_CPP_FILE}" "${fsr3up_code}")
+    message(STATUS "[Diag-B] ffx_fsr3upscaler.cpp diagnostic injector applied.")
 
     # =========================================================================
     # WIN7 COMPAT SCRUBBER for FSR3 source files
