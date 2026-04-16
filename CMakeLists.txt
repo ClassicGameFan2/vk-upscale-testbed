@@ -314,6 +314,10 @@ file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/stb_impl.cpp "
 
 add_executable(vk-upscale-testbed
     src/main.cpp
+    src/common.cpp
+    src/fsr1_pass.cpp
+    src/fsr2_pass.cpp
+    src/fsr3_pass.cpp
     ${CMAKE_CURRENT_BINARY_DIR}/stb_impl.cpp
 )
 
@@ -321,6 +325,7 @@ target_include_directories(vk-upscale-testbed PRIVATE
     ${stb_SOURCE_DIR}
     ${ffx_sdk_v2_SOURCE_DIR}/sdk/include
     ${ffx_sdk_v2_SOURCE_DIR}/sdk/include/FidelityFX/host/backends
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
 target_link_libraries(vk-upscale-testbed PRIVATE
