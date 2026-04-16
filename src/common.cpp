@@ -1,8 +1,8 @@
 #include "common.h"
 
-uint32_t findMemoryType(VkPhysicalDevice physicalDevice,
-                        uint32_t typeFilter,
-                        VkMemoryPropertyFlags properties)
+uint32_t appFindMemoryType(VkPhysicalDevice physicalDevice,
+                           uint32_t typeFilter,
+                           VkMemoryPropertyFlags properties)
 {
     VkPhysicalDeviceMemoryProperties mp;
     vkGetPhysicalDeviceMemoryProperties(physicalDevice, &mp);
@@ -29,7 +29,8 @@ void createBuffer(VkDevice device, VkPhysicalDevice physicalDevice,
 
     VkMemoryAllocateInfo ai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
     ai.allocationSize  = mr.size;
-    ai.memoryTypeIndex = findMemoryType(physicalDevice, mr.memoryTypeBits, properties);
+    ai.memoryTypeIndex = appFindMemoryType(physicalDevice,
+                                           mr.memoryTypeBits, properties);
     vkAllocateMemory(device, &ai, nullptr, &bufferMemory);
     vkBindBufferMemory(device, buffer, bufferMemory, 0);
 }
@@ -57,8 +58,8 @@ VkImageCreateInfo createImage(VkDevice device, VkPhysicalDevice physicalDevice,
 
     VkMemoryAllocateInfo ai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
     ai.allocationSize  = mr.size;
-    ai.memoryTypeIndex = findMemoryType(physicalDevice, mr.memoryTypeBits,
-                                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    ai.memoryTypeIndex = appFindMemoryType(physicalDevice, mr.memoryTypeBits,
+                                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     vkAllocateMemory(device, &ai, nullptr, &imageMemory);
     vkBindImageMemory(device, image, imageMemory, 0);
     return ii;
@@ -167,8 +168,8 @@ SharedImage createSharedImage(VkDevice device, VkPhysicalDevice physicalDevice,
 
     VkMemoryAllocateInfo ai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
     ai.allocationSize  = mr.size;
-    ai.memoryTypeIndex = findMemoryType(physicalDevice, mr.memoryTypeBits,
-                                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    ai.memoryTypeIndex = appFindMemoryType(physicalDevice, mr.memoryTypeBits,
+                                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     vkAllocateMemory(device, &ai, nullptr, &si.memory);
     vkBindImageMemory(device, si.image, si.memory, 0);
 
@@ -217,7 +218,8 @@ void renderScene(int w, int h,
                     float nl = sqrtf(nx*nx+ny*ny+nz*nz);
                     nx/=nl; ny/=nl; nz/=nl;
                     float light[3] = { 0.577f, 0.577f, -0.577f };
-                    float ndotl = fmaxf(0.2f, -(nx*light[0]+ny*light[1]+nz*light[2]));
+                    float ndotl = fmaxf(0.2f,
+                        -(nx*light[0]+ny*light[1]+nz*light[2]));
                     r = powf(200.f/255.f, 2.2f) * ndotl;
                     g = powf( 50.f/255.f, 2.2f) * ndotl;
                     b = powf( 50.f/255.f, 2.2f) * ndotl;
