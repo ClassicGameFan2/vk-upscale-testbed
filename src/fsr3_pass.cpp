@@ -9,7 +9,10 @@ static void Fsr3MsgCallback(FfxMsgType /*type*/, const wchar_t* message) {
     std::cout.flush();
 }
 
-void RunFsr3Pass(
+// Run one complete FSR3 sequence.
+// sharpen=true  -> FSR_3.1.4_2x.png        (with RCAS)
+// sharpen=false -> FSR_3.1.4_norcas_2x.png (without RCAS, for comparison)
+static void RunFsr3Sequence(
     VkDevice device, VkPhysicalDevice physicalDevice,
     VkQueue queue, VkCommandBuffer cmd,
     VkBuffer uploadBuffer, VkDeviceMemory uploadMemory,
@@ -21,12 +24,10 @@ void RunFsr3Pass(
     VkDeviceSize colorUploadSize, VkDeviceSize depthUploadSize,
     VkDeviceSize mvUploadSize,    VkDeviceSize outSize,
     VkDeviceContext& vkDevCtx,
-    void* scratchBuffer, size_t scratchBufferSize)
+    void* scratchBuffer, size_t scratchBufferSize,
+    bool sharpen,
+    const std::string& outputName)
 {
-    std::cout << "\n============================================\n";
-    std::cout << "  FSR 3.1.4 Temporal Upscaling Test (128 frames)\n";
-    std::cout << "============================================\n";
-
     VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers    = &cmd;
@@ -40,7 +41,6 @@ void RunFsr3Pass(
     ffxGetInterfaceVK(&ffxIface, ffxGetDeviceVK(&vkDevCtx),
                       scratchBuffer, scratchBufferSize, 4);
 
-    // ── Context creation ─────────────────────────────────────────────────
     FfxFsr3UpscalerContextDescription fsr3Desc = {};
     fsr3Desc.flags =
         FFX_FSR3UPSCALER_ENABLE_HIGH_DYNAMIC_RANGE                 |
@@ -63,9 +63,8 @@ void RunFsr3Pass(
         _aligned_free(ctx);
         return;
     }
-    std::cout << "[FSR3] Context created OK.\n";
+    std::cout << "[FSR3] Context created OK (sharpen=" << sharpen << ").\n";
 
-    // ── Shared resource descriptions ──────────────────────────────────────
     FfxFsr3UpscalerSharedResourceDescriptions sharedDescs = {};
     if (ffxFsr3UpscalerGetSharedResourceDescriptions(ctx, &sharedDescs) != FFX_OK) {
         std::cout << "[FATAL] ffxFsr3UpscalerGetSharedResourceDescriptions failed!\n";
@@ -74,41 +73,14 @@ void RunFsr3Pass(
         return;
     }
 
-    std::cout << "[FSR3] Shared resource descriptions:\n";
-    std::cout << "  reconstructedPrevNearestDepth: "
-              << sharedDescs.reconstructedPrevNearestDepth.resourceDescription.width
-              << "x"
-              << sharedDescs.reconstructedPrevNearestDepth.resourceDescription.height
-              << " fmt=" << (int)sharedDescs.reconstructedPrevNearestDepth.resourceDescription.format
-              << "\n";
-    std::cout << "  dilatedDepth: "
-              << sharedDescs.dilatedDepth.resourceDescription.width
-              << "x"
-              << sharedDescs.dilatedDepth.resourceDescription.height
-              << " fmt=" << (int)sharedDescs.dilatedDepth.resourceDescription.format
-              << "\n";
-    std::cout << "  dilatedMotionVectors: "
-              << sharedDescs.dilatedMotionVectors.resourceDescription.width
-              << "x"
-              << sharedDescs.dilatedMotionVectors.resourceDescription.height
-              << " fmt=" << (int)sharedDescs.dilatedMotionVectors.resourceDescription.format
-              << "\n";
-    std::cout.flush();
-
     SharedImage siRecon    = createSharedImage(device, physicalDevice,
                                                sharedDescs.reconstructedPrevNearestDepth);
     SharedImage siDilDepth = createSharedImage(device, physicalDevice,
                                                sharedDescs.dilatedDepth);
     SharedImage siDilMV    = createSharedImage(device, physicalDevice,
                                                sharedDescs.dilatedMotionVectors);
-    std::cout << "[FSR3] Shared images allocated.\n";
 
-    // ── Pre-loop: initialise layouts ──────────────────────────────────────
-    // Bring all shared images and the output to GENERAL.
-    // reconstructedPrevNearestDepth does NOT need a pre-clear here because
-    // we clear it inside every frame's command buffer (required by the docs).
-    // dilatedDepth and dilatedMotionVectors are fully written by PrepareInputs
-    // every frame before being read, so they also do not need pre-clearing.
+    // Pre-loop: bring shared images and output to GENERAL
     {
         vkResetCommandBuffer(cmd, 0);
         vkBeginCommandBuffer(cmd, &beginInfo);
@@ -132,35 +104,27 @@ void RunFsr3Pass(
         vkQueueWaitIdle(queue);
     }
 
-    // ── Per-frame resource descriptions ───────────────────────────────────
     FfxResourceDescription colorDesc =
-        ffxGetImageResourceDescriptionVK(colorImage,  colorInfo,
-                                         FFX_RESOURCE_USAGE_READ_ONLY);
+        ffxGetImageResourceDescriptionVK(colorImage,  colorInfo,  FFX_RESOURCE_USAGE_READ_ONLY);
     FfxResourceDescription depthDesc =
-        ffxGetImageResourceDescriptionVK(depthImage,  depthInfo,
-                                         FFX_RESOURCE_USAGE_READ_ONLY);
+        ffxGetImageResourceDescriptionVK(depthImage,  depthInfo,  FFX_RESOURCE_USAGE_READ_ONLY);
     FfxResourceDescription mvDesc =
-        ffxGetImageResourceDescriptionVK(mvImage,     mvInfo,
-                                         FFX_RESOURCE_USAGE_READ_ONLY);
+        ffxGetImageResourceDescriptionVK(mvImage,     mvInfo,     FFX_RESOURCE_USAGE_READ_ONLY);
     FfxResourceDescription outDesc =
-        ffxGetImageResourceDescriptionVK(outputImage, outputInfo,
-                                         FFX_RESOURCE_USAGE_UAV);
+        ffxGetImageResourceDescriptionVK(outputImage, outputInfo, FFX_RESOURCE_USAGE_UAV);
     FfxResourceDescription reconDesc =
-        ffxGetImageResourceDescriptionVK(siRecon.image,    siRecon.info,
-                                         FFX_RESOURCE_USAGE_UAV);
+        ffxGetImageResourceDescriptionVK(siRecon.image,    siRecon.info,    FFX_RESOURCE_USAGE_UAV);
     FfxResourceDescription dilDepthDesc =
-        ffxGetImageResourceDescriptionVK(siDilDepth.image, siDilDepth.info,
-                                         FFX_RESOURCE_USAGE_UAV);
+        ffxGetImageResourceDescriptionVK(siDilDepth.image, siDilDepth.info, FFX_RESOURCE_USAGE_UAV);
     FfxResourceDescription dilMVDesc =
-        ffxGetImageResourceDescriptionVK(siDilMV.image,    siDilMV.info,
-                                         FFX_RESOURCE_USAGE_UAV);
+        ffxGetImageResourceDescriptionVK(siDilMV.image,    siDilMV.info,    FFX_RESOURCE_USAGE_UAV);
 
-    // ── Jitter ────────────────────────────────────────────────────────────
     int32_t phaseCount = ffxFsr3UpscalerGetJitterPhaseCount(RENDER_W, DISPLAY_W);
     std::cout << "[FSR3] Jitter phase count: " << phaseCount << "\n";
 
     const int totalFrames = 128;
-    std::cout << "[FSR3] Running " << totalFrames << " frames...\n";
+    std::cout << "[FSR3] Running " << totalFrames << " frames"
+              << " (sharpen=" << sharpen << ")...\n";
     std::cout.flush();
 
     VkDeviceSize uploadSize = colorUploadSize + depthUploadSize + mvUploadSize;
@@ -170,8 +134,6 @@ void RunFsr3Pass(
     VkImageLayout mvLayout     = VK_IMAGE_LAYOUT_UNDEFINED;
     VkImageLayout outputLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-    // Subresource range for clearing reconstructedPrevNearestDepth each frame.
-    // It is R32_UINT, aspect = COLOR (it is a regular image, not a depth attachment).
     VkImageSubresourceRange reconRange = {
         VK_IMAGE_ASPECT_COLOR_BIT, 0, siRecon.info.mipLevels, 0, 1 };
 
@@ -184,14 +146,12 @@ void RunFsr3Pass(
         float jX = 0.f, jY = 0.f;
         ffxFsr3UpscalerGetJitterOffset(&jX, &jY, jitterIndex, phaseCount);
 
-        // ── CPU render ───────────────────────────────────────────────────
         std::vector<float> fColor(RENDER_W * RENDER_H * 4);
         std::vector<float> fDepth(RENDER_W * RENDER_H);
         std::vector<float> fMV   (RENDER_W * RENDER_H * 2);
         renderScene(RENDER_W, RENDER_H, jX, jY, prevJX, prevJY,
                     fColor.data(), fDepth.data(), fMV.data());
 
-        // ── Upload ───────────────────────────────────────────────────────
         void* mp;
         vkMapMemory(device, uploadMemory, 0, uploadSize, 0, &mp);
         memcpy((uint8_t*)mp,                                     fColor.data(), colorUploadSize);
@@ -199,17 +159,12 @@ void RunFsr3Pass(
         memcpy((uint8_t*)mp + colorUploadSize + depthUploadSize, fMV.data(),    mvUploadSize);
         vkUnmapMemory(device, uploadMemory);
 
-        // ── Build command buffer ──────────────────────────────────────────
         vkResetCommandBuffer(cmd, 0);
         vkBeginCommandBuffer(cmd, &beginInfo);
 
-        // ── Step 1: Clear reconstructedPrevNearestDepth to zero ───────────
-        // The documentation explicitly states this buffer "should first be
-        // cleared" before each dispatch. The PrepareInputs pass uses atomic
-        // InterlockedMax/Min to write into it; stale values from the previous
-        // frame would not be overwritten by the atomics if they are already
-        // larger/smaller, producing incorrect disocclusion detection and the
-        // visible artifacts (black line, checkerboard edge on sphere).
+        // Clear reconstructedPrevNearestDepth to zero every frame.
+        // Required by documentation: PrepareInputs uses atomic operations to
+        // write into this buffer; stale non-zero values prevent correct updates.
         transition(cmd, siRecon.image, siRecon.layout,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                    VK_IMAGE_ASPECT_COLOR_BIT, siRecon.info.mipLevels);
@@ -221,7 +176,7 @@ void RunFsr3Pass(
                    VK_IMAGE_LAYOUT_GENERAL,
                    VK_IMAGE_ASPECT_COLOR_BIT, siRecon.info.mipLevels);
 
-        // ── Step 2: Upload and transition inputs ──────────────────────────
+        // Upload inputs
         transition(cmd, colorImage, colorLayout,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
         transition(cmd, depthImage, depthLayout,
@@ -254,7 +209,6 @@ void RunFsr3Pass(
         transition(cmd, mvImage,    mvLayout,
                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
 
-        // ── Step 3: Build FfxResource wrappers ───────────────────────────
         FfxResource colorRes = ffxGetResourceVK(colorImage,  colorDesc,
             L"FSR3_Color",    FFX_RESOURCE_STATE_COMPUTE_READ);
         FfxResource depthRes = ffxGetResourceVK(depthImage,  depthDesc,
@@ -270,7 +224,6 @@ void RunFsr3Pass(
         FfxResource dilMVRes = ffxGetResourceVK(siDilMV.image,    dilMVDesc,
             L"FSR3_DilMV",    FFX_RESOURCE_STATE_UNORDERED_ACCESS);
 
-        // ── Step 4: Dispatch ──────────────────────────────────────────────
         FfxFsr3UpscalerDispatchDescription disp = {};
         disp.commandList   = ffxGetCommandListVK(cmd);
         disp.color         = colorRes;
@@ -291,25 +244,22 @@ void RunFsr3Pass(
         disp.renderSize  = { RENDER_W,  RENDER_H  };
         disp.upscaleSize = { DISPLAY_W, DISPLAY_H };
 
-        disp.enableSharpening = true;
-        disp.sharpness        = 0.8f;
-        disp.frameTimeDelta   = 16.6f;
-        disp.preExposure      = 1.f;
-        disp.reset            = (i == 0);
-
+        disp.enableSharpening        = sharpen;
+        disp.sharpness               = 0.8f;
+        disp.frameTimeDelta          = 16.6f;
+        disp.preExposure             = 1.f;
+        disp.reset                   = (i == 0);
         disp.cameraNear              = FLT_MAX;
         disp.cameraFar               = 0.1f;
         disp.cameraFovAngleVertical  = 1.04719755f;
         disp.viewSpaceToMetersFactor = 1.f;
-
-        disp.flags = 0;
+        disp.flags                   = 0;
 
         if (ffxFsr3UpscalerContextDispatch(ctx, &disp) != FFX_OK) {
             std::cout << "[FATAL] FSR3 dispatch failed frame " << i << "\n";
             break;
         }
 
-        // ── Step 5: Full memory barrier ───────────────────────────────────
         VkMemoryBarrier memBarrier = { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
         memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT  |
                                    VK_ACCESS_MEMORY_WRITE_BIT;
@@ -330,59 +280,48 @@ void RunFsr3Pass(
                       << " result=" << sr << "\n";
             break;
         }
-        VkResult wr = vkQueueWaitIdle(queue);
-        if (wr != VK_SUCCESS) {
-            std::cout << "[FATAL] vkQueueWaitIdle failed frame " << i
-                      << " result=" << wr << "\n";
-            break;
-        }
+        vkQueueWaitIdle(queue);
 
-        // After dispatch the FSR3 backend leaves outputImage in GENERAL.
         outputLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-        // ── Snapshot readback ─────────────────────────────────────────────
         int frameNum = i + 1;
         if (frameNum == 32 || frameNum == 64 ||
             frameNum == 96 || frameNum == 128)
         {
             vkResetCommandBuffer(cmd, 0);
             vkBeginCommandBuffer(cmd, &beginInfo);
-
             transition(cmd, outputImage, outputLayout,
                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                        VK_IMAGE_ASPECT_COLOR_BIT);
-
             VkBufferImageCopy or2 = {};
             or2.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
             or2.imageExtent = { DISPLAY_W, DISPLAY_H, 1 };
             vkCmdCopyImageToBuffer(cmd, outputImage,
                                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                    downloadBuffer, 1, &or2);
-
             transition(cmd, outputImage, outputLayout,
                        VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
-
             vkEndCommandBuffer(cmd);
             vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
             vkQueueWaitIdle(queue);
 
             vkMapMemory(device, downloadMemory, 0, outSize, 0, &outData);
-            std::string fname = "FSR_3.1.4_frame" +
-                                std::to_string(frameNum) + ".png";
+            std::string fname = "FSR_3.1.4_" +
+                                std::string(sharpen ? "" : "norcas_") +
+                                "frame" + std::to_string(frameNum) + ".png";
             saveFloatImage(fname, DISPLAY_W, DISPLAY_H, (float*)outData);
             vkUnmapMemory(device, downloadMemory);
             std::cout << "[FSR3] Snapshot frame " << frameNum << "\n";
         }
 
         if (frameNum % 32 == 0)
-            std::cout << "[FSR3] Frame " << frameNum << "/"
-                      << totalFrames << "\n";
+            std::cout << "[FSR3] Frame " << frameNum << "/" << totalFrames << "\n";
 
         prevJX = jX;
         prevJY = jY;
     }
 
-    // ── Final readback ────────────────────────────────────────────────────
+    // Final readback
     vkResetCommandBuffer(cmd, 0);
     vkBeginCommandBuffer(cmd, &beginInfo);
     transition(cmd, outputImage, outputLayout,
@@ -398,10 +337,9 @@ void RunFsr3Pass(
     vkQueueWaitIdle(queue);
 
     vkMapMemory(device, downloadMemory, 0, outSize, 0, &outData);
-    saveFloatImage("FSR_3.1.4_2x.png", DISPLAY_W, DISPLAY_H, (float*)outData);
+    saveFloatImage(outputName, DISPLAY_W, DISPLAY_H, (float*)outData);
     vkUnmapMemory(device, downloadMemory);
 
-    // ── Cleanup ───────────────────────────────────────────────────────────
     ffxFsr3UpscalerContextDestroy(ctx);
     _aligned_free(ctx);
 
@@ -411,6 +349,61 @@ void RunFsr3Pass(
     vkFreeMemory  (device, siDilDepth.memory, nullptr);
     vkDestroyImage(device, siDilMV.image,     nullptr);
     vkFreeMemory  (device, siDilMV.memory,    nullptr);
+
+    std::cout << "[FSR3] Sequence done -> " << outputName << "\n";
+}
+
+void RunFsr3Pass(
+    VkDevice device, VkPhysicalDevice physicalDevice,
+    VkQueue queue, VkCommandBuffer cmd,
+    VkBuffer uploadBuffer, VkDeviceMemory uploadMemory,
+    VkBuffer downloadBuffer, VkDeviceMemory downloadMemory,
+    VkImage colorImage,  VkImageCreateInfo colorInfo,
+    VkImage depthImage,  VkImageCreateInfo depthInfo,
+    VkImage mvImage,     VkImageCreateInfo mvInfo,
+    VkImage outputImage, VkImageCreateInfo outputInfo,
+    VkDeviceSize colorUploadSize, VkDeviceSize depthUploadSize,
+    VkDeviceSize mvUploadSize,    VkDeviceSize outSize,
+    VkDeviceContext& vkDevCtx,
+    void* scratchBuffer, size_t scratchBufferSize)
+{
+    std::cout << "\n============================================\n";
+    std::cout << "  FSR 3.1.4 Temporal Upscaling Test (128 frames)\n";
+    std::cout << "============================================\n";
+
+    // We need two scratch buffers - one per context creation.
+    // The caller gave us one; allocate a second one of the same size.
+    size_t scratchSize2 = scratchBufferSize;
+    void*  scratch2     = _aligned_malloc(scratchSize2, 64);
+    memset(scratch2, 0, scratchSize2);
+
+    // Run with sharpening enabled
+    RunFsr3Sequence(
+        device, physicalDevice, queue, cmd,
+        uploadBuffer, uploadMemory,
+        downloadBuffer, downloadMemory,
+        colorImage, colorInfo,
+        depthImage, depthInfo,
+        mvImage,    mvInfo,
+        outputImage, outputInfo,
+        colorUploadSize, depthUploadSize, mvUploadSize, outSize,
+        vkDevCtx, scratchBuffer, scratchBufferSize,
+        true,  "FSR_3.1.4_2x.png");
+
+    // Run without sharpening for comparison
+    RunFsr3Sequence(
+        device, physicalDevice, queue, cmd,
+        uploadBuffer, uploadMemory,
+        downloadBuffer, downloadMemory,
+        colorImage, colorInfo,
+        depthImage, depthInfo,
+        mvImage,    mvInfo,
+        outputImage, outputInfo,
+        colorUploadSize, depthUploadSize, mvUploadSize, outSize,
+        vkDevCtx, scratch2, scratchSize2,
+        false, "FSR_3.1.4_norcas_2x.png");
+
+    _aligned_free(scratch2);
 
     std::cout << "[FSR3] Done.\n";
 }
