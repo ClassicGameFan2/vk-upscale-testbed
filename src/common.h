@@ -22,9 +22,11 @@ static constexpr uint32_t DISPLAY_W = 640;
 static constexpr uint32_t DISPLAY_H = 480;
 
 // ---------- Vulkan helpers ---------------------------------------------------
-uint32_t findMemoryType(VkPhysicalDevice physicalDevice,
-                        uint32_t typeFilter,
-                        VkMemoryPropertyFlags properties);
+// Prefixed with "app" to avoid collision with the same-named symbol inside
+// the AMD FidelityFX SDK static libraries (e.g. FrameInterpolationSwapchainVK).
+uint32_t appFindMemoryType(VkPhysicalDevice physicalDevice,
+                           uint32_t typeFilter,
+                           VkMemoryPropertyFlags properties);
 
 void createBuffer(VkDevice device, VkPhysicalDevice physicalDevice,
                   VkDeviceSize size, VkBufferUsageFlags usage,
