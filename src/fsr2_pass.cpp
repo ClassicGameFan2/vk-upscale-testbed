@@ -43,11 +43,15 @@ void RunFsr2Pass(
 
     FfxFsr2ContextDescription fsr2Desc = {};
     fsr2Desc.flags =
-        FFX_FSR2_ENABLE_DEBUG_CHECKING                          |
-        FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE                      |
-        FFX_FSR2_ENABLE_AUTO_EXPOSURE                           |
-        FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION      |
-        FFX_FSR2_ENABLE_DEPTH_INVERTED;
+        FFX_FSR2_ENABLE_DEBUG_CHECKING          |
+        FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE      |
+        FFX_FSR2_ENABLE_AUTO_EXPOSURE           |
+        // DEPTH_INVERTED: depth = zNear/t  => 1 at near, 0 at infinity
+        FFX_FSR2_ENABLE_DEPTH_INVERTED          |
+        // DEPTH_INFINITE: far plane is at infinity
+        FFX_FSR2_ENABLE_DEPTH_INFINITE;
+        // NOTE: Do NOT set MOTION_VECTORS_JITTER_CANCELLATION.
+        //       Motion vectors must be pure scene motion, no jitter delta.
     fsr2Desc.maxRenderSize    = { RENDER_W,  RENDER_H  };
     fsr2Desc.displaySize      = { DISPLAY_W, DISPLAY_H };
     fsr2Desc.fpMessage        = FfxMsgCallback;
@@ -100,7 +104,6 @@ void RunFsr2Pass(
 
     VkDeviceSize uploadSize = colorUploadSize + depthUploadSize + mvUploadSize;
     int32_t jitterIndex = 0;
-    float   prevJX = 0.f, prevJY = 0.f;
 
     void* outData;
 
@@ -109,18 +112,19 @@ void RunFsr2Pass(
         float jX = 0.f, jY = 0.f;
         ffxFsr2GetJitterOffset(&jX, &jY, jitterIndex, phaseCount);
 
+        // Render scene with jitter applied to color+depth.
+        // Motion vectors are always zero (static scene, no jitter in MVs).
         std::vector<float> fColor(RENDER_W * RENDER_H * 4);
         std::vector<float> fDepth(RENDER_W * RENDER_H);
-        std::vector<float> fMV   (RENDER_W * RENDER_H * 2);
-        renderScene(RENDER_W, RENDER_H, jX, jY, prevJX, prevJY,
+        std::vector<float> fMV   (RENDER_W * RENDER_H * 2, 0.f);
+        renderScene(RENDER_W, RENDER_H, jX, jY,
                     fColor.data(), fDepth.data(), fMV.data());
 
         void* mp;
         vkMapMemory(device, uploadMemory, 0, uploadSize, 0, &mp);
-        memcpy((uint8_t*)mp, fColor.data(), colorUploadSize);
-        memcpy((uint8_t*)mp + colorUploadSize, fDepth.data(), depthUploadSize);
-        memcpy((uint8_t*)mp + colorUploadSize + depthUploadSize,
-               fMV.data(), mvUploadSize);
+        memcpy((uint8_t*)mp,                                     fColor.data(), colorUploadSize);
+        memcpy((uint8_t*)mp + colorUploadSize,                   fDepth.data(), depthUploadSize);
+        memcpy((uint8_t*)mp + colorUploadSize + depthUploadSize, fMV.data(),    mvUploadSize);
         vkUnmapMemory(device, uploadMemory);
 
         vkResetCommandBuffer(cmd, 0);
@@ -183,18 +187,28 @@ void RunFsr2Pass(
         dispatchDesc.motionVectors = mvRes;
         dispatchDesc.output        = outRes;
 
+        // Jitter offset: tell FSR the sub-pixel shift used when rendering.
+        // This is the pixel-space jitter, as returned by ffxFsr2GetJitterOffset.
         dispatchDesc.jitterOffset.x = jX;
         dispatchDesc.jitterOffset.y = jY;
+
+        // Motion vectors are in render-resolution pixel space, but they are
+        // all zero (static scene). Scale = render dimensions to match pixel-space.
         dispatchDesc.motionVectorScale.x = (float)RENDER_W;
         dispatchDesc.motionVectorScale.y = (float)RENDER_H;
+
         dispatchDesc.renderSize          = { RENDER_W, RENDER_H };
         dispatchDesc.enableSharpening    = true;
         dispatchDesc.sharpness           = 0.8f;
         dispatchDesc.frameTimeDelta      = 16.6f;
         dispatchDesc.preExposure         = 1.f;
         dispatchDesc.reset               = (i == 0);
-        dispatchDesc.cameraNear          = FLT_MAX;
-        dispatchDesc.cameraFar           = 0.1f;
+
+        // For reversed-Z + infinite far plane:
+        // cameraNear = actual near plane value (0.1f)
+        // cameraFar  = FLT_MAX (infinite)
+        dispatchDesc.cameraNear              = 0.1f;
+        dispatchDesc.cameraFar               = FLT_MAX;
         dispatchDesc.cameraFovAngleVertical  = 1.04719755f;
         dispatchDesc.viewSpaceToMetersFactor = 1.f;
 
@@ -237,9 +251,6 @@ void RunFsr2Pass(
 
         if (frameNum % 32 == 0)
             std::cout << "[FSR2] Frame " << frameNum << "/" << totalFrames << "\n";
-
-        prevJX = jX;
-        prevJY = jY;
     }
 
     // Final readback
