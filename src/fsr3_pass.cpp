@@ -39,14 +39,13 @@ static void RunFsr3Sequence(
                       scratchBuffer, scratchBufferSize, 4);
 
     // -------------------------------------------------------------------------
-    // Context flags (Cauldron convention):
+    // Context flags:
     //   HIGH_DYNAMIC_RANGE   : linear HDR color input
-    //   AUTO_EXPOSURE        : FSR computes its own exposure
-    //   DEPTH_INVERTED       : depth = zNear/z (reversed-Z)
-    //   DEPTH_INFINITE       : infinite far plane. Together with DEPTH_INVERTED,
-    //                          dispatch: cameraNear=FLT_MAX, cameraFar=CAM_Z_NEAR
-    //   MOTION_VECTORS_JITTER_CANCELLATION : our MVs = prevJitter-currJitter.
-    //                          FSR subtracts the jitter part to get true zero motion.
+    //   AUTO_EXPOSURE        : FSR computes exposure internally
+    //   DEPTH_INVERTED       : depth = zNear/z (reversed-Z). Background = 0.
+    //                          NOTE: no DEPTH_INFINITE - our scene has a
+    //                          finite far plane (CAM_Z_FAR = 100).
+    //   MOTION_VECTORS_JITTER_CANCELLATION : our MVs include the jitter delta.
     //   DEBUG_CHECKING       : validate API usage
     // -------------------------------------------------------------------------
     FfxFsr3UpscalerContextDescription fsr3Desc = {};
@@ -54,7 +53,6 @@ static void RunFsr3Sequence(
         FFX_FSR3UPSCALER_ENABLE_HIGH_DYNAMIC_RANGE                 |
         FFX_FSR3UPSCALER_ENABLE_AUTO_EXPOSURE                      |
         FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED                     |
-        FFX_FSR3UPSCALER_ENABLE_DEPTH_INFINITE                     |
         FFX_FSR3UPSCALER_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION |
         FFX_FSR3UPSCALER_ENABLE_DEBUG_CHECKING;
     fsr3Desc.maxRenderSize    = { RENDER_W,  RENDER_H  };
@@ -244,10 +242,13 @@ static void RunFsr3Sequence(
         disp.jitterOffset.x = jX;
         disp.jitterOffset.y = jY;
 
-        // Our MVs are pixel-space (prevJX-currJX, prevJY-currJY).
-        // scale = {1, 1}: already in pixel space, no conversion needed.
-        disp.motionVectorScale.x = 1.0f;
-        disp.motionVectorScale.y = 1.0f;
+        // Our MVs are NDC-space: (prevJX - currJX, prevJY - currJY).
+        // These are unit-pixel-space values (~[-0.5, +0.5]).
+        // FSR expects MVs in [-renderW, renderW] x [-renderH, renderH].
+        // motionVectorScale multiplies the stored NDC values to convert them
+        // into the screen-space range FSR requires.
+        disp.motionVectorScale.x = (float)RENDER_W;
+        disp.motionVectorScale.y = (float)RENDER_H;
 
         disp.renderSize  = { RENDER_W,  RENDER_H  };
         disp.upscaleSize = { DISPLAY_W, DISPLAY_H };
@@ -258,8 +259,8 @@ static void RunFsr3Sequence(
         disp.preExposure             = 1.0f;
         disp.reset                   = (i == 0);
 
-        // DEPTH_INVERTED + DEPTH_INFINITE: Cauldron convention.
-        // cameraNear = FLT_MAX, cameraFar = the actual near distance (CAM_Z_NEAR).
+        // Reversed-Z (DEPTH_INVERTED), no DEPTH_INFINITE.
+        // cameraNear and cameraFar are swapped because of the inverted depth.
         disp.cameraNear             = FLT_MAX;
         disp.cameraFar              = CAM_Z_NEAR;
         disp.cameraFovAngleVertical = CAM_FOV_Y;
