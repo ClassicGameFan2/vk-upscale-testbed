@@ -1,3 +1,4 @@
+// src/common.cpp
 #include "common.h"
 
 uint32_t appFindMemoryType(VkPhysicalDevice physicalDevice,
@@ -179,20 +180,49 @@ SharedImage createSharedImage(VkDevice device, VkPhysicalDevice physicalDevice,
 }
 
 // ---------- Scene / I/O ------------------------------------------------------
+//
+// Correct Cauldron-style rendering:
+//
+//  * jX, jY are in UNIT PIXEL SPACE (as returned by ffxFsr*GetJitterOffset).
+//    They must be converted to NDC offsets:
+//        ndcJX = jX * 2.0f / w
+//        ndcJY = jY * 2.0f / h
+//    This is added to the pixel centre NDC to shift the entire rendered image.
+//
+//  * Color and Depth ARE rendered with jitter (the scene is jittered).
+//
+//  * Motion Vectors are NEVER jittered. For a static scene with a static
+//    camera the motion vectors are always (0, 0).
+//    The JITTER_CANCELLATION flag must NOT be set.
+//
+//  * Depth uses reversed-Z (near=1, far->0) with an infinite far plane.
+//    Formula: depth = zNear / t  (gives 1 at t=zNear, approaches 0 as t->inf)
+//    FSR flags: DEPTH_INVERTED | DEPTH_INFINITE
+//
 void renderScene(int w, int h,
-                 float currJX, float currJY,
-                 float prevJX, float prevJY,
-                 float* colorOut, float* depthOut, float* mvOut)
+                 float jX, float jY,      // pixel-space jitter for THIS frame
+                 float* colorOut,
+                 float* depthOut,
+                 float* mvOut)
 {
     const float aspect     = (float)w / (float)h;
-    const float fovY       = 1.04719755f;
+    const float fovY       = 1.04719755f;  // 60 degrees
     const float tanHalfFov = tanf(fovY * 0.5f);
-    const float zNear = 0.1f, zFar = 100.0f;
+    const float zNear      = 0.1f;
+
+    // Convert pixel-space jitter to NDC-space jitter offset.
+    // FSR returns values in [-0.5, +0.5] pixel space.
+    // NDC goes from -1 to +1 over 'w' pixels, so one pixel = 2/w in NDC.
+    const float ndcJX = jX * 2.0f / (float)w;
+    const float ndcJY = jY * 2.0f / (float)h;
 
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
-            float ndcX = ((x + 0.5f + currJX) / w) * 2.0f - 1.0f;
-            float ndcY = ((y + 0.5f + currJY) / h) * 2.0f - 1.0f;
+            // Pixel centre in NDC, then apply jitter offset.
+            // Adding ndcJX/ndcJY shifts the camera sub-pixel for this frame.
+            float ndcX = ((x + 0.5f) / w) * 2.0f - 1.0f + ndcJX;
+            float ndcY = ((y + 0.5f) / h) * 2.0f - 1.0f + ndcJY;
+
             float ro[3] = { 0.f, 1.f, 0.f };
             float rd[3] = { ndcX * aspect * tanHalfFov, -ndcY * tanHalfFov, 1.f };
             float len   = sqrtf(rd[0]*rd[0] + rd[1]*rd[1] + rd[2]*rd[2]);
@@ -203,14 +233,14 @@ void renderScene(int w, int h,
             float g = powf(206.f/255.f, 2.2f);
             float b = powf(235.f/255.f, 2.2f);
 
-            // Sphere
+            // Sphere at (0,1,4), radius 1.5
             float oc[3] = { ro[0], ro[1]-1.f, ro[2]-4.f };
             float bd    = rd[0]*oc[0] + rd[1]*oc[1] + rd[2]*oc[2];
             float cv    = oc[0]*oc[0] + oc[1]*oc[1] + oc[2]*oc[2] - 2.25f;
             float disc  = bd*bd - cv;
             if (disc > 0.f) {
                 float t = -bd - sqrtf(disc);
-                if (t > zNear && t < zFar) {
+                if (t > zNear) {
                     hitZ = t;
                     float nx = ro[0]+rd[0]*t;
                     float ny = ro[1]+rd[1]*t - 1.f;
@@ -228,7 +258,7 @@ void renderScene(int w, int h,
             // Floor
             if (rd[1] < 0.f) {
                 float t = -ro[1] / rd[1];
-                if (t > zNear && t < zFar && (hitZ < 0.f || t < hitZ)) {
+                if (t > zNear && (hitZ < 0.f || t < hitZ)) {
                     hitZ = t;
                     float px = ro[0]+rd[0]*t, pz = ro[2]+rd[2]*t;
                     int chk = ((int)floorf(px)+(int)floorf(pz)) % 2;
@@ -239,13 +269,24 @@ void renderScene(int w, int h,
             }
 
             int idx = y*w + x;
+
+            // Color (jittered)
             colorOut[idx*4+0] = r;
             colorOut[idx*4+1] = g;
             colorOut[idx*4+2] = b;
             colorOut[idx*4+3] = 1.f;
-            depthOut[idx]     = (hitZ > 0.f) ? (zNear / hitZ) : 0.f;
-            mvOut[idx*2+0]    = prevJX - currJX;
-            mvOut[idx*2+1]    = prevJY - currJY;
+
+            // Depth: reversed-Z infinite projection.
+            // depth = zNear / t  =>  1.0 at the near plane, 0.0 at infinity.
+            // FSR must be told DEPTH_INVERTED | DEPTH_INFINITE.
+            // Background (no hit) => depth = 0  (i.e. at infinity).
+            depthOut[idx] = (hitZ > 0.f) ? (zNear / hitZ) : 0.f;
+
+            // Motion Vectors: always (0,0).
+            // The camera and all scene objects are static.
+            // Jitter must NOT appear in motion vectors.
+            mvOut[idx*2+0] = 0.f;
+            mvOut[idx*2+1] = 0.f;
         }
     }
 }
