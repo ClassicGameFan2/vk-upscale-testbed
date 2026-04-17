@@ -43,11 +43,12 @@ void RunFsr2Pass(
 
     FfxFsr2ContextDescription fsr2Desc = {};
     fsr2Desc.flags =
-        FFX_FSR2_ENABLE_DEBUG_CHECKING                          |
-        FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE                      |
-        FFX_FSR2_ENABLE_AUTO_EXPOSURE                           |
-        FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION      |
+        FFX_FSR2_ENABLE_DEBUG_CHECKING          |
+        FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE      |
+        FFX_FSR2_ENABLE_AUTO_EXPOSURE           |
         FFX_FSR2_ENABLE_DEPTH_INVERTED;
+    // Note: FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION is NOT set.
+    //       Our MVs are pure pixel-space displacements without jitter.
     fsr2Desc.maxRenderSize    = { RENDER_W,  RENDER_H  };
     fsr2Desc.displaySize      = { DISPLAY_W, DISPLAY_H };
     fsr2Desc.fpMessage        = FfxMsgCallback;
@@ -86,9 +87,9 @@ void RunFsr2Pass(
         ffxGetImageResourceDescriptionVK(colorImage,  colorInfo,  FFX_RESOURCE_USAGE_READ_ONLY);
     FfxResourceDescription depthDesc =
         ffxGetImageResourceDescriptionVK(depthImage,  depthInfo,  FFX_RESOURCE_USAGE_READ_ONLY);
-    FfxResourceDescription mvDesc =
+    FfxResourceDescription mvDesc    =
         ffxGetImageResourceDescriptionVK(mvImage,     mvInfo,     FFX_RESOURCE_USAGE_READ_ONLY);
-    FfxResourceDescription outDesc =
+    FfxResourceDescription outDesc   =
         ffxGetImageResourceDescriptionVK(outputImage, outputInfo, FFX_RESOURCE_USAGE_UAV);
 
     int32_t phaseCount = ffxFsr2GetJitterPhaseCount(RENDER_W, DISPLAY_W);
@@ -101,8 +102,7 @@ void RunFsr2Pass(
     VkDeviceSize uploadSize = colorUploadSize + depthUploadSize + mvUploadSize;
     int32_t jitterIndex = 0;
     float   prevJX = 0.f, prevJY = 0.f;
-
-    void* outData;
+    void*   outData;
 
     for (int i = 0; i < totalFrames; i++) {
         ++jitterIndex;
@@ -185,17 +185,22 @@ void RunFsr2Pass(
 
         dispatchDesc.jitterOffset.x = jX;
         dispatchDesc.jitterOffset.y = jY;
-        dispatchDesc.motionVectorScale.x = (float)RENDER_W;
-        dispatchDesc.motionVectorScale.y = (float)RENDER_H;
+
+        // motionVectorScale = {1, 1}: MVs are in render-resolution pixel space.
+        dispatchDesc.motionVectorScale.x = 1.0f;
+        dispatchDesc.motionVectorScale.y = 1.0f;
+
         dispatchDesc.renderSize          = { RENDER_W, RENDER_H };
         dispatchDesc.enableSharpening    = true;
         dispatchDesc.sharpness           = 0.8f;
         dispatchDesc.frameTimeDelta      = 16.6f;
         dispatchDesc.preExposure         = 1.f;
         dispatchDesc.reset               = (i == 0);
-        dispatchDesc.cameraNear          = FLT_MAX;
-        dispatchDesc.cameraFar           = 0.1f;
-        dispatchDesc.cameraFovAngleVertical  = 1.04719755f;
+
+        // Reversed-Z with finite far plane: pass actual distances.
+        dispatchDesc.cameraNear              = CAM_Z_NEAR;
+        dispatchDesc.cameraFar               = CAM_Z_FAR;
+        dispatchDesc.cameraFovAngleVertical  = CAM_FOV_Y;
         dispatchDesc.viewSpaceToMetersFactor = 1.f;
 
         if (ffxFsr2ContextDispatch(ctx, &dispatchDesc) != FFX_OK) {
