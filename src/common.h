@@ -21,9 +21,12 @@ static constexpr uint32_t RENDER_H  = 240;
 static constexpr uint32_t DISPLAY_W = 640;
 static constexpr uint32_t DISPLAY_H = 480;
 
+// Camera constants shared between renderScene and the FSR passes
+static constexpr float CAM_FOV_Y   = 1.04719755f; // 60 degrees
+static constexpr float CAM_Z_NEAR  = 0.1f;
+static constexpr float CAM_Z_FAR   = 100.0f;
+
 // ---------- Vulkan helpers ---------------------------------------------------
-// Prefixed with "app" to avoid collision with the same-named symbol inside
-// the AMD FidelityFX SDK static libraries (e.g. FrameInterpolationSwapchainVK).
 uint32_t appFindMemoryType(VkPhysicalDevice physicalDevice,
                            uint32_t typeFilter,
                            VkMemoryPropertyFlags properties);
@@ -57,10 +60,28 @@ SharedImage createSharedImage(VkDevice device, VkPhysicalDevice physicalDevice,
                               const FfxCreateResourceDescription& desc);
 
 // ---------- Scene / I/O ------------------------------------------------------
+//
+// Jitter parameters (currJX/currJY, prevJX/prevJY) are in UNIT PIXEL SPACE
+// exactly as returned by ffxFsr3UpscalerGetJitterOffset / ffxFsr2GetJitterOffset.
+//
+// The function internally converts them to NDC offsets before applying to rays,
+// and computes motion vectors as true render-resolution pixel-space reprojection
+// deltas (NOT jitter deltas).
+//
+// colorOut : RENDER_W * RENDER_H * 4 floats (RGBA, linear)
+// depthOut : RENDER_W * RENDER_H * 1 float  (reversed-Z: zNear/z, [0..1])
+// mvOut    : RENDER_W * RENDER_H * 2 floats (pixel-space, render resolution)
+//            mv.x = screen_x_prev - screen_x_curr  (horizontal displacement)
+//            mv.y = screen_y_prev - screen_y_curr  (vertical  displacement)
+//            For a static scene with no camera movement: all zeros.
+//            Jitter is NOT baked into the motion vectors.
+//
 void renderScene(int w, int h,
-                 float currJX, float currJY,
-                 float prevJX, float prevJY,
-                 float* colorOut, float* depthOut, float* mvOut);
+                 float currJX, float currJY,   // unit pixel space
+                 float prevJX, float prevJY,   // unit pixel space (previous frame)
+                 float* colorOut,
+                 float* depthOut,
+                 float* mvOut);
 
 void saveFloatImage(const std::string& filename, int w, int h,
                     const float* data);
