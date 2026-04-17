@@ -2,7 +2,6 @@
 #define VOLK_IMPLEMENTATION
 #include "common.h"
 
-//  Forward declarations of pass functions
 void RunFsr1Pass(
     VkDevice, VkPhysicalDevice, VkQueue, VkCommandBuffer,
     VkBuffer, VkDeviceMemory, VkBuffer, VkDeviceMemory,
@@ -46,7 +45,6 @@ int main()
 
     ffxAssertSetPrintingCallback(AssertCallback);
 
-    // ── Vulkan instance ───────────────────────────────────────────────────
     if (volkInitialize() != VK_SUCCESS) {
         std::cout << "[FATAL] volk init failed\n"; return 1;
     }
@@ -64,7 +62,6 @@ int main()
     volkLoadInstance(instance);
     std::cout << "[Init] Vulkan instance OK.\n";
 
-    // ── Physical device ───────────────────────────────────────────────────
     uint32_t devCount = 0;
     vkEnumeratePhysicalDevices(instance, &devCount, nullptr);
     std::vector<VkPhysicalDevice> physDevs(devCount);
@@ -75,7 +72,6 @@ int main()
     vkGetPhysicalDeviceProperties(physDev, &devProps);
     std::cout << "[Init] GPU: " << devProps.deviceName << "\n";
 
-    // ── Logical device ────────────────────────────────────────────────────
     float queuePri = 1.f;
     VkDeviceQueueCreateInfo queueCI = {
         VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };
@@ -115,7 +111,6 @@ int main()
     VkQueue queue;
     vkGetDeviceQueue(device, 0, 0, &queue);
 
-    // ── Command pool / buffer ─────────────────────────────────────────────
     VkCommandPoolCreateInfo poolCI = {
         VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
     poolCI.queueFamilyIndex = 0;
@@ -131,13 +126,13 @@ int main()
     VkCommandBuffer cmd;
     vkAllocateCommandBuffers(device, &cmdAlloc, &cmd);
 
-    // ── CPU reference renders ─────────────────────────────────────────────
+    // CPU reference renders (no jitter for the reference images)
     std::cout << "\n[CPU] Rendering Native_1x.png...\n";
     {
         std::vector<float> c(RENDER_W * RENDER_H * 4);
         std::vector<float> d(RENDER_W * RENDER_H);
         std::vector<float> m(RENDER_W * RENDER_H * 2, 0.f);
-        renderScene(RENDER_W, RENDER_H, 0.f, 0.f, 0.f, 0.f,
+        renderScene(RENDER_W, RENDER_H, 0.f, 0.f,
                     c.data(), d.data(), m.data());
         saveFloatImage("Native_1x.png", RENDER_W, RENDER_H, c.data());
         saveDepthImage("Native_1x_depth.png", RENDER_W, RENDER_H, d.data());
@@ -146,19 +141,18 @@ int main()
         std::vector<float> c(DISPLAY_W * DISPLAY_H * 4);
         std::vector<float> d(DISPLAY_W * DISPLAY_H);
         std::vector<float> m(DISPLAY_W * DISPLAY_H * 2, 0.f);
-        renderScene(DISPLAY_W, DISPLAY_H, 0.f, 0.f, 0.f, 0.f,
+        renderScene(DISPLAY_W, DISPLAY_H, 0.f, 0.f,
                     c.data(), d.data(), m.data());
         saveFloatImage("Native_2x.png", DISPLAY_W, DISPLAY_H, c.data());
     }
 
-    // ── Shared Vulkan resources ───────────────────────────────────────────
     VkDeviceSize colorUploadSize = RENDER_W * RENDER_H * 4 * sizeof(float);
     VkDeviceSize depthUploadSize = RENDER_W * RENDER_H * 1 * sizeof(float);
     VkDeviceSize mvUploadSize    = RENDER_W * RENDER_H * 2 * sizeof(float);
     VkDeviceSize uploadSize      = colorUploadSize + depthUploadSize + mvUploadSize;
     VkDeviceSize outSize         = DISPLAY_W * DISPLAY_H * 4 * sizeof(float);
 
-    VkBuffer      uploadBuffer;  VkDeviceMemory uploadMemory;
+    VkBuffer      uploadBuffer;   VkDeviceMemory uploadMemory;
     VkBuffer      downloadBuffer; VkDeviceMemory downloadMemory;
     createBuffer(device, physDev, uploadSize,
                  VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
@@ -201,7 +195,6 @@ int main()
         VK_IMAGE_USAGE_STORAGE_BIT      | VK_IMAGE_USAGE_SAMPLED_BIT,
         outputImage, outputMem);
 
-    // expImage is used by FSR2 only
     VkImageCreateInfo expInfo = createImage(device, physDev,
         1, 1, VK_FORMAT_R32_SFLOAT,
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
@@ -216,7 +209,6 @@ int main()
     void* scratch2 = _aligned_malloc(scratchSize, 64);
     void* scratch3 = _aligned_malloc(scratchSize, 64);
 
-    // ── FSR 1.2 ───────────────────────────────────────────────────────────
     RunFsr1Pass(
         device, physDev, queue, cmd,
         uploadBuffer, uploadMemory,
@@ -226,7 +218,6 @@ int main()
         colorUploadSize, outSize,
         vkDevCtx, scratch1, scratchSize);
 
-    // ── FSR 2.3.3 ─────────────────────────────────────────────────────────
     RunFsr2Pass(
         device, physDev, queue, cmd,
         uploadBuffer, uploadMemory,
@@ -239,7 +230,6 @@ int main()
         colorUploadSize, depthUploadSize, mvUploadSize, outSize,
         vkDevCtx, scratch2, scratchSize);
 
-    // ── FSR 3.1.4 ─────────────────────────────────────────────────────────
     RunFsr3Pass(
         device, physDev, queue, cmd,
         uploadBuffer, uploadMemory,
@@ -251,7 +241,6 @@ int main()
         colorUploadSize, depthUploadSize, mvUploadSize, outSize,
         vkDevCtx, scratch3, scratchSize);
 
-    // ── Cleanup ───────────────────────────────────────────────────────────
     vkDestroyImage  (device, colorImage,    nullptr);
     vkFreeMemory    (device, colorMem,      nullptr);
     vkDestroyImage  (device, depthImage,    nullptr);
