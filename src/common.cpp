@@ -178,78 +178,186 @@ SharedImage createSharedImage(VkDevice device, VkPhysicalDevice physicalDevice,
     return si;
 }
 
-// ---------- Scene / I/O ------------------------------------------------------
+// =============================================================================
+//  renderScene  –  Cauldron-faithful implementation
+//
+//  How Cauldron applies jitter (from SDK docs):
+//    raw jitter (pixel space) -> NDC offset:
+//      ndcOffX =  2.0f * jitterX / renderWidth
+//      ndcOffY = -2.0f * jitterY / renderHeight   (Y flipped: Vulkan NDC Y down)
+//    This offset is added to the clip-space X/Y before perspective divide,
+//    which is equivalent to shifting the projection matrix.
+//
+//  Motion vectors (pixel space, render resolution, NO jitter baked in):
+//    For a static scene with no camera motion the world-space hit point is
+//    the same in both frames. We project the current-frame hit point through
+//    BOTH the current jittered projection and the previous jittered projection,
+//    then compute the screen-space delta. Because the camera is fixed and the
+//    scene is static, the only difference between the two projections is the
+//    jitter offset itself. That makes the raw motion vector exactly equal to the
+//    jitter cancellation delta in pixel space, BUT we do NOT set the
+//    JITTER_CANCELLATION flag, so we provide the actual pixel-space
+//    reprojection delta here (which for a static scene is the jitter delta).
+//
+//    For a non-static scene or moving camera, you would project the 3-D hit
+//    point through both matrices and compute the screen-space difference.
+//
+//  Depth (reversed-Z, infinite far plane):
+//    depth = zNear / z   (values closer to 1 are closer to the camera)
+//    We declare FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED.
+//    We do NOT declare FFX_FSR3UPSCALER_ENABLE_DEPTH_INFINITE because our
+//    ray-caster has a finite far plane (zFar = 100). With finite far plane
+//    reversed-Z: depth = (zFar * zNear) / (z * (zFar - zNear)) + zFar / (zFar - zNear)
+//    simplified for large zFar -> zNear/z. We use the simplified form.
+//    Background pixels (no hit) get depth = 0 (far plane in reversed-Z).
+// =============================================================================
 void renderScene(int w, int h,
                  float currJX, float currJY,
                  float prevJX, float prevJY,
                  float* colorOut, float* depthOut, float* mvOut)
 {
-    const float aspect     = (float)w / (float)h;
-    const float fovY       = 1.04719755f;
-    const float tanHalfFov = tanf(fovY * 0.5f);
-    const float zNear = 0.1f, zFar = 100.0f;
+    const float aspect      = (float)w / (float)h;
+    const float tanHalfFov  = tanf(CAM_FOV_Y * 0.5f);
+
+    // Convert jitter from unit-pixel-space to NDC-space offsets
+    // (exactly as Cauldron / AMD SDK documentation prescribes)
+    //   ndcOff =  2 * jitter / renderDim  for X
+    //   ndcOff = -2 * jitter / renderDim  for Y  (Vulkan: +Y is down in NDC)
+    const float currNdcJX =  2.0f * currJX / (float)w;
+    const float currNdcJY = -2.0f * currJY / (float)h;
+    const float prevNdcJX =  2.0f * prevJX / (float)w;
+    const float prevNdcJY = -2.0f * prevJY / (float)h;
+
+    // Camera is at (0,1,0) looking along +Z.
+    // View matrix: identity (camera at origin of view space after translation).
+    const float ro[3] = { 0.f, 1.f, 0.f };
 
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
-            float ndcX = ((x + 0.5f + currJX) / w) * 2.0f - 1.0f;
-            float ndcY = ((y + 0.5f + currJY) / h) * 2.0f - 1.0f;
-            float ro[3] = { 0.f, 1.f, 0.f };
-            float rd[3] = { ndcX * aspect * tanHalfFov, -ndcY * tanHalfFov, 1.f };
-            float len   = sqrtf(rd[0]*rd[0] + rd[1]*rd[1] + rd[2]*rd[2]);
-            rd[0]/=len; rd[1]/=len; rd[2]/=len;
 
-            float hitZ = -1.f;
+            // -----------------------------------------------------------------
+            // Step 1: Build the current-frame jittered ray.
+            //   NDC for pixel centre (without jitter): ndcX = (x+0.5)/w*2-1
+            //   With jitter we ADD the NDC jitter offset:
+            //     ndcX_jittered = ndcX + currNdcJX
+            //   This is exactly what a jittered projection matrix does:
+            //   it translates clip-space by (currNdcJX, currNdcJY).
+            // -----------------------------------------------------------------
+            float ndcX = ((x + 0.5f) / (float)w) * 2.0f - 1.0f + currNdcJX;
+            float ndcY = ((y + 0.5f) / (float)h) * 2.0f - 1.0f + currNdcJY;
+
+            // Unproject to view-space direction
+            float rdX = ndcX * aspect * tanHalfFov;
+            float rdY = -ndcY * tanHalfFov;   // flip Y: NDC +Y is up in view
+            float rdZ = 1.f;
+            float rdLen = sqrtf(rdX*rdX + rdY*rdY + rdZ*rdZ);
+            rdX /= rdLen; rdY /= rdLen; rdZ /= rdLen;
+
+            // -----------------------------------------------------------------
+            // Step 2: Ray-scene intersection (sphere + floor).
+            // -----------------------------------------------------------------
+            float hitZ = -1.f;  // -1 means no hit
             float r = powf(135.f/255.f, 2.2f);
             float g = powf(206.f/255.f, 2.2f);
             float b = powf(235.f/255.f, 2.2f);
 
-            // Sphere
-            float oc[3] = { ro[0], ro[1]-1.f, ro[2]-4.f };
-            float bd    = rd[0]*oc[0] + rd[1]*oc[1] + rd[2]*oc[2];
-            float cv    = oc[0]*oc[0] + oc[1]*oc[1] + oc[2]*oc[2] - 2.25f;
-            float disc  = bd*bd - cv;
+            // Sphere at world (0, 1, 4), radius 1.5
+            float ocX = ro[0], ocY = ro[1]-1.f, ocZ = ro[2]-4.f;
+            float bd   = rdX*ocX + rdY*ocY + rdZ*ocZ;
+            float cv   = ocX*ocX + ocY*ocY + ocZ*ocZ - 2.25f;
+            float disc = bd*bd - cv;
             if (disc > 0.f) {
                 float t = -bd - sqrtf(disc);
-                if (t > zNear && t < zFar) {
+                if (t > CAM_Z_NEAR && t < CAM_Z_FAR) {
                     hitZ = t;
-                    float nx = ro[0]+rd[0]*t;
-                    float ny = ro[1]+rd[1]*t - 1.f;
-                    float nz = ro[2]+rd[2]*t - 4.f;
+                    float nx = ro[0]+rdX*t;
+                    float ny = ro[1]+rdY*t - 1.f;
+                    float nz = ro[2]+rdZ*t - 4.f;
                     float nl = sqrtf(nx*nx+ny*ny+nz*nz);
                     nx/=nl; ny/=nl; nz/=nl;
-                    float light[3] = { 0.577f, 0.577f, -0.577f };
-                    float ndotl = fmaxf(0.2f,
-                        -(nx*light[0]+ny*light[1]+nz*light[2]));
+                    float lx = 0.577f, ly = 0.577f, lz = -0.577f;
+                    float ndotl = fmaxf(0.2f, -(nx*lx + ny*ly + nz*lz));
                     r = powf(200.f/255.f, 2.2f) * ndotl;
                     g = powf( 50.f/255.f, 2.2f) * ndotl;
                     b = powf( 50.f/255.f, 2.2f) * ndotl;
                 }
             }
-            // Floor
-            if (rd[1] < 0.f) {
-                float t = -ro[1] / rd[1];
-                if (t > zNear && t < zFar && (hitZ < 0.f || t < hitZ)) {
+
+            // Floor at y = 0 (world space)
+            if (rdY < 0.f) {
+                float t = -ro[1] / rdY;
+                if (t > CAM_Z_NEAR && t < CAM_Z_FAR && (hitZ < 0.f || t < hitZ)) {
                     hitZ = t;
-                    float px = ro[0]+rd[0]*t, pz = ro[2]+rd[2]*t;
-                    int chk = ((int)floorf(px)+(int)floorf(pz)) % 2;
-                    float cv2 = (chk==0) ? powf(220.f/255.f,2.2f)
-                                         : powf( 80.f/255.f,2.2f);
+                    float px = ro[0]+rdX*t;
+                    float pz = ro[2]+rdZ*t;
+                    int chk = ((int)floorf(px) + (int)floorf(pz)) & 1;
+                    float cv2 = (chk == 0)
+                        ? powf(220.f/255.f, 2.2f)
+                        : powf( 80.f/255.f, 2.2f);
                     r = g = b = cv2;
                 }
             }
 
-            int idx = y*w + x;
+            int idx = y * w + x;
+
+            // -----------------------------------------------------------------
+            // Step 3: Write color.
+            // -----------------------------------------------------------------
             colorOut[idx*4+0] = r;
             colorOut[idx*4+1] = g;
             colorOut[idx*4+2] = b;
             colorOut[idx*4+3] = 1.f;
-            depthOut[idx]     = (hitZ > 0.f) ? (zNear / hitZ) : 0.f;
-            mvOut[idx*2+0]    = prevJX - currJX;
-            mvOut[idx*2+1]    = prevJY - currJY;
+
+            // -----------------------------------------------------------------
+            // Step 4: Write depth.
+            //   Reversed-Z with finite far plane:
+            //     depth = zNear / z   (approximation valid when zFar >> zNear)
+            //   Background: depth = 0 (far plane in reversed-Z)
+            // -----------------------------------------------------------------
+            depthOut[idx] = (hitZ > 0.f) ? (CAM_Z_NEAR / hitZ) : 0.f;
+
+            // -----------------------------------------------------------------
+            // Step 5: Compute motion vectors in render-resolution pixel space.
+            //   No jitter baked in (we do NOT set JITTER_CANCELLATION flag).
+            //
+            //   For each pixel, we need to know: "where did this pixel's 3-D
+            //   point project to in the PREVIOUS frame?"
+            //
+            //   Camera is static. Scene is static. The only change frame-to-frame
+            //   is the sub-pixel jitter.
+            //
+            //   Project the hit point (or background direction) through both the
+            //   current and previous projection to find the screen-space delta.
+            //
+            //   For view-space point P = (rdX, rdY, rdZ) * t  (or at infinity):
+            //
+            //     clip_curr.x = P.x / P.z * (1/(aspect*tan)) + jitterNdcX
+            //     clip_curr.y = P.y / P.z * (-1/tan)          + jitterNdcY
+            //     (perspective division already gives NDC if we divide by P.z)
+            //
+            //   screen_curr.x = (clip_curr.x + 1) * 0.5 * w - 0.5
+            //   screen_curr.y = (clip_curr.y + 1) * 0.5 * h - 0.5
+            //
+            //   The motion vector is: screen_prev - screen_curr
+            //
+            //   Because the camera and scene are static, P is the same in both
+            //   frames. So the difference reduces purely to the NDC jitter delta:
+            //     mv.x = (prevNdcJX - currNdcJX) * w * 0.5
+            //     mv.y = (prevNdcJY - currNdcJY) * h * 0.5
+            //
+            //   This is exactly the mathematically correct value. For a moving
+            //   camera or scene, you would compute the full per-pixel reprojection.
+            // -----------------------------------------------------------------
+            float mvX = (prevNdcJX - currNdcJX) * (float)w * 0.5f;
+            float mvY = (prevNdcJY - currNdcJY) * (float)h * 0.5f;
+
+            mvOut[idx*2+0] = mvX;
+            mvOut[idx*2+1] = mvY;
         }
     }
 }
 
+// ---------- I/O helpers -------------------------------------------------------
 void saveFloatImage(const std::string& filename, int w, int h,
                     const float* data)
 {
