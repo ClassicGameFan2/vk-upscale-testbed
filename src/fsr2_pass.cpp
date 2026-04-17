@@ -43,15 +43,18 @@ void RunFsr2Pass(
 
     FfxFsr2ContextDescription fsr2Desc = {};
     fsr2Desc.flags =
-        FFX_FSR2_ENABLE_DEBUG_CHECKING     |
-        FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE |
-        FFX_FSR2_ENABLE_AUTO_EXPOSURE      |
-        FFX_FSR2_ENABLE_DEPTH_INVERTED;
-    // NOTE: Do NOT set FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION.
-    //       Our MVs are zero (static scene, no jitter baked into them).
-    //       Jitter is communicated separately via dispatchDesc.jitterOffset.
-    // NOTE: Do NOT set FFX_FSR2_ENABLE_DEPTH_INFINITE.
-    //       Our scene has a finite far plane (zFar = 100).
+        FFX_FSR2_ENABLE_DEBUG_CHECKING                         |
+        FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE                     |
+        FFX_FSR2_ENABLE_AUTO_EXPOSURE                          |
+        FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION     |
+        FFX_FSR2_ENABLE_DEPTH_INVERTED                         |
+        FFX_FSR2_ENABLE_DEPTH_INFINITE;
+    // DEPTH_INVERTED: our depth = zNear/z (reversed-Z)
+    // DEPTH_INFINITE: our scene uses an infinite far plane convention.
+    //   With both flags set: cameraNear = FLT_MAX, cameraFar = CAM_Z_NEAR.
+    //   This matches Cauldron's convention exactly.
+    // MOTION_VECTORS_JITTER_CANCELLATION: our MVs contain prevJitter-currJitter.
+    //   FSR will subtract the jitter component to recover true zero motion.
     fsr2Desc.maxRenderSize    = { RENDER_W,  RENDER_H  };
     fsr2Desc.displaySize      = { DISPLAY_W, DISPLAY_H };
     fsr2Desc.fpMessage        = FfxMsgCallback;
@@ -114,7 +117,7 @@ void RunFsr2Pass(
 
         std::vector<float> fColor(RENDER_W * RENDER_H * 4);
         std::vector<float> fDepth(RENDER_W * RENDER_H);
-        std::vector<float> fMV   (RENDER_W * RENDER_H * 2, 0.f); // static scene -> all zero
+        std::vector<float> fMV   (RENDER_W * RENDER_H * 2);
         renderScene(RENDER_W, RENDER_H, jX, jY, prevJX, prevJY,
                     fColor.data(), fDepth.data(), fMV.data());
 
@@ -186,18 +189,11 @@ void RunFsr2Pass(
         dispatchDesc.motionVectors = mvRes;
         dispatchDesc.output        = outRes;
 
-        // Pass raw jitter values exactly as returned by ffxFsr2GetJitterOffset.
-        // These are the same values used to shift the NDC ray in renderScene.
-        // Do NOT negate Y — the Y negation is only for building a projection
-        // matrix (NDC convention). The dispatch jitterOffset just needs to
-        // match what was applied to produce the rendered image.
         dispatchDesc.jitterOffset.x = jX;
         dispatchDesc.jitterOffset.y = jY;
 
-        // Our MVs are zero (pixel-space, static scene).
-        // Scale = {1, 1}: no conversion needed.  MVs are already in the
-        // [-renderW, -renderH]..[renderW, renderH] range FSR expects
-        // (all zeros trivially satisfy this).
+        // Our MVs are in pixel space (prevJX-currJX, prevJY-currJY).
+        // scale = {1, 1}: MVs are already in the pixel-space range FSR expects.
         dispatchDesc.motionVectorScale.x = 1.0f;
         dispatchDesc.motionVectorScale.y = 1.0f;
 
@@ -208,10 +204,10 @@ void RunFsr2Pass(
         dispatchDesc.preExposure         = 1.f;
         dispatchDesc.reset               = (i == 0);
 
-        // Actual scene near/far distances. DEPTH_INVERTED is set (depth=zNear/z)
-        // but DEPTH_INFINITE is NOT set, so pass real values, not FLT_MAX.
-        dispatchDesc.cameraNear              = CAM_Z_NEAR;  // 0.1
-        dispatchDesc.cameraFar               = CAM_Z_FAR;   // 100
+        // DEPTH_INVERTED + DEPTH_INFINITE: Cauldron convention.
+        // cameraNear = FLT_MAX, cameraFar = CAM_Z_NEAR (the actual near distance).
+        dispatchDesc.cameraNear              = FLT_MAX;
+        dispatchDesc.cameraFar               = CAM_Z_NEAR;
         dispatchDesc.cameraFovAngleVertical  = CAM_FOV_Y;
         dispatchDesc.viewSpaceToMetersFactor = 1.f;
 
