@@ -181,31 +181,35 @@ SharedImage createSharedImage(VkDevice device, VkPhysicalDevice physicalDevice,
 // =============================================================================
 //  renderScene
 //
-//  Implements a Cauldron-faithful ray-cast scene renderer with correct jitter
-//  and motion vector conventions for FSR2 / FSR3.
+//  Cauldron-faithful ray-cast renderer.
 //
-//  JITTER (matching AMD SDK documentation exactly):
-//    Raw values jX, jY from ffxFsr3UpscalerGetJitterOffset are in unit pixel
-//    space (Halton[2,3] sequence, range roughly [-0.5, +0.5]).
-//    Convert to NDC: ndcJX =  2 * jX / renderWidth
-//                   ndcJY = -2 * jY / renderHeight   (Y flipped for NDC)
-//    These are added to each pixel's base NDC coordinate before ray construction.
-//    This is equivalent to what a jittered projection matrix does in rasterization.
+//  JITTER:
+//    jX, jY come from ffxFsr3UpscalerGetJitterOffset (or ffxFsr2GetJitterOffset).
+//    These are in unit-pixel space (Halton[2,3], range ~[-0.5, +0.5]).
+//    To apply as a projection-matrix jitter:
+//      ndcJX =  2 * jX / renderWidth
+//      ndcJY = -2 * jY / renderHeight   (Y negated for NDC convention)
+//    These are added to the pixel's base NDC coordinate before ray construction.
 //
-//  MOTION VECTORS (matching AMD SDK documentation and Cauldron exactly):
-//    Output in NDC space: mv = prevNDC - currNDC for each pixel's 3D hit point.
-//    motionVectorScale must be set to {renderWidth, renderHeight} in the dispatch
-//    so FSR can convert these NDC vectors to pixel-space internally.
-//    For a static camera + static scene: the world-space hit point is identical
-//    in both frames. Its NDC projection differs only by the jitter offset.
-//    However, the jitter is NOT part of the motion vectors — motion vectors must
-//    represent true scene motion, not jitter. So for a static scene, MVs = 0.
-//    (FSR is told about jitter separately via jitterOffset in the dispatch desc.)
+//  MOTION VECTORS (Cauldron convention, with JITTER_CANCELLATION):
+//    Output in PIXEL space (screen-space deltas).
+//    For a static camera + static scene, the only motion is from jitter.
+//    Cauldron bakes the jitter delta into the MV:
+//      mv.x = prevJX - currJX   (pixel space)
+//      mv.y = prevJY - currJY   (pixel space)
+//    This is passed with FFX_FSR3UPSCALER_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION
+//    so FSR subtracts the jitter component and recovers true zero motion.
+//    motionVectorScale = {1, 1} because MVs are already in pixel space.
 //
-//  DEPTH (reversed-Z, matching FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED):
-//    depth = zNear / z   (larger value = closer to camera)
-//    Background pixels: depth = 0 (far plane in reversed-Z).
-//    Dispatch uses cameraNear = FLT_MAX, cameraFar = zNear (Cauldron convention).
+//    NOTE: "pixel space" here means values are in the [-renderW, renderW] range
+//    that FSR expects. The jitter delta is tiny (sub-pixel), which is correct.
+//
+//  DEPTH (reversed-Z + infinite far, matching Cauldron):
+//    depth = zNear / z   (larger value = closer)
+//    Background pixels: depth = 0.
+//    Flags: DEPTH_INVERTED | DEPTH_INFINITE
+//    Dispatch: cameraNear = FLT_MAX, cameraFar = CAM_Z_NEAR (0.1)
+//    (Cauldron convention for infinite reversed-Z)
 //
 // =============================================================================
 void renderScene(int w, int h,
@@ -216,43 +220,33 @@ void renderScene(int w, int h,
     const float aspect     = (float)w / (float)h;
     const float tanHalfFov = tanf(CAM_FOV_Y * 0.5f);
 
-    // Convert jitter from unit-pixel-space to NDC-space (AMD SDK formula).
-    // This is what a jitter translation matrix applied to the projection does.
+    // Convert jitter from unit-pixel-space to NDC-space offsets.
+    // This is what a projection matrix jitter does.
     const float currNdcJX =  2.0f * currJX / (float)w;
     const float currNdcJY = -2.0f * currJY / (float)h;
 
-    // Camera origin (fixed, static camera)
+    // Camera origin (fixed)
     const float rox = 0.f, roy = 1.f, roz = 0.f;
 
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
 
-            // -----------------------------------------------------------------
-            // Step 1: Build jittered ray for this pixel.
-            //   Base NDC (pixel center): ndcX = (x+0.5)/w * 2 - 1
-            //   Apply jitter as NDC offset (projection matrix jitter equivalent):
-            //     ndcX_j = ndcX + currNdcJX
-            //     ndcY_j = ndcY + currNdcJY
-            // -----------------------------------------------------------------
+            // Build jittered ray for this pixel.
             float ndcX = ((x + 0.5f) / (float)w) * 2.0f - 1.0f + currNdcJX;
             float ndcY = ((y + 0.5f) / (float)h) * 2.0f - 1.0f + currNdcJY;
 
-            // Unproject to view-space direction (+Y up, +Z forward)
             float rdx =  ndcX * aspect * tanHalfFov;
             float rdy = -ndcY * tanHalfFov;
             float rdz =  1.0f;
             float rlen = sqrtf(rdx*rdx + rdy*rdy + rdz*rdz);
             rdx /= rlen; rdy /= rlen; rdz /= rlen;
 
-            // -----------------------------------------------------------------
-            // Step 2: Ray-scene intersection
-            // -----------------------------------------------------------------
             float hitT = -1.f;
             float r = powf(135.f/255.f, 2.2f);
             float g = powf(206.f/255.f, 2.2f);
             float b = powf(235.f/255.f, 2.2f);
 
-            // Sphere at world position (0, 1, 4), radius 1.5
+            // Sphere at (0, 1, 4), radius 1.5
             {
                 float ocx = rox, ocy = roy - 1.f, ocz = roz - 4.f;
                 float bd   = rdx*ocx + rdy*ocy + rdz*ocz;
@@ -276,7 +270,7 @@ void renderScene(int w, int h,
                 }
             }
 
-            // Floor at y = 0 (world space)
+            // Floor at y=0
             if (rdy < 0.f) {
                 float t = -roy / rdy;
                 if (t > CAM_Z_NEAR && t < CAM_Z_FAR && (hitT < 0.f || t < hitT)) {
@@ -293,41 +287,23 @@ void renderScene(int w, int h,
 
             int idx = y * w + x;
 
-            // -----------------------------------------------------------------
-            // Step 3: Write color
-            // -----------------------------------------------------------------
             colorOut[idx*4+0] = r;
             colorOut[idx*4+1] = g;
             colorOut[idx*4+2] = b;
             colorOut[idx*4+3] = 1.f;
 
-            // -----------------------------------------------------------------
-            // Step 4: Write depth (reversed-Z: depth = zNear / z)
-            //   Background pixels get depth = 0 (far in reversed-Z).
-            //   Dispatch: cameraNear = FLT_MAX, cameraFar = CAM_Z_NEAR (Cauldron).
-            // -----------------------------------------------------------------
+            // Reversed-Z depth: zNear/z. Background = 0.
+            // Used with DEPTH_INVERTED | DEPTH_INFINITE.
+            // Dispatch: cameraNear = FLT_MAX, cameraFar = CAM_Z_NEAR.
             depthOut[idx] = (hitT > 0.f) ? (CAM_Z_NEAR / hitT) : 0.f;
 
-            // -----------------------------------------------------------------
-            // Step 5: Write motion vectors in NDC space.
-            //
-            //   Cauldron uses NDC-space MVs and sets motionVectorScale =
-            //   {renderWidth, renderHeight} so FSR converts them to pixel space.
-            //
-            //   NDC MV = prevClip.xy/prevClip.w - currClip.xy/currClip.w
-            //
-            //   For a static camera + static scene:
-            //     The 3D hit point P is the same regardless of jitter.
-            //     currClip and prevClip come from projecting P through the
-            //     UN-jittered projection (jitter is NOT baked into MVs).
-            //     Since camera is static and P is static:
-            //       currClip == prevClip  =>  MV = 0
-            //
-            //   This is correct: a static scene has zero motion vectors.
-            //   FSR is told about the jitter separately via jitterOffset.
-            // -----------------------------------------------------------------
-            mvOut[idx*2+0] = 0.0f;
-            mvOut[idx*2+1] = 0.0f;
+            // Motion vectors in pixel space (Cauldron convention).
+            // For a static scene, the only per-frame delta is from jitter.
+            // We bake the jitter delta in so FSR can verify temporal consistency
+            // after removing it via MOTION_VECTORS_JITTER_CANCELLATION.
+            // mv = prevJitter - currJitter  (pixel space, tiny sub-pixel values)
+            mvOut[idx*2+0] = prevJX - currJX;
+            mvOut[idx*2+1] = prevJY - currJY;
         }
     }
 }
