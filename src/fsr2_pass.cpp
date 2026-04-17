@@ -43,11 +43,15 @@ void RunFsr2Pass(
 
     FfxFsr2ContextDescription fsr2Desc = {};
     fsr2Desc.flags =
-        FFX_FSR2_ENABLE_DEBUG_CHECKING     |
-        FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE |
-        FFX_FSR2_ENABLE_AUTO_EXPOSURE      |
+        FFX_FSR2_ENABLE_DEBUG_CHECKING                          |
+        FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE                      |
+        FFX_FSR2_ENABLE_AUTO_EXPOSURE                           |
+        // Our MVs are all zeros (static scene).
+        // JITTER_CANCELLATION tells FSR2 our MVs still contain the jitter
+        // contribution, which it must subtract. With all-zero MVs this is
+        // the safest mode: FSR handles jitter removal internally.
+        FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION      |
         FFX_FSR2_ENABLE_DEPTH_INVERTED;
-    // No JITTER_CANCELLATION: our MVs are zero (static scene), no jitter baked in.
     fsr2Desc.maxRenderSize    = { RENDER_W,  RENDER_H  };
     fsr2Desc.displaySize      = { DISPLAY_W, DISPLAY_H };
     fsr2Desc.fpMessage        = FfxMsgCallback;
@@ -182,13 +186,15 @@ void RunFsr2Pass(
         dispatchDesc.motionVectors = mvRes;
         dispatchDesc.output        = outRes;
 
-        // jitterOffset.x = raw jX (unit pixel space)
-        // jitterOffset.y = -jY  (Cauldron negates Y: dispatchUpscale.jitterOffset.y = -m_JitterY)
-        dispatchDesc.jitterOffset.x =  jX;
-        dispatchDesc.jitterOffset.y = -jY;
+        // Pass the raw jitter values as returned by ffxFsr2GetJitterOffset.
+        // Do NOT negate Y here. The negation of Y is only needed when building
+        // a rasterization projection matrix (NDC Y-flip). We report the raw
+        // pixel-space values so FSR can correctly invert the jitter it expects
+        // was applied to the scene.
+        dispatchDesc.jitterOffset.x = jX;
+        dispatchDesc.jitterOffset.y = jY;
 
-        // MVs are in NDC space; scale tells FSR to multiply by renderDim to get pixels.
-        // This matches the canonical AMD SDK example: motionVectorScale = {renderWidth, renderHeight}
+        // MVs are zero (static scene). motionVectorScale converts NDC -> pixels.
         dispatchDesc.motionVectorScale.x = (float)RENDER_W;
         dispatchDesc.motionVectorScale.y = (float)RENDER_H;
 
@@ -198,10 +204,8 @@ void RunFsr2Pass(
         dispatchDesc.frameTimeDelta      = 16.6f;
         dispatchDesc.preExposure         = 1.f;
         dispatchDesc.reset               = (i == 0);
-
-        // Inverted depth convention (Cauldron): cameraNear = FLT_MAX, cameraFar = real near distance
-        dispatchDesc.cameraNear              = FLT_MAX;
-        dispatchDesc.cameraFar               = CAM_Z_NEAR;
+        dispatchDesc.cameraNear          = FLT_MAX;
+        dispatchDesc.cameraFar           = CAM_Z_NEAR;
         dispatchDesc.cameraFovAngleVertical  = CAM_FOV_Y;
         dispatchDesc.viewSpaceToMetersFactor = 1.f;
 
