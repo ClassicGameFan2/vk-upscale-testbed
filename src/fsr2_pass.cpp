@@ -47,14 +47,12 @@ void RunFsr2Pass(
         FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE                     |
         FFX_FSR2_ENABLE_AUTO_EXPOSURE                          |
         FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION     |
-        FFX_FSR2_ENABLE_DEPTH_INVERTED                         |
-        FFX_FSR2_ENABLE_DEPTH_INFINITE;
-    // DEPTH_INVERTED: our depth = zNear/z (reversed-Z)
-    // DEPTH_INFINITE: our scene uses an infinite far plane convention.
-    //   With both flags set: cameraNear = FLT_MAX, cameraFar = CAM_Z_NEAR.
-    //   This matches Cauldron's convention exactly.
-    // MOTION_VECTORS_JITTER_CANCELLATION: our MVs contain prevJitter-currJitter.
-    //   FSR will subtract the jitter component to recover true zero motion.
+        FFX_FSR2_ENABLE_DEPTH_INVERTED;
+    // NOTE: No DEPTH_INFINITE flag. Our scene has a finite far plane (CAM_Z_FAR=100).
+    // Our depth = zNear/z (reversed-Z), background = 0.
+    // DEPTH_INVERTED is correct. DEPTH_INFINITE is NOT used.
+    // Dispatch: cameraNear = FLT_MAX, cameraFar = CAM_Z_NEAR is the Cauldron
+    // convention for reversed-Z with DEPTH_INVERTED only (no DEPTH_INFINITE).
     fsr2Desc.maxRenderSize    = { RENDER_W,  RENDER_H  };
     fsr2Desc.displaySize      = { DISPLAY_W, DISPLAY_H };
     fsr2Desc.fpMessage        = FfxMsgCallback;
@@ -192,10 +190,12 @@ void RunFsr2Pass(
         dispatchDesc.jitterOffset.x = jX;
         dispatchDesc.jitterOffset.y = jY;
 
-        // Our MVs are in pixel space (prevJX-currJX, prevJY-currJY).
-        // scale = {1, 1}: MVs are already in the pixel-space range FSR expects.
-        dispatchDesc.motionVectorScale.x = 1.0f;
-        dispatchDesc.motionVectorScale.y = 1.0f;
+        // Our MVs are in NDC space: (prevJX - currJX, prevJY - currJY).
+        // These are unit-pixel-space values in roughly [-0.5, +0.5].
+        // FSR expects MVs in [-renderW, renderW] x [-renderH, renderH].
+        // motionVectorScale converts NDC -> screen-space pixel range.
+        dispatchDesc.motionVectorScale.x = (float)RENDER_W;
+        dispatchDesc.motionVectorScale.y = (float)RENDER_H;
 
         dispatchDesc.renderSize          = { RENDER_W, RENDER_H };
         dispatchDesc.enableSharpening    = true;
@@ -204,8 +204,8 @@ void RunFsr2Pass(
         dispatchDesc.preExposure         = 1.f;
         dispatchDesc.reset               = (i == 0);
 
-        // DEPTH_INVERTED + DEPTH_INFINITE: Cauldron convention.
-        // cameraNear = FLT_MAX, cameraFar = CAM_Z_NEAR (the actual near distance).
+        // Reversed-Z, no infinite far. cameraNear/cameraFar are swapped
+        // because DEPTH_INVERTED means depth=1 is near, depth=0 is far.
         dispatchDesc.cameraNear              = FLT_MAX;
         dispatchDesc.cameraFar               = CAM_Z_NEAR;
         dispatchDesc.cameraFovAngleVertical  = CAM_FOV_Y;
