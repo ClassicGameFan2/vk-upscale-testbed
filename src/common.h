@@ -22,8 +22,6 @@ static constexpr uint32_t DISPLAY_W = 640;
 static constexpr uint32_t DISPLAY_H = 480;
 
 // ---------- Vulkan helpers ---------------------------------------------------
-// Prefixed with "app" to avoid collision with the same-named symbol inside
-// the AMD FidelityFX SDK static libraries (e.g. FrameInterpolationSwapchainVK).
 uint32_t appFindMemoryType(VkPhysicalDevice physicalDevice,
                            uint32_t typeFilter,
                            VkMemoryPropertyFlags properties);
@@ -57,9 +55,12 @@ SharedImage createSharedImage(VkDevice device, VkPhysicalDevice physicalDevice,
                               const FfxCreateResourceDescription& desc);
 
 // ---------- Scene / I/O ------------------------------------------------------
+// jX, jY  : pixel-space jitter for this frame (from ffxFsr*GetJitterOffset).
+//            These are applied to color + depth only.
+//            Motion vectors are always zero (static scene, static camera,
+//            no jitter in MVs -- do NOT set JITTER_CANCELLATION flag).
 void renderScene(int w, int h,
-                 float currJX, float currJY,
-                 float prevJX, float prevJY,
+                 float jX, float jY,
                  float* colorOut, float* depthOut, float* mvOut);
 
 void saveFloatImage(const std::string& filename, int w, int h,
