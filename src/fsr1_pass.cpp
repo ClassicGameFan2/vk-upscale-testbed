@@ -42,12 +42,12 @@ void RunFsr1Pass(
         std::cout << "[FATAL] ffxFsr1ContextCreate failed!\n"; return;
     }
 
-    // Upload color
+    // FSR1 is spatial — no jitter needed. Render at jitter=(0,0).
     {
         std::vector<float> fColor(RENDER_W * RENDER_H * 4);
         std::vector<float> fDepth(RENDER_W * RENDER_H);
         std::vector<float> fMV   (RENDER_W * RENDER_H * 2, 0.f);
-        renderScene(RENDER_W, RENDER_H, 0.f, 0.f, 0.f, 0.f,
+        renderScene(RENDER_W, RENDER_H, 0.f, 0.f,
                     fColor.data(), fDepth.data(), fMV.data());
         void* mp;
         vkMapMemory(device, uploadMemory, 0, colorUploadSize, 0, &mp);
