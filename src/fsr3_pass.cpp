@@ -9,9 +9,6 @@ static void Fsr3MsgCallback(FfxMsgType /*type*/, const wchar_t* message) {
     std::cout.flush();
 }
 
-// Run one complete FSR3 sequence.
-// sharpen=true  -> FSR_3.1.4_2x.png        (with RCAS)
-// sharpen=false -> FSR_3.1.4_norcas_2x.png (without RCAS, for comparison)
 static void RunFsr3Sequence(
     VkDevice device, VkPhysicalDevice physicalDevice,
     VkQueue queue, VkCommandBuffer cmd,
@@ -43,11 +40,15 @@ static void RunFsr3Sequence(
 
     FfxFsr3UpscalerContextDescription fsr3Desc = {};
     fsr3Desc.flags =
-        FFX_FSR3UPSCALER_ENABLE_HIGH_DYNAMIC_RANGE                 |
-        FFX_FSR3UPSCALER_ENABLE_AUTO_EXPOSURE                      |
-        FFX_FSR3UPSCALER_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION |
-        FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED                     |
+        FFX_FSR3UPSCALER_ENABLE_HIGH_DYNAMIC_RANGE  |
+        FFX_FSR3UPSCALER_ENABLE_AUTO_EXPOSURE       |
+        // DEPTH_INVERTED: depth = zNear/t => 1 at near, 0 at infinity
+        FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED      |
+        // DEPTH_INFINITE: far plane is at infinity
+        FFX_FSR3UPSCALER_ENABLE_DEPTH_INFINITE      |
         FFX_FSR3UPSCALER_ENABLE_DEBUG_CHECKING;
+        // NOTE: Do NOT set MOTION_VECTORS_JITTER_CANCELLATION.
+        //       Motion vectors must be pure scene motion, with no jitter delta.
     fsr3Desc.maxRenderSize    = { RENDER_W,  RENDER_H  };
     fsr3Desc.maxUpscaleSize   = { DISPLAY_W, DISPLAY_H };
     fsr3Desc.fpMessage        = Fsr3MsgCallback;
@@ -138,7 +139,6 @@ static void RunFsr3Sequence(
         VK_IMAGE_ASPECT_COLOR_BIT, 0, siRecon.info.mipLevels, 0, 1 };
 
     int32_t jitterIndex = 0;
-    float   prevJX = 0.f, prevJY = 0.f;
     void*   outData = nullptr;
 
     for (int i = 0; i < totalFrames; i++) {
@@ -146,10 +146,12 @@ static void RunFsr3Sequence(
         float jX = 0.f, jY = 0.f;
         ffxFsr3UpscalerGetJitterOffset(&jX, &jY, jitterIndex, phaseCount);
 
+        // Render scene with jitter applied to color+depth.
+        // Motion vectors are always zero (static scene, no jitter in MVs).
         std::vector<float> fColor(RENDER_W * RENDER_H * 4);
         std::vector<float> fDepth(RENDER_W * RENDER_H);
-        std::vector<float> fMV   (RENDER_W * RENDER_H * 2);
-        renderScene(RENDER_W, RENDER_H, jX, jY, prevJX, prevJY,
+        std::vector<float> fMV   (RENDER_W * RENDER_H * 2, 0.f);
+        renderScene(RENDER_W, RENDER_H, jX, jY,
                     fColor.data(), fDepth.data(), fMV.data());
 
         void* mp;
@@ -163,8 +165,6 @@ static void RunFsr3Sequence(
         vkBeginCommandBuffer(cmd, &beginInfo);
 
         // Clear reconstructedPrevNearestDepth to zero every frame.
-        // Required by documentation: PrepareInputs uses atomic operations to
-        // write into this buffer; stale non-zero values prevent correct updates.
         transition(cmd, siRecon.image, siRecon.layout,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                    VK_IMAGE_ASPECT_COLOR_BIT, siRecon.info.mipLevels);
@@ -235,9 +235,12 @@ static void RunFsr3Sequence(
         disp.dilatedDepth                  = dilDepthRes;
         disp.dilatedMotionVectors          = dilMVRes;
 
+        // Jitter offset: tell FSR the pixel-space sub-pixel shift used when rendering.
         disp.jitterOffset.x = jX;
         disp.jitterOffset.y = jY;
 
+        // Motion vectors are in render-resolution pixel space.
+        // They are all zero (static scene). Scale = render dimensions.
         disp.motionVectorScale.x = (float)RENDER_W;
         disp.motionVectorScale.y = (float)RENDER_H;
 
@@ -249,8 +252,12 @@ static void RunFsr3Sequence(
         disp.frameTimeDelta          = 16.6f;
         disp.preExposure             = 1.f;
         disp.reset                   = (i == 0);
-        disp.cameraNear              = FLT_MAX;
-        disp.cameraFar               = 0.1f;
+
+        // Reversed-Z + infinite far plane:
+        // cameraNear = 0.1f (actual near plane)
+        // cameraFar  = FLT_MAX (infinite)
+        disp.cameraNear              = 0.1f;
+        disp.cameraFar               = FLT_MAX;
         disp.cameraFovAngleVertical  = 1.04719755f;
         disp.viewSpaceToMetersFactor = 1.f;
         disp.flags                   = 0;
@@ -316,9 +323,6 @@ static void RunFsr3Sequence(
 
         if (frameNum % 32 == 0)
             std::cout << "[FSR3] Frame " << frameNum << "/" << totalFrames << "\n";
-
-        prevJX = jX;
-        prevJY = jY;
     }
 
     // Final readback
@@ -371,13 +375,10 @@ void RunFsr3Pass(
     std::cout << "  FSR 3.1.4 Temporal Upscaling Test (128 frames)\n";
     std::cout << "============================================\n";
 
-    // We need two scratch buffers - one per context creation.
-    // The caller gave us one; allocate a second one of the same size.
     size_t scratchSize2 = scratchBufferSize;
     void*  scratch2     = _aligned_malloc(scratchSize2, 64);
     memset(scratch2, 0, scratchSize2);
 
-    // Run with sharpening enabled
     RunFsr3Sequence(
         device, physicalDevice, queue, cmd,
         uploadBuffer, uploadMemory,
@@ -390,7 +391,6 @@ void RunFsr3Pass(
         vkDevCtx, scratchBuffer, scratchBufferSize,
         true,  "FSR_3.1.4_2x.png");
 
-    // Run without sharpening for comparison
     RunFsr3Sequence(
         device, physicalDevice, queue, cmd,
         uploadBuffer, uploadMemory,
