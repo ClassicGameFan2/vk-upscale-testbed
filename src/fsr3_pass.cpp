@@ -38,19 +38,27 @@ static void RunFsr3Sequence(
     ffxGetInterfaceVK(&ffxIface, ffxGetDeviceVK(&vkDevCtx),
                       scratchBuffer, scratchBufferSize, 4);
 
+    // -------------------------------------------------------------------------
     // Context flags:
-    //   HIGH_DYNAMIC_RANGE  : linear HDR input
-    //   AUTO_EXPOSURE       : FSR computes its own exposure
-    //   DEPTH_INVERTED      : depth = zNear/z (reversed-Z)
-    //   MOTION_VECTORS_JITTER_CANCELLATION : our MVs are zero (static scene);
-    //       tell FSR3 to handle jitter subtraction internally, same as FSR2.
-    //   DEBUG_CHECKING      : validate API usage
+    //   HIGH_DYNAMIC_RANGE : linear HDR color input
+    //   AUTO_EXPOSURE      : FSR computes its own exposure (no app exposure texture)
+    //   DEPTH_INVERTED     : depth buffer contains zNear/z (reversed-Z)
+    //   DEBUG_CHECKING     : validate API usage (warnings to fpMessage callback)
+    //
+    // Intentionally NOT set:
+    //   DEPTH_INFINITE     : our scene has a finite far plane (zFar = 100).
+    //                        Setting this would require passing FLT_MAX / zNear
+    //                        for cameraNear/cameraFar respectively.
+    //   MOTION_VECTORS_JITTER_CANCELLATION : our MVs do NOT contain any jitter.
+    //                        They are the true scene-motion reprojection delta
+    //                        (zero for a static scene). Jitter is communicated
+    //                        to FSR exclusively via disp.jitterOffset.
+    // -------------------------------------------------------------------------
     FfxFsr3UpscalerContextDescription fsr3Desc = {};
     fsr3Desc.flags =
-        FFX_FSR3UPSCALER_ENABLE_HIGH_DYNAMIC_RANGE                 |
-        FFX_FSR3UPSCALER_ENABLE_AUTO_EXPOSURE                      |
-        FFX_FSR3UPSCALER_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION |
-        FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED                     |
+        FFX_FSR3UPSCALER_ENABLE_HIGH_DYNAMIC_RANGE |
+        FFX_FSR3UPSCALER_ENABLE_AUTO_EXPOSURE      |
+        FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED     |
         FFX_FSR3UPSCALER_ENABLE_DEBUG_CHECKING;
     fsr3Desc.maxRenderSize    = { RENDER_W,  RENDER_H  };
     fsr3Desc.maxUpscaleSize   = { DISPLAY_W, DISPLAY_H };
@@ -152,7 +160,7 @@ static void RunFsr3Sequence(
 
         std::vector<float> fColor(RENDER_W * RENDER_H * 4);
         std::vector<float> fDepth(RENDER_W * RENDER_H);
-        std::vector<float> fMV   (RENDER_W * RENDER_H * 2, 0.f);
+        std::vector<float> fMV   (RENDER_W * RENDER_H * 2, 0.f); // static scene
         renderScene(RENDER_W, RENDER_H, jX, jY, prevJX, prevJY,
                     fColor.data(), fDepth.data(), fMV.data());
 
@@ -166,7 +174,9 @@ static void RunFsr3Sequence(
         vkResetCommandBuffer(cmd, 0);
         vkBeginCommandBuffer(cmd, &beginInfo);
 
-        // Clear reconstructedPrevNearestDepth every frame
+        // Clear reconstructedPrevNearestDepth every frame.
+        // FSR's PrepareInputs uses atomic max writes into this buffer;
+        // stale non-zero values from the previous frame corrupt results.
         transition(cmd, siRecon.image, siRecon.layout,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                    VK_IMAGE_ASPECT_COLOR_BIT, siRecon.info.mipLevels);
@@ -236,27 +246,36 @@ static void RunFsr3Sequence(
         disp.dilatedDepth                  = dilDRes;
         disp.dilatedMotionVectors          = dilMVRes;
 
-        // Pass raw pixel-space jitter values as returned by ffxFsr3UpscalerGetJitterOffset.
-        // Do NOT negate Y. The Y negation is only for the rasterization NDC matrix path.
-        // FSR uses these raw values to perform inverse-jitter on the accumulated history.
+        // Pass the raw jitter values exactly as returned by
+        // ffxFsr3UpscalerGetJitterOffset. These match what renderScene used
+        // to shift the ray (NDC shift = 2*jX/w, -2*jY/h). FSR uses these
+        // raw pixel-space values to perform inverse-jitter on its history.
+        // Do NOT negate Y here.
         disp.jitterOffset.x = jX;
         disp.jitterOffset.y = jY;
 
-        // MVs are zero (static scene). motionVectorScale converts NDC -> pixels.
-        disp.motionVectorScale.x = (float)RENDER_W;
-        disp.motionVectorScale.y = (float)RENDER_H;
+        // MVs are zero (static scene, in pixel-space already).
+        // Scale = {1, 1}: our MVs are already in the [-w,-h]..[w,h] range
+        // FSR expects (zeros trivially satisfy this).
+        disp.motionVectorScale.x = 1.0f;
+        disp.motionVectorScale.y = 1.0f;
 
         disp.renderSize  = { RENDER_W,  RENDER_H  };
         disp.upscaleSize = { DISPLAY_W, DISPLAY_H };
 
         disp.enableSharpening        = sharpen;
         disp.sharpness               = 0.8f;
-        disp.frameTimeDelta          = 16.6f;
+        disp.frameTimeDelta          = 16.6f;   // ~60 fps in ms
         disp.preExposure             = 1.0f;
         disp.reset                   = (i == 0);
-        disp.cameraNear              = FLT_MAX;
-        disp.cameraFar               = CAM_Z_NEAR;
-        disp.cameraFovAngleVertical  = CAM_FOV_Y;
+
+        // Actual near/far distances. DEPTH_INVERTED is set so depth=zNear/z,
+        // but DEPTH_INFINITE is NOT set, so we pass the real scene values.
+        // Do NOT pass FLT_MAX/zNear — that is only for the infinite-far-plane case.
+        disp.cameraNear             = CAM_Z_NEAR;   // 0.1
+        disp.cameraFar              = CAM_Z_FAR;    // 100
+        disp.cameraFovAngleVertical = CAM_FOV_Y;    // 60 deg in radians
+
         disp.viewSpaceToMetersFactor = 1.0f;
         disp.flags                   = 0;
 
