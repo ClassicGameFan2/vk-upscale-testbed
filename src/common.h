@@ -21,8 +21,8 @@ static constexpr uint32_t RENDER_H  = 240;
 static constexpr uint32_t DISPLAY_W = 640;
 static constexpr uint32_t DISPLAY_H = 480;
 
-// Camera constants - shared between renderScene and FSR dispatch setup
-static constexpr float CAM_FOV_Y  = 1.04719755f; // 60 degrees vertical FOV
+// Camera constants shared between renderScene and FSR dispatch setup.
+static constexpr float CAM_FOV_Y  = 1.04719755f; // 60 degrees in radians
 static constexpr float CAM_Z_NEAR = 0.1f;
 static constexpr float CAM_Z_FAR  = 100.0f;
 
@@ -61,14 +61,16 @@ SharedImage createSharedImage(VkDevice device, VkPhysicalDevice physicalDevice,
 
 // ---------- Scene / I/O ------------------------------------------------------
 //
-// currJX/currJY : jitter for current  frame, unit pixel space (from ffxFsr3UpscalerGetJitterOffset)
+// currJX/currJY : jitter for current  frame, unit pixel space
 // prevJX/prevJY : jitter for previous frame, unit pixel space
 //
-// colorOut : w*h*4 floats, linear HDR RGBA
-// depthOut : w*h*1 floats, reversed-Z (zNear/z), background = 0
-// mvOut    : w*h*2 floats, NDC-space motion vectors (prevNDC - currNDC)
-//            For a static scene: all zeros.
-//            Use motionVectorScale = {renderWidth, renderHeight} in dispatch.
+// colorOut : w*h*4 floats, linear HDR RGBA, rendered with jitter applied
+// depthOut : w*h*1 floats, reversed-Z infinite (zNear/z), background=0
+//            Use flags: DEPTH_INVERTED | DEPTH_INFINITE
+//            Dispatch: cameraNear=FLT_MAX, cameraFar=CAM_Z_NEAR
+// mvOut    : w*h*2 floats, pixel-space motion vectors = prevJitter - currJitter
+//            Use with MOTION_VECTORS_JITTER_CANCELLATION flag.
+//            motionVectorScale = {1, 1} (already in pixel space).
 //
 void renderScene(int w, int h,
                  float currJX, float currJY,
