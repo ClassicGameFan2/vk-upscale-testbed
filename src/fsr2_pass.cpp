@@ -43,15 +43,15 @@ void RunFsr2Pass(
 
     FfxFsr2ContextDescription fsr2Desc = {};
     fsr2Desc.flags =
-        FFX_FSR2_ENABLE_DEBUG_CHECKING                          |
-        FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE                      |
-        FFX_FSR2_ENABLE_AUTO_EXPOSURE                           |
-        // Our MVs are all zeros (static scene).
-        // JITTER_CANCELLATION tells FSR2 our MVs still contain the jitter
-        // contribution, which it must subtract. With all-zero MVs this is
-        // the safest mode: FSR handles jitter removal internally.
-        FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION      |
+        FFX_FSR2_ENABLE_DEBUG_CHECKING     |
+        FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE |
+        FFX_FSR2_ENABLE_AUTO_EXPOSURE      |
         FFX_FSR2_ENABLE_DEPTH_INVERTED;
+    // NOTE: Do NOT set FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION.
+    //       Our MVs are zero (static scene, no jitter baked into them).
+    //       Jitter is communicated separately via dispatchDesc.jitterOffset.
+    // NOTE: Do NOT set FFX_FSR2_ENABLE_DEPTH_INFINITE.
+    //       Our scene has a finite far plane (zFar = 100).
     fsr2Desc.maxRenderSize    = { RENDER_W,  RENDER_H  };
     fsr2Desc.displaySize      = { DISPLAY_W, DISPLAY_H };
     fsr2Desc.fpMessage        = FfxMsgCallback;
@@ -114,7 +114,7 @@ void RunFsr2Pass(
 
         std::vector<float> fColor(RENDER_W * RENDER_H * 4);
         std::vector<float> fDepth(RENDER_W * RENDER_H);
-        std::vector<float> fMV   (RENDER_W * RENDER_H * 2, 0.f);
+        std::vector<float> fMV   (RENDER_W * RENDER_H * 2, 0.f); // static scene -> all zero
         renderScene(RENDER_W, RENDER_H, jX, jY, prevJX, prevJY,
                     fColor.data(), fDepth.data(), fMV.data());
 
@@ -186,17 +186,20 @@ void RunFsr2Pass(
         dispatchDesc.motionVectors = mvRes;
         dispatchDesc.output        = outRes;
 
-        // Pass the raw jitter values as returned by ffxFsr2GetJitterOffset.
-        // Do NOT negate Y here. The negation of Y is only needed when building
-        // a rasterization projection matrix (NDC Y-flip). We report the raw
-        // pixel-space values so FSR can correctly invert the jitter it expects
-        // was applied to the scene.
+        // Pass raw jitter values exactly as returned by ffxFsr2GetJitterOffset.
+        // These are the same values used to shift the NDC ray in renderScene.
+        // Do NOT negate Y — the Y negation is only for building a projection
+        // matrix (NDC convention). The dispatch jitterOffset just needs to
+        // match what was applied to produce the rendered image.
         dispatchDesc.jitterOffset.x = jX;
         dispatchDesc.jitterOffset.y = jY;
 
-        // MVs are zero (static scene). motionVectorScale converts NDC -> pixels.
-        dispatchDesc.motionVectorScale.x = (float)RENDER_W;
-        dispatchDesc.motionVectorScale.y = (float)RENDER_H;
+        // Our MVs are zero (pixel-space, static scene).
+        // Scale = {1, 1}: no conversion needed.  MVs are already in the
+        // [-renderW, -renderH]..[renderW, renderH] range FSR expects
+        // (all zeros trivially satisfy this).
+        dispatchDesc.motionVectorScale.x = 1.0f;
+        dispatchDesc.motionVectorScale.y = 1.0f;
 
         dispatchDesc.renderSize          = { RENDER_W, RENDER_H };
         dispatchDesc.enableSharpening    = true;
@@ -204,8 +207,11 @@ void RunFsr2Pass(
         dispatchDesc.frameTimeDelta      = 16.6f;
         dispatchDesc.preExposure         = 1.f;
         dispatchDesc.reset               = (i == 0);
-        dispatchDesc.cameraNear          = FLT_MAX;
-        dispatchDesc.cameraFar           = CAM_Z_NEAR;
+
+        // Actual scene near/far distances. DEPTH_INVERTED is set (depth=zNear/z)
+        // but DEPTH_INFINITE is NOT set, so pass real values, not FLT_MAX.
+        dispatchDesc.cameraNear              = CAM_Z_NEAR;  // 0.1
+        dispatchDesc.cameraFar               = CAM_Z_FAR;   // 100
         dispatchDesc.cameraFovAngleVertical  = CAM_FOV_Y;
         dispatchDesc.viewSpaceToMetersFactor = 1.f;
 
