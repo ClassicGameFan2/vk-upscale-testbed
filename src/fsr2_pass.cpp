@@ -43,12 +43,11 @@ void RunFsr2Pass(
 
     FfxFsr2ContextDescription fsr2Desc = {};
     fsr2Desc.flags =
-        FFX_FSR2_ENABLE_DEBUG_CHECKING          |
-        FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE      |
-        FFX_FSR2_ENABLE_AUTO_EXPOSURE           |
+        FFX_FSR2_ENABLE_DEBUG_CHECKING     |
+        FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE |
+        FFX_FSR2_ENABLE_AUTO_EXPOSURE      |
         FFX_FSR2_ENABLE_DEPTH_INVERTED;
-    // Note: FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION is NOT set.
-    //       Our MVs are pure pixel-space displacements without jitter.
+    // No JITTER_CANCELLATION: our MVs are zero (static scene), no jitter baked in.
     fsr2Desc.maxRenderSize    = { RENDER_W,  RENDER_H  };
     fsr2Desc.displaySize      = { DISPLAY_W, DISPLAY_H };
     fsr2Desc.fpMessage        = FfxMsgCallback;
@@ -111,7 +110,7 @@ void RunFsr2Pass(
 
         std::vector<float> fColor(RENDER_W * RENDER_H * 4);
         std::vector<float> fDepth(RENDER_W * RENDER_H);
-        std::vector<float> fMV   (RENDER_W * RENDER_H * 2);
+        std::vector<float> fMV   (RENDER_W * RENDER_H * 2, 0.f);
         renderScene(RENDER_W, RENDER_H, jX, jY, prevJX, prevJY,
                     fColor.data(), fDepth.data(), fMV.data());
 
@@ -183,12 +182,15 @@ void RunFsr2Pass(
         dispatchDesc.motionVectors = mvRes;
         dispatchDesc.output        = outRes;
 
-        dispatchDesc.jitterOffset.x = jX;
-        dispatchDesc.jitterOffset.y = jY;
+        // jitterOffset.x = raw jX (unit pixel space)
+        // jitterOffset.y = -jY  (Cauldron negates Y: dispatchUpscale.jitterOffset.y = -m_JitterY)
+        dispatchDesc.jitterOffset.x =  jX;
+        dispatchDesc.jitterOffset.y = -jY;
 
-        // motionVectorScale = {1, 1}: MVs are in render-resolution pixel space.
-        dispatchDesc.motionVectorScale.x = 1.0f;
-        dispatchDesc.motionVectorScale.y = 1.0f;
+        // MVs are in NDC space; scale tells FSR to multiply by renderDim to get pixels.
+        // This matches the canonical AMD SDK example: motionVectorScale = {renderWidth, renderHeight}
+        dispatchDesc.motionVectorScale.x = (float)RENDER_W;
+        dispatchDesc.motionVectorScale.y = (float)RENDER_H;
 
         dispatchDesc.renderSize          = { RENDER_W, RENDER_H };
         dispatchDesc.enableSharpening    = true;
@@ -197,9 +199,9 @@ void RunFsr2Pass(
         dispatchDesc.preExposure         = 1.f;
         dispatchDesc.reset               = (i == 0);
 
-        // Reversed-Z with finite far plane: pass actual distances.
-        dispatchDesc.cameraNear              = CAM_Z_NEAR;
-        dispatchDesc.cameraFar               = CAM_Z_FAR;
+        // Inverted depth convention (Cauldron): cameraNear = FLT_MAX, cameraFar = real near distance
+        dispatchDesc.cameraNear              = FLT_MAX;
+        dispatchDesc.cameraFar               = CAM_Z_NEAR;
         dispatchDesc.cameraFovAngleVertical  = CAM_FOV_Y;
         dispatchDesc.viewSpaceToMetersFactor = 1.f;
 
