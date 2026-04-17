@@ -38,22 +38,19 @@ static void RunFsr3Sequence(
     ffxGetInterfaceVK(&ffxIface, ffxGetDeviceVK(&vkDevCtx),
                       scratchBuffer, scratchBufferSize, 4);
 
-    // -------------------------------------------------------------------------
-    // Context flags - matching Cauldron fsrapirendermodule.cpp:
+    // Context flags:
     //   HIGH_DYNAMIC_RANGE  : linear HDR input
     //   AUTO_EXPOSURE       : FSR computes its own exposure
     //   DEPTH_INVERTED      : depth = zNear/z (reversed-Z)
+    //   MOTION_VECTORS_JITTER_CANCELLATION : our MVs are zero (static scene);
+    //       tell FSR3 to handle jitter subtraction internally, same as FSR2.
     //   DEBUG_CHECKING      : validate API usage
-    //
-    // Intentionally omitted:
-    //   DEPTH_INFINITE          - our scene has a finite far plane (zFar=100)
-    //   MOTION_VECTORS_JITTER_CANCELLATION - MVs are zero (no jitter baked in)
-    // -------------------------------------------------------------------------
     FfxFsr3UpscalerContextDescription fsr3Desc = {};
     fsr3Desc.flags =
-        FFX_FSR3UPSCALER_ENABLE_HIGH_DYNAMIC_RANGE |
-        FFX_FSR3UPSCALER_ENABLE_AUTO_EXPOSURE      |
-        FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED     |
+        FFX_FSR3UPSCALER_ENABLE_HIGH_DYNAMIC_RANGE                 |
+        FFX_FSR3UPSCALER_ENABLE_AUTO_EXPOSURE                      |
+        FFX_FSR3UPSCALER_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION |
+        FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED                     |
         FFX_FSR3UPSCALER_ENABLE_DEBUG_CHECKING;
     fsr3Desc.maxRenderSize    = { RENDER_W,  RENDER_H  };
     fsr3Desc.maxUpscaleSize   = { DISPLAY_W, DISPLAY_H };
@@ -169,7 +166,7 @@ static void RunFsr3Sequence(
         vkResetCommandBuffer(cmd, 0);
         vkBeginCommandBuffer(cmd, &beginInfo);
 
-        // Clear reconstructedPrevNearestDepth every frame (atomic max accumulation)
+        // Clear reconstructedPrevNearestDepth every frame
         transition(cmd, siRecon.image, siRecon.layout,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                    VK_IMAGE_ASPECT_COLOR_BIT, siRecon.info.mipLevels);
@@ -239,12 +236,13 @@ static void RunFsr3Sequence(
         disp.dilatedDepth                  = dilDRes;
         disp.dilatedMotionVectors          = dilMVRes;
 
-        // jitterOffset: pass raw pixel-space values, negate Y (matching Cauldron)
-        disp.jitterOffset.x =  jX;
-        disp.jitterOffset.y = -jY;
+        // Pass raw pixel-space jitter values as returned by ffxFsr3UpscalerGetJitterOffset.
+        // Do NOT negate Y. The Y negation is only for the rasterization NDC matrix path.
+        // FSR uses these raw values to perform inverse-jitter on the accumulated history.
+        disp.jitterOffset.x = jX;
+        disp.jitterOffset.y = jY;
 
-        // MVs are in NDC space; motionVectorScale converts to pixel space inside FSR.
-        // This matches the canonical AMD SDK example and what Cauldron does.
+        // MVs are zero (static scene). motionVectorScale converts NDC -> pixels.
         disp.motionVectorScale.x = (float)RENDER_W;
         disp.motionVectorScale.y = (float)RENDER_H;
 
@@ -256,14 +254,9 @@ static void RunFsr3Sequence(
         disp.frameTimeDelta          = 16.6f;
         disp.preExposure             = 1.0f;
         disp.reset                   = (i == 0);
-
-        // Inverted depth (Cauldron convention):
-        //   cameraNear = FLT_MAX (depth buffer value at near plane in reversed-Z = 1.0 -> FLT_MAX)
-        //   cameraFar  = actual near plane distance (depth buffer value at far = 0 -> near distance)
-        disp.cameraNear             = FLT_MAX;
-        disp.cameraFar              = CAM_Z_NEAR;
-        disp.cameraFovAngleVertical = CAM_FOV_Y;
-
+        disp.cameraNear              = FLT_MAX;
+        disp.cameraFar               = CAM_Z_NEAR;
+        disp.cameraFovAngleVertical  = CAM_FOV_Y;
         disp.viewSpaceToMetersFactor = 1.0f;
         disp.flags                   = 0;
 
@@ -300,7 +293,8 @@ static void RunFsr3Sequence(
             vkResetCommandBuffer(cmd, 0);
             vkBeginCommandBuffer(cmd, &beginInfo);
             transition(cmd, outputImage, outputLayout,
-                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       VK_IMAGE_ASPECT_COLOR_BIT);
             VkBufferImageCopy or2 = {};
             or2.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
             or2.imageExtent = { DISPLAY_W, DISPLAY_H, 1 };
