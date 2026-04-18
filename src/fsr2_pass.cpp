@@ -187,8 +187,8 @@ void RunFsr2Pass(
         // pixel space (value 0.0 = no motion = 0 pixels of displacement).
         // Using (RENDER_W, RENDER_H) would only be correct if MVs were
         // stored as normalized fractions of the render resolution.
-        dispatchDesc.motionVectorScale.x = 1.0f;
-        dispatchDesc.motionVectorScale.y = 1.0f;
+        dispatchDesc.motionVectorScale.x = (float)RENDER_W;
+        dispatchDesc.motionVectorScale.y = (float)RENDER_H;
 
         dispatchDesc.renderSize          = { RENDER_W, RENDER_H };
         dispatchDesc.enableSharpening    = true;
