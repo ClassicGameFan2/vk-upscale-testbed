@@ -180,38 +180,32 @@ SharedImage createSharedImage(VkDevice device, VkPhysicalDevice physicalDevice,
 
 // ---------- Scene / I/O ------------------------------------------------------
 //
-// renderScene — correct Cauldron-style jitter application.
+// JITTER SIGN:
+//   ffxFsr*GetJitterOffset returns (jX, jY) in pixel space [-0.5, +0.5].
+//   These values are added to the projection matrix in a rasterizer, which
+//   shifts vertices so that pixel (x,y) captures content from (x-jX, y-jY).
+//   In our ray tracer we replicate this by SUBTRACTING the jitter from the
+//   pixel-centre NDC when computing the ray direction:
+//       ndcX = pixelNdcX - jX * 2 / w
+//       ndcY = pixelNdcY - jY * 2 / h
+//   The same raw (jX, jY) values are forwarded unchanged to dispatchDesc.
 //
-//  JITTER SIGN CONVENTION
-//  ----------------------
-//  ffxFsr*GetJitterOffset returns (jX, jY) in unit pixel space [-0.5, +0.5].
+// MOTION VECTORS:
+//   Static scene + static camera => MVs are always (0, 0).
+//   Stored in pixel space.  motionVectorScale = (1, 1) in the dispatch.
+//   Do NOT set MOTION_VECTORS_JITTER_CANCELLATION.
 //
-//  A positive jX means the sample grid is shifted +jX pixels to the RIGHT
-//  relative to the unjittered reference.  Therefore pixel (x, y) in the
-//  jittered frame captures scene content that was located at (x - jX, y - jY)
-//  in the unjittered reference.
+// DEPTH:
+//   Reversed-Z, finite far plane.
+//   depth = SCENE_ZNEAR / hitT  (1.0 at near, ~0.005 at SCENE_ZFAR, 0 sky).
+//   FSR flag  : DEPTH_INVERTED only (no DEPTH_INFINITE).
+//   Dispatch  : cameraNear = SCENE_ZNEAR, cameraFar = SCENE_ZFAR.
 //
-//  To cast a ray for that unjittered position we compute:
-//      ndcX = ((x - jX + 0.5) / w) * 2 - 1  =  pixel_ndcX  -  jX * 2 / w
-//      ndcY = ((y - jY + 0.5) / h) * 2 - 1  =  pixel_ndcY  -  jY * 2 / h
-//
-//  i.e. SUBTRACT the jitter offset, not add it.
-//
-//  The raw jX, jY values are passed unchanged to dispatchDesc.jitterOffset
-//  in the FSR dispatch calls — FSR uses the same sign convention.
-//
-//  MOTION VECTORS
-//  --------------
-//  Static scene, static camera => MVs are always (0, 0).
-//  Jitter delta must NOT appear in MVs.
-//  Do NOT set FFX_FSR*_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION.
-//
-//  DEPTH
-//  -----
-//  Reversed-Z, finite far plane (SCENE_ZFAR).
-//  depth = SCENE_ZNEAR / hitT  =>  1.0 at near plane, small at far, 0 for sky.
-//  FSR flag: DEPTH_INVERTED only (NOT DEPTH_INFINITE).
-//  Dispatch: cameraNear = SCENE_ZNEAR, cameraFar = SCENE_ZFAR.
+// HORIZON:
+//   Floor clipped at SCENE_ZFAR = 20.0f.
+//   Fog fades floor to sky over [0.5*SCENE_ZFAR .. SCENE_ZFAR] (10..20 units).
+//   This hides the clip boundary and prevents checkerboard aliasing that
+//   occurs when tiles become sub-pixel at grazing angles.
 //
 void renderScene(int w, int h,
                  float jX, float jY,
@@ -223,28 +217,25 @@ void renderScene(int w, int h,
     const float fovY       = 1.04719755f;   // 60 degrees
     const float tanHalfFov = tanf(fovY * 0.5f);
 
-    // Convert pixel-space jitter to NDC-space offset.
-    // The sign is NEGATIVE: pixel (x,y) samples from (x - jX, y - jY).
+    // Pixel-space jitter -> NDC offset (subtract to shift sample position).
     const float ndcJX = jX * 2.0f / (float)w;
     const float ndcJY = jY * 2.0f / (float)h;
 
-    // Pre-compute sky colour (linear).
+    // Sky colour (linear).
     const float skyR = powf(135.f / 255.f, 2.2f);
     const float skyG = powf(206.f / 255.f, 2.2f);
     const float skyB = powf(235.f / 255.f, 2.2f);
 
-    // Fog band: blend floor to sky over the last 40% of SCENE_ZFAR.
-    const float FOG_START = SCENE_ZFAR * 0.6f;
-    const float FOG_RANGE = SCENE_ZFAR - FOG_START;
+    // Fog band over the far half of the view distance.
+    // SCENE_ZFAR = 20: fog starts at 10, fully sky at 20.
+    // This comfortably covers the sub-pixel tile aliasing region.
+    const float FOG_START = SCENE_ZFAR * 0.5f;
+    const float FOG_RANGE = SCENE_ZFAR - FOG_START; // = SCENE_ZFAR * 0.5f
 
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
-            // Pixel centre in NDC.
-            // SUBTRACT ndcJX / ndcJY so that pixel (x,y) casts a ray toward
-            // the unjittered position (x - jX, y - jY).
-            // This is the opposite sign from what was here before, and it
-            // is the correct sign that matches what FSR expects when it
-            // receives jitterOffset = (jX, jY).
+            // Pixel centre in NDC, shifted by NEGATIVE jitter so the ray
+            // goes toward the unjittered position (x - jX, y - jY).
             float ndcX = ((x + 0.5f) / w) * 2.0f - 1.0f - ndcJX;
             float ndcY = ((y + 0.5f) / h) * 2.0f - 1.0f - ndcJY;
 
@@ -258,7 +249,7 @@ void renderScene(int w, int h,
             float r = skyR, g = skyG, b = skyB;
             float hitZ = -1.f;
 
-            // ── Sphere at (0, 1, 4), radius 1.5 ───────────────────────────
+            // ── Sphere at (0, 1, 4), radius 1.5 ──────────────────────────
             {
                 float oc[3] = { ro[0], ro[1] - 1.f, ro[2] - 4.f };
                 float bd   = rd[0]*oc[0] + rd[1]*oc[1] + rd[2]*oc[2];
@@ -283,7 +274,11 @@ void renderScene(int w, int h,
                 }
             }
 
-            // ── Floor at y = 0, clipped at SCENE_ZFAR ─────────────────────
+            // ── Floor at y=0, hard-clipped at SCENE_ZFAR ─────────────────
+            // Without the SCENE_ZFAR clip, grazing-angle rays produce t >> 1
+            // where floorf(px) and floorf(pz) oscillate wildly at tile edges
+            // due to floating-point imprecision, creating an aliased shimmer
+            // band at the horizon.  Clip + fog eliminates this completely.
             if (rd[1] < 0.f) {
                 float t = -ro[1] / rd[1];
                 if (t > SCENE_ZNEAR && t < SCENE_ZFAR &&
@@ -296,7 +291,8 @@ void renderScene(int w, int h,
                     float cv2 = (chk == 0) ? powf(220.f / 255.f, 2.2f)
                                            : powf( 80.f / 255.f, 2.2f);
 
-                    // Fog blend to sky over the last 40% of SCENE_ZFAR.
+                    // Linear fog: 1.0 (full floor) near camera,
+                    //             0.0 (full sky)   at SCENE_ZFAR.
                     float fogAlpha = 1.f;
                     if (t > FOG_START)
                         fogAlpha = fmaxf(0.f,
@@ -315,10 +311,11 @@ void renderScene(int w, int h,
             colorOut[idx*4 + 2] = b;
             colorOut[idx*4 + 3] = 1.f;
 
-            // Reversed-Z depth: 1.0 at near plane, small at far, 0.0 for sky.
+            // Reversed-Z: 1.0 at near plane, ~0.005 at SCENE_ZFAR, 0.0 sky.
             depthOut[idx] = (hitZ > 0.f) ? (SCENE_ZNEAR / hitZ) : 0.f;
 
-            // Motion vectors: always zero (static scene, static camera).
+            // Motion vectors: zero (static scene, static camera, no jitter
+            // in MVs).  Stored in pixel space; motionVectorScale = (1,1).
             mvOut[idx*2 + 0] = 0.f;
             mvOut[idx*2 + 1] = 0.f;
         }
