@@ -23,17 +23,13 @@ static constexpr uint32_t DISPLAY_H = 480;
 
 // Scene depth constants — shared between renderScene and FSR dispatch calls.
 //
-// SCENE_ZFAR is kept short (20.0f) to prevent checkerboard tile aliasing near
-// the horizon. At SCENE_ZFAR = 50 the floor tiles become sub-pixel at ~15
-// units, causing a shimmer band. At 20 the fog covers the problematic region.
-//
 // Depth encoding: reversed-Z, finite far plane.
 //   depth = SCENE_ZNEAR / hitT  =>  1.0 at near, SCENE_ZNEAR/SCENE_ZFAR at
-//   far (~0.005), 0.0 for sky (no hit).
+//   far (~0.001), 0.0 for sky (no hit).
 // FSR context flag : FFX_FSR*_ENABLE_DEPTH_INVERTED only.
 // FSR dispatch    : cameraNear = SCENE_ZNEAR, cameraFar = SCENE_ZFAR.
 static constexpr float SCENE_ZNEAR = 0.1f;
-static constexpr float SCENE_ZFAR  = 20.0f;
+static constexpr float SCENE_ZFAR  = 100.0f;
 
 // ---------- Vulkan helpers ---------------------------------------------------
 uint32_t appFindMemoryType(VkPhysicalDevice physicalDevice,
