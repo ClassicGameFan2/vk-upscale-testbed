@@ -197,15 +197,9 @@ SharedImage createSharedImage(VkDevice device, VkPhysicalDevice physicalDevice,
 //
 // DEPTH:
 //   Reversed-Z, finite far plane.
-//   depth = SCENE_ZNEAR / hitT  (1.0 at near, ~0.005 at SCENE_ZFAR, 0 sky).
+//   depth = SCENE_ZNEAR / hitT  (1.0 at near, ~0.001 at SCENE_ZFAR, 0 sky).
 //   FSR flag  : DEPTH_INVERTED only (no DEPTH_INFINITE).
 //   Dispatch  : cameraNear = SCENE_ZNEAR, cameraFar = SCENE_ZFAR.
-//
-// HORIZON:
-//   Floor clipped at SCENE_ZFAR = 20.0f.
-//   Fog fades floor to sky over [0.5*SCENE_ZFAR .. SCENE_ZFAR] (10..20 units).
-//   This hides the clip boundary and prevents checkerboard aliasing that
-//   occurs when tiles become sub-pixel at grazing angles.
 //
 void renderScene(int w, int h,
                  float jX, float jY,
@@ -225,12 +219,6 @@ void renderScene(int w, int h,
     const float skyR = powf(135.f / 255.f, 2.2f);
     const float skyG = powf(206.f / 255.f, 2.2f);
     const float skyB = powf(235.f / 255.f, 2.2f);
-
-    // Fog band over the far half of the view distance.
-    // SCENE_ZFAR = 20: fog starts at 10, fully sky at 20.
-    // This comfortably covers the sub-pixel tile aliasing region.
-    const float FOG_START = SCENE_ZFAR * 0.5f;
-    const float FOG_RANGE = SCENE_ZFAR - FOG_START; // = SCENE_ZFAR * 0.5f
 
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
@@ -274,11 +262,7 @@ void renderScene(int w, int h,
                 }
             }
 
-            // ── Floor at y=0, hard-clipped at SCENE_ZFAR ─────────────────
-            // Without the SCENE_ZFAR clip, grazing-angle rays produce t >> 1
-            // where floorf(px) and floorf(pz) oscillate wildly at tile edges
-            // due to floating-point imprecision, creating an aliased shimmer
-            // band at the horizon.  Clip + fog eliminates this completely.
+            // ── Floor at y=0 ─────────────────────────────────────────────
             if (rd[1] < 0.f) {
                 float t = -ro[1] / rd[1];
                 if (t > SCENE_ZNEAR && t < SCENE_ZFAR &&
@@ -290,17 +274,9 @@ void renderScene(int w, int h,
                     int   chk = ((int)floorf(px) + (int)floorf(pz)) & 1;
                     float cv2 = (chk == 0) ? powf(220.f / 255.f, 2.2f)
                                            : powf( 80.f / 255.f, 2.2f);
-
-                    // Linear fog: 1.0 (full floor) near camera,
-                    //             0.0 (full sky)   at SCENE_ZFAR.
-                    float fogAlpha = 1.f;
-                    if (t > FOG_START)
-                        fogAlpha = fmaxf(0.f,
-                            1.f - (t - FOG_START) / FOG_RANGE);
-
-                    r = cv2 * fogAlpha + skyR * (1.f - fogAlpha);
-                    g = cv2 * fogAlpha + skyG * (1.f - fogAlpha);
-                    b = cv2 * fogAlpha + skyB * (1.f - fogAlpha);
+                    r = cv2;
+                    g = cv2;
+                    b = cv2;
                 }
             }
 
@@ -311,11 +287,11 @@ void renderScene(int w, int h,
             colorOut[idx*4 + 2] = b;
             colorOut[idx*4 + 3] = 1.f;
 
-            // Reversed-Z: 1.0 at near plane, ~0.005 at SCENE_ZFAR, 0.0 sky.
+            // Reversed-Z: 1.0 at near plane, ~0.001 at SCENE_ZFAR, 0.0 sky.
             depthOut[idx] = (hitZ > 0.f) ? (SCENE_ZNEAR / hitZ) : 0.f;
 
-            // Motion vectors: zero (static scene, static camera, no jitter
-            // in MVs).  Stored in pixel space; motionVectorScale = (1,1).
+            // Motion vectors: zero (static scene, static camera).
+            // Stored in pixel space; motionVectorScale = (1,1).
             mvOut[idx*2 + 0] = 0.f;
             mvOut[idx*2 + 1] = 0.f;
         }
