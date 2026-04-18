@@ -46,12 +46,9 @@ void RunFsr2Pass(
         FFX_FSR2_ENABLE_DEBUG_CHECKING     |
         FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE |
         FFX_FSR2_ENABLE_AUTO_EXPOSURE      |
-        // Depth is reversed-Z: value 1.0 = near plane, small value = far.
-        // Use DEPTH_INVERTED only. Do NOT use DEPTH_INFINITE — we have a real
-        // finite far plane (SCENE_ZFAR = 50.0f) so FSR must know the true range.
         FFX_FSR2_ENABLE_DEPTH_INVERTED;
-        // NOTE: No MOTION_VECTORS_JITTER_CANCELLATION — MVs are pure scene
-        //       motion (zero for a static scene). Jitter is NOT in the MVs.
+        // No DEPTH_INFINITE: we have a real finite SCENE_ZFAR.
+        // No MOTION_VECTORS_JITTER_CANCELLATION: MVs have no jitter in them.
     fsr2Desc.maxRenderSize    = { RENDER_W,  RENDER_H  };
     fsr2Desc.displaySize      = { DISPLAY_W, DISPLAY_H };
     fsr2Desc.fpMessage        = FfxMsgCallback;
@@ -65,7 +62,6 @@ void RunFsr2Pass(
     }
     std::cout << "[FSR2] Context created OK.\n";
 
-    // Reset output to GENERAL
     {
         VkImageLayout outLay = VK_IMAGE_LAYOUT_UNDEFINED;
         vkResetCommandBuffer(cmd, 0);
@@ -184,17 +180,15 @@ void RunFsr2Pass(
         dispatchDesc.motionVectors = mvRes;
         dispatchDesc.output        = outRes;
 
-        // Pass the raw pixel-space jitter values to FSR.
-        // FSR uses these to remove the camera sub-pixel shift from the
-        // accumulated history, restoring the unjittered image.
         dispatchDesc.jitterOffset.x = jX;
         dispatchDesc.jitterOffset.y = jY;
 
-        // MVs are in render-resolution pixel space (all zero here).
-        // Scale of (RENDER_W, RENDER_H) converts normalised [-1,1] to pixels;
-        // since MVs are zero the value is irrelevant, but set it correctly.
-        dispatchDesc.motionVectorScale.x = (float)RENDER_W;
-        dispatchDesc.motionVectorScale.y = (float)RENDER_H;
+        // motionVectorScale = (1, 1) because MVs are stored directly in
+        // pixel space (value 0.0 = no motion = 0 pixels of displacement).
+        // Using (RENDER_W, RENDER_H) would only be correct if MVs were
+        // stored as normalized fractions of the render resolution.
+        dispatchDesc.motionVectorScale.x = 1.0f;
+        dispatchDesc.motionVectorScale.y = 1.0f;
 
         dispatchDesc.renderSize          = { RENDER_W, RENDER_H };
         dispatchDesc.enableSharpening    = true;
@@ -202,11 +196,6 @@ void RunFsr2Pass(
         dispatchDesc.frameTimeDelta      = 16.6f;
         dispatchDesc.preExposure         = 1.f;
         dispatchDesc.reset               = (i == 0);
-
-        // Reversed-Z, finite far plane.
-        // DEPTH_INVERTED is set => depth 1.0 = near, small = far.
-        // cameraNear and cameraFar are the ACTUAL linear distances,
-        // NOT swapped. FSR reads DEPTH_INVERTED flag and handles the math.
         dispatchDesc.cameraNear              = SCENE_ZNEAR;
         dispatchDesc.cameraFar               = SCENE_ZFAR;
         dispatchDesc.cameraFovAngleVertical  = 1.04719755f;
@@ -229,7 +218,6 @@ void RunFsr2Pass(
             vkBeginCommandBuffer(cmd, &beginInfo);
             transition(cmd, outputImage, outputLayout,
                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-
             VkBufferImageCopy or2 = {};
             or2.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
             or2.imageExtent = { DISPLAY_W, DISPLAY_H, 1 };
@@ -253,7 +241,6 @@ void RunFsr2Pass(
             std::cout << "[FSR2] Frame " << frameNum << "/" << totalFrames << "\n";
     }
 
-    // Final readback
     vkResetCommandBuffer(cmd, 0);
     vkBeginCommandBuffer(cmd, &beginInfo);
     transition(cmd, outputImage, outputLayout,
