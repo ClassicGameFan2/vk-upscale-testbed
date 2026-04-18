@@ -180,20 +180,31 @@ SharedImage createSharedImage(VkDevice device, VkPhysicalDevice physicalDevice,
 
 // ---------- Scene / I/O ------------------------------------------------------
 //
-// JITTER SIGN:
-//   ffxFsr*GetJitterOffset returns (jX, jY) in pixel space [-0.5, +0.5].
-//   These values are added to the projection matrix in a rasterizer, which
-//   shifts vertices so that pixel (x,y) captures content from (x-jX, y-jY).
-//   In our ray tracer we replicate this by SUBTRACTING the jitter from the
-//   pixel-centre NDC when computing the ray direction:
-//       ndcX = pixelNdcX - jX * 2 / w
-//       ndcY = pixelNdcY - jY * 2 / h
-//   The same raw (jX, jY) values are forwarded unchanged to dispatchDesc.
+// JITTER APPLICATION (matches AMD Cauldron / FSR documentation exactly):
+//   ffxFsr*GetJitterOffset returns (jX, jY) in pixel space, range [-0.5, +0.5].
+//
+//   In a rasterizer Cauldron applies jitter to the projection matrix as:
+//       ndcOffsetX = +2.0f * jX / renderWidth
+//       ndcOffsetY = -2.0f * jY / renderHeight
+//   This translates the whole image in NDC, so pixel (x,y) captures the
+//   world sample that would normally land at (x + jX, y + jY).
+//
+//   In our ray tracer we replicate this directly:
+//       sampleX = x + 0.5 + jX        (ADD jX — same sign as rasterizer)
+//       sampleY = y + 0.5 + jY        (ADD jY)
+//   Converting to NDC:
+//       ndcX = (sampleX / w) * 2 - 1 = pixelNdcX + 2*jX/w
+//       ndcY = (sampleY / h) * 2 - 1 = pixelNdcY + 2*jY/h
+//
+//   NOTE: NDC Y is negated when building the ray direction
+//   (rd.y = -ndcY * tanHalfFov) so the Y jitter automatically follows
+//   the Cauldron sign convention (-2*jY/renderHeight in projection space).
 //
 // MOTION VECTORS:
-//   Static scene + static camera => MVs are always (0, 0).
-//   Stored in pixel space.  motionVectorScale = (1, 1) in the dispatch.
-//   Do NOT set MOTION_VECTORS_JITTER_CANCELLATION.
+//   Static scene + static camera => MVs are always (0, 0) in pixel space.
+//   motionVectorScale = (RENDER_W, RENDER_H) — MVs are normalised fractions
+//   of render resolution, matching Cauldron convention.
+//   Do NOT set MOTION_VECTORS_JITTER_CANCELLATION (no jitter baked into MVs).
 //
 // DEPTH:
 //   Reversed-Z, finite far plane.
@@ -211,10 +222,6 @@ void renderScene(int w, int h,
     const float fovY       = 1.04719755f;   // 60 degrees
     const float tanHalfFov = tanf(fovY * 0.5f);
 
-    // Pixel-space jitter -> NDC offset (subtract to shift sample position).
-    const float ndcJX = jX * 2.0f / (float)w;
-    const float ndcJY = jY * 2.0f / (float)h;
-
     // Sky colour (linear).
     const float skyR = powf(135.f / 255.f, 2.2f);
     const float skyG = powf(206.f / 255.f, 2.2f);
@@ -222,12 +229,19 @@ void renderScene(int w, int h,
 
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
-            // Pixel centre in NDC, shifted by NEGATIVE jitter so the ray
-            // goes toward the unjittered position (x - jX, y - jY).
-            float ndcX = ((x + 0.5f) / w) * 2.0f - 1.0f - ndcJX;
-            float ndcY = ((y + 0.5f) / h) * 2.0f - 1.0f - ndcJY;
+            // Pixel centre shifted by +jitter, matching the Cauldron projection
+            // matrix convention: pixel (x,y) samples from world position
+            // (x + jX, y + jY).  This is ADD, not subtract.
+            float sampleX = (x + 0.5f + jX);
+            float sampleY = (y + 0.5f + jY);
+
+            float ndcX =  (sampleX / w) * 2.0f - 1.0f;
+            float ndcY =  (sampleY / h) * 2.0f - 1.0f;
 
             float ro[3] = { 0.f, 1.f, 0.f };
+            // NDC Y is negated for the ray direction (screen-space Y flips
+            // relative to view-space Y), which automatically gives the correct
+            // -2*jY/renderHeight NDC offset in the vertical direction.
             float rd[3] = { ndcX * aspect * tanHalfFov,
                            -ndcY * tanHalfFov,
                             1.f };
@@ -290,8 +304,10 @@ void renderScene(int w, int h,
             // Reversed-Z: 1.0 at near plane, ~0.001 at SCENE_ZFAR, 0.0 sky.
             depthOut[idx] = (hitZ > 0.f) ? (SCENE_ZNEAR / hitZ) : 0.f;
 
-            // Motion vectors: zero (static scene, static camera).
-            // Stored in pixel space; motionVectorScale = (1,1).
+            // Static scene, static camera: zero motion vectors.
+            // Stored as normalised fractions of render resolution so that
+            // motionVectorScale = (RENDER_W, RENDER_H) in the dispatch gives
+            // the correct pixel-space displacement (0 pixels).
             mvOut[idx*2 + 0] = 0.f;
             mvOut[idx*2 + 1] = 0.f;
         }
