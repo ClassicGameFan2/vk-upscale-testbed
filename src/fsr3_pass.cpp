@@ -238,8 +238,8 @@ static void RunFsr3Sequence(
 
         // motionVectorScale = (1, 1): MVs are stored in pixel space directly.
         // (RENDER_W, RENDER_H) would only be correct for normalized MVs.)
-        disp.motionVectorScale.x = 1.0f;
-        disp.motionVectorScale.y = 1.0f;
+        disp.motionVectorScale.x = (float)RENDER_W;
+        disp.motionVectorScale.y = (float)RENDER_H;
 
         disp.renderSize  = { RENDER_W,  RENDER_H  };
         disp.upscaleSize = { DISPLAY_W, DISPLAY_H };
