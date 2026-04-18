@@ -42,13 +42,10 @@ static void RunFsr3Sequence(
     fsr3Desc.flags =
         FFX_FSR3UPSCALER_ENABLE_HIGH_DYNAMIC_RANGE |
         FFX_FSR3UPSCALER_ENABLE_AUTO_EXPOSURE      |
-        // Depth is reversed-Z: value 1.0 = near plane, small value = far.
-        // Use DEPTH_INVERTED only. Do NOT use DEPTH_INFINITE — we have a real
-        // finite far plane (SCENE_ZFAR = 50.0f) so FSR must know the true range.
         FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED     |
         FFX_FSR3UPSCALER_ENABLE_DEBUG_CHECKING;
-        // NOTE: No MOTION_VECTORS_JITTER_CANCELLATION — MVs are pure scene
-        //       motion (zero for a static scene). Jitter is NOT in the MVs.
+        // No DEPTH_INFINITE: we have a real finite SCENE_ZFAR.
+        // No MOTION_VECTORS_JITTER_CANCELLATION: MVs have no jitter in them.
     fsr3Desc.maxRenderSize    = { RENDER_W,  RENDER_H  };
     fsr3Desc.maxUpscaleSize   = { DISPLAY_W, DISPLAY_H };
     fsr3Desc.fpMessage        = Fsr3MsgCallback;
@@ -81,22 +78,41 @@ static void RunFsr3Sequence(
     SharedImage siDilMV    = createSharedImage(device, physicalDevice,
                                                sharedDescs.dilatedMotionVectors);
 
-    // Pre-loop: bring shared images and output to GENERAL
+    // Pre-loop initialisation: transition all shared images + output to GENERAL,
+    // and clear reconstructedPrevNearestDepth ONCE to zero.
+    // It must NOT be cleared again after this — it is a persistent inter-frame
+    // resource. FSR3's PrepareInputs writes the current frame's depth into it;
+    // FSR3's Accumulate reads it on the NEXT frame to validate history.
+    // Clearing it every frame destroys that inter-frame data and prevents any
+    // accumulation, causing a perpetually blurry single-frame output.
     {
         vkResetCommandBuffer(cmd, 0);
         vkBeginCommandBuffer(cmd, &beginInfo);
+
+        transition(cmd, siRecon.image,    siRecon.layout,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT,
+                   siRecon.info.mipLevels);
+        VkImageSubresourceRange reconRange = {
+            VK_IMAGE_ASPECT_COLOR_BIT, 0, siRecon.info.mipLevels, 0, 1 };
+        VkClearColorValue zeroClear = {};
+        vkCmdClearColorImage(cmd, siRecon.image,
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             &zeroClear, 1, &reconRange);
         transition(cmd, siRecon.image,    siRecon.layout,
                    VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT,
                    siRecon.info.mipLevels);
+
         transition(cmd, siDilDepth.image, siDilDepth.layout,
                    VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT,
                    siDilDepth.info.mipLevels);
         transition(cmd, siDilMV.image,    siDilMV.layout,
                    VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT,
                    siDilMV.info.mipLevels);
+
         VkImageLayout outLay = VK_IMAGE_LAYOUT_UNDEFINED;
         transition(cmd, outputImage, outLay,
                    VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
+
         vkEndCommandBuffer(cmd);
         vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
         vkQueueWaitIdle(queue);
@@ -132,9 +148,6 @@ static void RunFsr3Sequence(
     VkImageLayout mvLayout     = VK_IMAGE_LAYOUT_UNDEFINED;
     VkImageLayout outputLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-    VkImageSubresourceRange reconRange = {
-        VK_IMAGE_ASPECT_COLOR_BIT, 0, siRecon.info.mipLevels, 0, 1 };
-
     int32_t jitterIndex = 0;
     void*   outData     = nullptr;
 
@@ -159,17 +172,8 @@ static void RunFsr3Sequence(
         vkResetCommandBuffer(cmd, 0);
         vkBeginCommandBuffer(cmd, &beginInfo);
 
-        // Clear reconstructedPrevNearestDepth to zero every frame.
-        transition(cmd, siRecon.image, siRecon.layout,
-                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                   VK_IMAGE_ASPECT_COLOR_BIT, siRecon.info.mipLevels);
-        VkClearColorValue zeroClear = {};
-        vkCmdClearColorImage(cmd, siRecon.image,
-                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                             &zeroClear, 1, &reconRange);
-        transition(cmd, siRecon.image, siRecon.layout,
-                   VK_IMAGE_LAYOUT_GENERAL,
-                   VK_IMAGE_ASPECT_COLOR_BIT, siRecon.info.mipLevels);
+        // NOTE: Do NOT clear siRecon here. It is persistent across frames.
+        // It was cleared once in the pre-loop block above (before frame 0).
 
         transition(cmd, colorImage, colorLayout,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
@@ -232,8 +236,10 @@ static void RunFsr3Sequence(
         disp.jitterOffset.x = jX;
         disp.jitterOffset.y = jY;
 
-        disp.motionVectorScale.x = (float)RENDER_W;
-        disp.motionVectorScale.y = (float)RENDER_H;
+        // motionVectorScale = (1, 1): MVs are stored in pixel space directly.
+        // (RENDER_W, RENDER_H) would only be correct for normalized MVs.)
+        disp.motionVectorScale.x = 1.0f;
+        disp.motionVectorScale.y = 1.0f;
 
         disp.renderSize  = { RENDER_W,  RENDER_H  };
         disp.upscaleSize = { DISPLAY_W, DISPLAY_H };
@@ -243,10 +249,6 @@ static void RunFsr3Sequence(
         disp.frameTimeDelta          = 16.6f;
         disp.preExposure             = 1.f;
         disp.reset                   = (i == 0);
-
-        // Reversed-Z, finite far plane.
-        // DEPTH_INVERTED is set => depth 1.0 = near, small = far.
-        // cameraNear and cameraFar are the ACTUAL linear distances, not swapped.
         disp.cameraNear              = SCENE_ZNEAR;
         disp.cameraFar               = SCENE_ZFAR;
         disp.cameraFovAngleVertical  = 1.04719755f;
@@ -316,7 +318,6 @@ static void RunFsr3Sequence(
             std::cout << "[FSR3] Frame " << frameNum << "/" << totalFrames << "\n";
     }
 
-    // Final readback
     vkResetCommandBuffer(cmd, 0);
     vkBeginCommandBuffer(cmd, &beginInfo);
     transition(cmd, outputImage, outputLayout,
