@@ -43,15 +43,15 @@ void RunFsr2Pass(
 
     FfxFsr2ContextDescription fsr2Desc = {};
     fsr2Desc.flags =
-        FFX_FSR2_ENABLE_DEBUG_CHECKING          |
-        FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE      |
-        FFX_FSR2_ENABLE_AUTO_EXPOSURE           |
-        // DEPTH_INVERTED: depth = zNear/t  => 1 at near, 0 at infinity
-        FFX_FSR2_ENABLE_DEPTH_INVERTED          |
-        // DEPTH_INFINITE: far plane is at infinity
-        FFX_FSR2_ENABLE_DEPTH_INFINITE;
-        // NOTE: Do NOT set MOTION_VECTORS_JITTER_CANCELLATION.
-        //       Motion vectors must be pure scene motion, no jitter delta.
+        FFX_FSR2_ENABLE_DEBUG_CHECKING     |
+        FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE |
+        FFX_FSR2_ENABLE_AUTO_EXPOSURE      |
+        // Depth is reversed-Z: value 1.0 = near plane, small value = far.
+        // Use DEPTH_INVERTED only. Do NOT use DEPTH_INFINITE — we have a real
+        // finite far plane (SCENE_ZFAR = 50.0f) so FSR must know the true range.
+        FFX_FSR2_ENABLE_DEPTH_INVERTED;
+        // NOTE: No MOTION_VECTORS_JITTER_CANCELLATION — MVs are pure scene
+        //       motion (zero for a static scene). Jitter is NOT in the MVs.
     fsr2Desc.maxRenderSize    = { RENDER_W,  RENDER_H  };
     fsr2Desc.displaySize      = { DISPLAY_W, DISPLAY_H };
     fsr2Desc.fpMessage        = FfxMsgCallback;
@@ -104,16 +104,13 @@ void RunFsr2Pass(
 
     VkDeviceSize uploadSize = colorUploadSize + depthUploadSize + mvUploadSize;
     int32_t jitterIndex = 0;
-
-    void* outData;
+    void*   outData     = nullptr;
 
     for (int i = 0; i < totalFrames; i++) {
         ++jitterIndex;
         float jX = 0.f, jY = 0.f;
         ffxFsr2GetJitterOffset(&jX, &jY, jitterIndex, phaseCount);
 
-        // Render scene with jitter applied to color+depth.
-        // Motion vectors are always zero (static scene, no jitter in MVs).
         std::vector<float> fColor(RENDER_W * RENDER_H * 4);
         std::vector<float> fDepth(RENDER_W * RENDER_H);
         std::vector<float> fMV   (RENDER_W * RENDER_H * 2, 0.f);
@@ -187,13 +184,15 @@ void RunFsr2Pass(
         dispatchDesc.motionVectors = mvRes;
         dispatchDesc.output        = outRes;
 
-        // Jitter offset: tell FSR the sub-pixel shift used when rendering.
-        // This is the pixel-space jitter, as returned by ffxFsr2GetJitterOffset.
+        // Pass the raw pixel-space jitter values to FSR.
+        // FSR uses these to remove the camera sub-pixel shift from the
+        // accumulated history, restoring the unjittered image.
         dispatchDesc.jitterOffset.x = jX;
         dispatchDesc.jitterOffset.y = jY;
 
-        // Motion vectors are in render-resolution pixel space, but they are
-        // all zero (static scene). Scale = render dimensions to match pixel-space.
+        // MVs are in render-resolution pixel space (all zero here).
+        // Scale of (RENDER_W, RENDER_H) converts normalised [-1,1] to pixels;
+        // since MVs are zero the value is irrelevant, but set it correctly.
         dispatchDesc.motionVectorScale.x = (float)RENDER_W;
         dispatchDesc.motionVectorScale.y = (float)RENDER_H;
 
@@ -204,11 +203,12 @@ void RunFsr2Pass(
         dispatchDesc.preExposure         = 1.f;
         dispatchDesc.reset               = (i == 0);
 
-        // For reversed-Z + infinite far plane:
-        // cameraNear = actual near plane value (0.1f)
-        // cameraFar  = FLT_MAX (infinite)
-        dispatchDesc.cameraNear              = 0.1f;
-        dispatchDesc.cameraFar               = FLT_MAX;
+        // Reversed-Z, finite far plane.
+        // DEPTH_INVERTED is set => depth 1.0 = near, small = far.
+        // cameraNear and cameraFar are the ACTUAL linear distances,
+        // NOT swapped. FSR reads DEPTH_INVERTED flag and handles the math.
+        dispatchDesc.cameraNear              = SCENE_ZNEAR;
+        dispatchDesc.cameraFar               = SCENE_ZFAR;
         dispatchDesc.cameraFovAngleVertical  = 1.04719755f;
         dispatchDesc.viewSpaceToMetersFactor = 1.f;
 
