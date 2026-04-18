@@ -21,6 +21,15 @@ static constexpr uint32_t RENDER_H  = 240;
 static constexpr uint32_t DISPLAY_W = 640;
 static constexpr uint32_t DISPLAY_H = 480;
 
+// Scene depth constants — used in renderScene AND in the FSR dispatch calls.
+// cameraNear / cameraFar in the dispatch MUST match these exactly.
+// Depth encoding: reversed-Z, finite far plane.
+//   depth = SCENE_ZNEAR / hitT  =>  1.0 at near, ~0.002 at far, 0.0 for sky.
+// FSR flags to set:   DEPTH_INVERTED
+// FSR flags to clear: DEPTH_INFINITE   (we have a real, finite far plane)
+static constexpr float SCENE_ZNEAR = 0.1f;
+static constexpr float SCENE_ZFAR  = 50.0f;
+
 // ---------- Vulkan helpers ---------------------------------------------------
 uint32_t appFindMemoryType(VkPhysicalDevice physicalDevice,
                            uint32_t typeFilter,
@@ -55,10 +64,10 @@ SharedImage createSharedImage(VkDevice device, VkPhysicalDevice physicalDevice,
                               const FfxCreateResourceDescription& desc);
 
 // ---------- Scene / I/O ------------------------------------------------------
-// jX, jY  : pixel-space jitter for this frame (from ffxFsr*GetJitterOffset).
-//            These are applied to color + depth only.
-//            Motion vectors are always zero (static scene, static camera,
-//            no jitter in MVs -- do NOT set JITTER_CANCELLATION flag).
+// jX, jY : pixel-space jitter for this frame (from ffxFsr*GetJitterOffset).
+//           Applied to color + depth only.
+//           Motion vectors are always (0,0) — static scene, static camera.
+//           Do NOT set MOTION_VECTORS_JITTER_CANCELLATION.
 void renderScene(int w, int h,
                  float jX, float jY,
                  float* colorOut, float* depthOut, float* mvOut);
