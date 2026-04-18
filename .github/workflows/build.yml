@@ -2,7 +2,7 @@ name: Build Vulkan Testbed
 
 on:
   push:
-    branches: [ "main", "modular", "modular3" ]
+    branches: [ "main", "modular", "modular4" ]
 
 jobs:
   build-windows:
