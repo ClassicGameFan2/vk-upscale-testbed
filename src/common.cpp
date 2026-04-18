@@ -1,4 +1,3 @@
-// src/common.cpp
 #include "common.h"
 
 uint32_t appFindMemoryType(VkPhysicalDevice physicalDevice,
@@ -181,112 +180,164 @@ SharedImage createSharedImage(VkDevice device, VkPhysicalDevice physicalDevice,
 
 // ---------- Scene / I/O ------------------------------------------------------
 //
-// Correct Cauldron-style rendering:
+// renderScene — correct Cauldron-style implementation:
 //
-//  * jX, jY are in UNIT PIXEL SPACE (as returned by ffxFsr*GetJitterOffset).
-//    They must be converted to NDC offsets:
-//        ndcJX = jX * 2.0f / w
-//        ndcJY = jY * 2.0f / h
-//    This is added to the pixel centre NDC to shift the entire rendered image.
+//  JITTER
+//  ------
+//  jX, jY are in UNIT PIXEL SPACE as returned by ffxFsr*GetJitterOffset.
+//  They implement a Halton(2,3) sequence in [-0.5, +0.5].
+//  To apply jitter we shift the ray origin in NDC:
+//      ndcJX = jX * 2.0f / w
+//      ndcJY = jY * 2.0f / h
+//  Color and Depth are rendered WITH this jitter shift (the scene is jittered).
 //
-//  * Color and Depth ARE rendered with jitter (the scene is jittered).
+//  MOTION VECTORS
+//  --------------
+//  For a STATIC scene with a STATIC camera, motion vectors are always (0, 0).
+//  Jitter delta must NOT appear in the motion vectors.
+//  Do NOT set FFX_FSR*_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION.
 //
-//  * Motion Vectors are NEVER jittered. For a static scene with a static
-//    camera the motion vectors are always (0, 0).
-//    The JITTER_CANCELLATION flag must NOT be set.
+//  DEPTH
+//  -----
+//  We use reversed-Z with a finite far plane (SCENE_ZFAR = 50.0f).
+//  Formula: depth = zNear / hitT   => 1.0 at the near plane, small at far.
+//  Background (sky, no geometry hit, or hit beyond zFar) => depth = 0.0.
+//  FSR flags: DEPTH_INVERTED only (NOT DEPTH_INFINITE, because zFar is finite).
+//  Dispatch: cameraNear = zNear (0.1f), cameraFar = SCENE_ZFAR (50.0f).
 //
-//  * Depth uses reversed-Z (near=1, far->0) with an infinite far plane.
-//    Formula: depth = zNear / t  (gives 1 at t=zNear, approaches 0 as t->inf)
-//    FSR flags: DEPTH_INVERTED | DEPTH_INFINITE
+//  HORIZON
+//  -------
+//  The floor is clipped at SCENE_ZFAR to prevent the horizon aliasing caused
+//  by the checkerboard tile frequency becoming infinite at grazing angles.
+//  A smooth fog fade blends the floor to sky colour over the last 40% of the
+//  view distance so there is no hard cutoff line.
+//
+// NOTE: SCENE_ZFAR is published in common.h so the pass files can use it
+//       for cameraNear/cameraFar.
 //
 void renderScene(int w, int h,
-                 float jX, float jY,      // pixel-space jitter for THIS frame
+                 float jX, float jY,
                  float* colorOut,
                  float* depthOut,
                  float* mvOut)
 {
     const float aspect     = (float)w / (float)h;
-    const float fovY       = 1.04719755f;  // 60 degrees
+    const float fovY       = 1.04719755f;   // 60 degrees
     const float tanHalfFov = tanf(fovY * 0.5f);
-    const float zNear      = 0.1f;
 
-    // Convert pixel-space jitter to NDC-space jitter offset.
-    // FSR returns values in [-0.5, +0.5] pixel space.
-    // NDC goes from -1 to +1 over 'w' pixels, so one pixel = 2/w in NDC.
+    // Convert pixel-space jitter to NDC-space offset.
+    // ffxFsr*GetJitterOffset returns values in unit pixel space [-0.5, +0.5].
+    // One pixel = 2/w in NDC, so:
     const float ndcJX = jX * 2.0f / (float)w;
     const float ndcJY = jY * 2.0f / (float)h;
 
+    // Pre-compute linear sky colour (used for background and fog blend).
+    const float skyR = powf(135.f / 255.f, 2.2f);
+    const float skyG = powf(206.f / 255.f, 2.2f);
+    const float skyB = powf(235.f / 255.f, 2.2f);
+
+    // Fog band: blend floor to sky over the last FOG_FRACTION of zFar.
+    // e.g. 0.4 means fog starts at 0.6 * zFar and is complete at zFar.
+    const float FOG_START = SCENE_ZFAR * 0.6f;
+    const float FOG_RANGE = SCENE_ZFAR - FOG_START; // = SCENE_ZFAR * 0.4f
+
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
-            // Pixel centre in NDC, then apply jitter offset.
-            // Adding ndcJX/ndcJY shifts the camera sub-pixel for this frame.
+            // Pixel centre in NDC, with jitter shift applied.
             float ndcX = ((x + 0.5f) / w) * 2.0f - 1.0f + ndcJX;
             float ndcY = ((y + 0.5f) / h) * 2.0f - 1.0f + ndcJY;
 
+            // Ray origin and direction (view space, looking down +Z).
             float ro[3] = { 0.f, 1.f, 0.f };
-            float rd[3] = { ndcX * aspect * tanHalfFov, -ndcY * tanHalfFov, 1.f };
-            float len   = sqrtf(rd[0]*rd[0] + rd[1]*rd[1] + rd[2]*rd[2]);
-            rd[0]/=len; rd[1]/=len; rd[2]/=len;
+            float rd[3] = { ndcX * aspect * tanHalfFov,
+                           -ndcY * tanHalfFov,
+                            1.f };
+            float len = sqrtf(rd[0]*rd[0] + rd[1]*rd[1] + rd[2]*rd[2]);
+            rd[0] /= len;  rd[1] /= len;  rd[2] /= len;
 
-            float hitZ = -1.f;
-            float r = powf(135.f/255.f, 2.2f);
-            float g = powf(206.f/255.f, 2.2f);
-            float b = powf(235.f/255.f, 2.2f);
+            // Start with sky colour and no hit.
+            float r = skyR, g = skyG, b = skyB;
+            float hitZ = -1.f;   // negative means no hit yet
 
-            // Sphere at (0,1,4), radius 1.5
-            float oc[3] = { ro[0], ro[1]-1.f, ro[2]-4.f };
-            float bd    = rd[0]*oc[0] + rd[1]*oc[1] + rd[2]*oc[2];
-            float cv    = oc[0]*oc[0] + oc[1]*oc[1] + oc[2]*oc[2] - 2.25f;
-            float disc  = bd*bd - cv;
-            if (disc > 0.f) {
-                float t = -bd - sqrtf(disc);
-                if (t > zNear) {
-                    hitZ = t;
-                    float nx = ro[0]+rd[0]*t;
-                    float ny = ro[1]+rd[1]*t - 1.f;
-                    float nz = ro[2]+rd[2]*t - 4.f;
-                    float nl = sqrtf(nx*nx+ny*ny+nz*nz);
-                    nx/=nl; ny/=nl; nz/=nl;
-                    float light[3] = { 0.577f, 0.577f, -0.577f };
-                    float ndotl = fmaxf(0.2f,
-                        -(nx*light[0]+ny*light[1]+nz*light[2]));
-                    r = powf(200.f/255.f, 2.2f) * ndotl;
-                    g = powf( 50.f/255.f, 2.2f) * ndotl;
-                    b = powf( 50.f/255.f, 2.2f) * ndotl;
+            // ── Sphere at (0, 1, 4), radius 1.5 ────────────────────────────
+            {
+                float oc[3] = { ro[0], ro[1] - 1.f, ro[2] - 4.f };
+                float bd   = rd[0]*oc[0] + rd[1]*oc[1] + rd[2]*oc[2];
+                float cv   = oc[0]*oc[0] + oc[1]*oc[1] + oc[2]*oc[2] - 2.25f;
+                float disc = bd*bd - cv;
+                if (disc > 0.f) {
+                    float t = -bd - sqrtf(disc);
+                    if (t > SCENE_ZNEAR && t < SCENE_ZFAR) {
+                        hitZ = t;
+                        float nx = ro[0] + rd[0]*t;
+                        float ny = ro[1] + rd[1]*t - 1.f;
+                        float nz = ro[2] + rd[2]*t - 4.f;
+                        float nl = sqrtf(nx*nx + ny*ny + nz*nz);
+                        nx /= nl;  ny /= nl;  nz /= nl;
+                        float light[3] = { 0.577f, 0.577f, -0.577f };
+                        float ndotl = fmaxf(0.2f,
+                            -(nx*light[0] + ny*light[1] + nz*light[2]));
+                        r = powf(200.f / 255.f, 2.2f) * ndotl;
+                        g = powf( 50.f / 255.f, 2.2f) * ndotl;
+                        b = powf( 50.f / 255.f, 2.2f) * ndotl;
+                    }
                 }
             }
-            // Floor
+
+            // ── Infinite floor at y = 0 ─────────────────────────────────────
+            // Clamp to SCENE_ZFAR to prevent horizon aliasing:
+            //   At grazing angles, t = ro[1] / |rd[1]| grows without bound.
+            //   floorf(px) and floorf(pz) then oscillate wildly between tile
+            //   edges due to floating-point imprecision, producing a jagged
+            //   checker line at the horizon.
+            // Fix: ignore floor hits beyond SCENE_ZFAR.
+            // Smooth fix: fade floor colour to sky over the fog band so the
+            //   clip boundary is invisible.
             if (rd[1] < 0.f) {
                 float t = -ro[1] / rd[1];
-                if (t > zNear && (hitZ < 0.f || t < hitZ)) {
+                if (t > SCENE_ZNEAR && t < SCENE_ZFAR &&
+                    (hitZ < 0.f || t < hitZ))
+                {
                     hitZ = t;
-                    float px = ro[0]+rd[0]*t, pz = ro[2]+rd[2]*t;
-                    int chk = ((int)floorf(px)+(int)floorf(pz)) % 2;
-                    float cv2 = (chk==0) ? powf(220.f/255.f,2.2f)
-                                         : powf( 80.f/255.f,2.2f);
-                    r = g = b = cv2;
+                    float px  = ro[0] + rd[0]*t;
+                    float pz  = ro[2] + rd[2]*t;
+                    int   chk = ((int)floorf(px) + (int)floorf(pz)) & 1;
+                    float cv2 = (chk == 0) ? powf(220.f / 255.f, 2.2f)
+                                           : powf( 80.f / 255.f, 2.2f);
+
+                    // Fog blend: alpha = 1 (full floor) near camera,
+                    //            alpha = 0 (full sky)  at SCENE_ZFAR.
+                    float fogAlpha = 1.f;
+                    if (t > FOG_START)
+                        fogAlpha = fmaxf(0.f,
+                            1.f - (t - FOG_START) / FOG_RANGE);
+
+                    r = cv2 * fogAlpha + skyR * (1.f - fogAlpha);
+                    g = cv2 * fogAlpha + skyG * (1.f - fogAlpha);
+                    b = cv2 * fogAlpha + skyB * (1.f - fogAlpha);
                 }
             }
 
-            int idx = y*w + x;
+            int idx = y * w + x;
 
-            // Color (jittered)
-            colorOut[idx*4+0] = r;
-            colorOut[idx*4+1] = g;
-            colorOut[idx*4+2] = b;
-            colorOut[idx*4+3] = 1.f;
+            // Color (jittered scene)
+            colorOut[idx*4 + 0] = r;
+            colorOut[idx*4 + 1] = g;
+            colorOut[idx*4 + 2] = b;
+            colorOut[idx*4 + 3] = 1.f;
 
-            // Depth: reversed-Z infinite projection.
-            // depth = zNear / t  =>  1.0 at the near plane, 0.0 at infinity.
-            // FSR must be told DEPTH_INVERTED | DEPTH_INFINITE.
-            // Background (no hit) => depth = 0  (i.e. at infinity).
-            depthOut[idx] = (hitZ > 0.f) ? (zNear / hitZ) : 0.f;
+            // Depth: reversed-Z, finite far plane.
+            //   hitT = SCENE_ZNEAR  =>  depth = 1.0  (near plane)
+            //   hitT = SCENE_ZFAR   =>  depth = SCENE_ZNEAR / SCENE_ZFAR  (~0.002)
+            //   no hit (sky)        =>  depth = 0.0  (beyond far plane)
+            // FSR flags: DEPTH_INVERTED only (NOT DEPTH_INFINITE).
+            // Dispatch: cameraNear = SCENE_ZNEAR, cameraFar = SCENE_ZFAR.
+            depthOut[idx] = (hitZ > 0.f) ? (SCENE_ZNEAR / hitZ) : 0.f;
 
-            // Motion Vectors: always (0,0).
-            // The camera and all scene objects are static.
-            // Jitter must NOT appear in motion vectors.
-            mvOut[idx*2+0] = 0.f;
-            mvOut[idx*2+1] = 0.f;
+            // Motion Vectors: always zero.
+            // The scene and camera are static. Jitter must NOT appear in MVs.
+            mvOut[idx*2 + 0] = 0.f;
+            mvOut[idx*2 + 1] = 0.f;
         }
     }
 }
