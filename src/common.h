@@ -21,14 +21,19 @@ static constexpr uint32_t RENDER_H  = 240;
 static constexpr uint32_t DISPLAY_W = 640;
 static constexpr uint32_t DISPLAY_H = 480;
 
-// Scene depth constants — used in renderScene AND in the FSR dispatch calls.
-// cameraNear / cameraFar in the dispatch MUST match these exactly.
+// Scene depth constants — shared between renderScene and FSR dispatch calls.
+//
+// SCENE_ZFAR is kept short (20.0f) to prevent checkerboard tile aliasing near
+// the horizon. At SCENE_ZFAR = 50 the floor tiles become sub-pixel at ~15
+// units, causing a shimmer band. At 20 the fog covers the problematic region.
+//
 // Depth encoding: reversed-Z, finite far plane.
-//   depth = SCENE_ZNEAR / hitT  =>  1.0 at near, ~0.002 at far, 0.0 for sky.
-// FSR flags to set:   DEPTH_INVERTED
-// FSR flags to clear: DEPTH_INFINITE   (we have a real, finite far plane)
+//   depth = SCENE_ZNEAR / hitT  =>  1.0 at near, SCENE_ZNEAR/SCENE_ZFAR at
+//   far (~0.005), 0.0 for sky (no hit).
+// FSR context flag : FFX_FSR*_ENABLE_DEPTH_INVERTED only.
+// FSR dispatch    : cameraNear = SCENE_ZNEAR, cameraFar = SCENE_ZFAR.
 static constexpr float SCENE_ZNEAR = 0.1f;
-static constexpr float SCENE_ZFAR  = 50.0f;
+static constexpr float SCENE_ZFAR  = 20.0f;
 
 // ---------- Vulkan helpers ---------------------------------------------------
 uint32_t appFindMemoryType(VkPhysicalDevice physicalDevice,
@@ -65,9 +70,9 @@ SharedImage createSharedImage(VkDevice device, VkPhysicalDevice physicalDevice,
 
 // ---------- Scene / I/O ------------------------------------------------------
 // jX, jY : pixel-space jitter for this frame (from ffxFsr*GetJitterOffset).
-//           Applied to color + depth only.
-//           Motion vectors are always (0,0) — static scene, static camera.
-//           Do NOT set MOTION_VECTORS_JITTER_CANCELLATION.
+//   Pixel (x,y) samples from unjittered position (x-jX, y-jY).
+//   Applied to color + depth. Motion vectors are always (0,0).
+//   Do NOT set MOTION_VECTORS_JITTER_CANCELLATION.
 void renderScene(int w, int h,
                  float jX, float jY,
                  float* colorOut, float* depthOut, float* mvOut);
