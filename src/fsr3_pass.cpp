@@ -40,15 +40,15 @@ static void RunFsr3Sequence(
 
     FfxFsr3UpscalerContextDescription fsr3Desc = {};
     fsr3Desc.flags =
-        FFX_FSR3UPSCALER_ENABLE_HIGH_DYNAMIC_RANGE  |
-        FFX_FSR3UPSCALER_ENABLE_AUTO_EXPOSURE       |
-        // DEPTH_INVERTED: depth = zNear/t => 1 at near, 0 at infinity
-        FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED      |
-        // DEPTH_INFINITE: far plane is at infinity
-        FFX_FSR3UPSCALER_ENABLE_DEPTH_INFINITE      |
+        FFX_FSR3UPSCALER_ENABLE_HIGH_DYNAMIC_RANGE |
+        FFX_FSR3UPSCALER_ENABLE_AUTO_EXPOSURE      |
+        // Depth is reversed-Z: value 1.0 = near plane, small value = far.
+        // Use DEPTH_INVERTED only. Do NOT use DEPTH_INFINITE — we have a real
+        // finite far plane (SCENE_ZFAR = 50.0f) so FSR must know the true range.
+        FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED     |
         FFX_FSR3UPSCALER_ENABLE_DEBUG_CHECKING;
-        // NOTE: Do NOT set MOTION_VECTORS_JITTER_CANCELLATION.
-        //       Motion vectors must be pure scene motion, with no jitter delta.
+        // NOTE: No MOTION_VECTORS_JITTER_CANCELLATION — MVs are pure scene
+        //       motion (zero for a static scene). Jitter is NOT in the MVs.
     fsr3Desc.maxRenderSize    = { RENDER_W,  RENDER_H  };
     fsr3Desc.maxUpscaleSize   = { DISPLAY_W, DISPLAY_H };
     fsr3Desc.fpMessage        = Fsr3MsgCallback;
@@ -85,7 +85,6 @@ static void RunFsr3Sequence(
     {
         vkResetCommandBuffer(cmd, 0);
         vkBeginCommandBuffer(cmd, &beginInfo);
-
         transition(cmd, siRecon.image,    siRecon.layout,
                    VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT,
                    siRecon.info.mipLevels);
@@ -95,11 +94,9 @@ static void RunFsr3Sequence(
         transition(cmd, siDilMV.image,    siDilMV.layout,
                    VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT,
                    siDilMV.info.mipLevels);
-
         VkImageLayout outLay = VK_IMAGE_LAYOUT_UNDEFINED;
         transition(cmd, outputImage, outLay,
                    VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
-
         vkEndCommandBuffer(cmd);
         vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
         vkQueueWaitIdle(queue);
@@ -139,15 +136,13 @@ static void RunFsr3Sequence(
         VK_IMAGE_ASPECT_COLOR_BIT, 0, siRecon.info.mipLevels, 0, 1 };
 
     int32_t jitterIndex = 0;
-    void*   outData = nullptr;
+    void*   outData     = nullptr;
 
     for (int i = 0; i < totalFrames; i++) {
         ++jitterIndex;
         float jX = 0.f, jY = 0.f;
         ffxFsr3UpscalerGetJitterOffset(&jX, &jY, jitterIndex, phaseCount);
 
-        // Render scene with jitter applied to color+depth.
-        // Motion vectors are always zero (static scene, no jitter in MVs).
         std::vector<float> fColor(RENDER_W * RENDER_H * 4);
         std::vector<float> fDepth(RENDER_W * RENDER_H);
         std::vector<float> fMV   (RENDER_W * RENDER_H * 2, 0.f);
@@ -176,7 +171,6 @@ static void RunFsr3Sequence(
                    VK_IMAGE_LAYOUT_GENERAL,
                    VK_IMAGE_ASPECT_COLOR_BIT, siRecon.info.mipLevels);
 
-        // Upload inputs
         transition(cmd, colorImage, colorLayout,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
         transition(cmd, depthImage, depthLayout,
@@ -235,12 +229,9 @@ static void RunFsr3Sequence(
         disp.dilatedDepth                  = dilDepthRes;
         disp.dilatedMotionVectors          = dilMVRes;
 
-        // Jitter offset: tell FSR the pixel-space sub-pixel shift used when rendering.
         disp.jitterOffset.x = jX;
         disp.jitterOffset.y = jY;
 
-        // Motion vectors are in render-resolution pixel space.
-        // They are all zero (static scene). Scale = render dimensions.
         disp.motionVectorScale.x = (float)RENDER_W;
         disp.motionVectorScale.y = (float)RENDER_H;
 
@@ -253,11 +244,11 @@ static void RunFsr3Sequence(
         disp.preExposure             = 1.f;
         disp.reset                   = (i == 0);
 
-        // Reversed-Z + infinite far plane:
-        // cameraNear = 0.1f (actual near plane)
-        // cameraFar  = FLT_MAX (infinite)
-        disp.cameraNear              = 0.1f;
-        disp.cameraFar               = FLT_MAX;
+        // Reversed-Z, finite far plane.
+        // DEPTH_INVERTED is set => depth 1.0 = near, small = far.
+        // cameraNear and cameraFar are the ACTUAL linear distances, not swapped.
+        disp.cameraNear              = SCENE_ZNEAR;
+        disp.cameraFar               = SCENE_ZFAR;
         disp.cameraFovAngleVertical  = 1.04719755f;
         disp.viewSpaceToMetersFactor = 1.f;
         disp.flags                   = 0;
@@ -268,10 +259,10 @@ static void RunFsr3Sequence(
         }
 
         VkMemoryBarrier memBarrier = { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
-        memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT  |
+        memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT |
                                    VK_ACCESS_MEMORY_WRITE_BIT;
-        memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT   |
-                                   VK_ACCESS_MEMORY_READ_BIT   |
+        memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT  |
+                                   VK_ACCESS_MEMORY_READ_BIT  |
                                    VK_ACCESS_TRANSFER_READ_BIT;
         vkCmdPipelineBarrier(cmd,
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
