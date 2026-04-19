@@ -43,12 +43,16 @@ void RunFsr2Pass(
 
     FfxFsr2ContextDescription fsr2Desc = {};
     fsr2Desc.flags =
-        FFX_FSR2_ENABLE_DEBUG_CHECKING     |
-        FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE |
-        FFX_FSR2_ENABLE_AUTO_EXPOSURE      |
-        FFX_FSR2_ENABLE_DEPTH_INVERTED;
+        FFX_FSR2_ENABLE_DEBUG_CHECKING                      |
+        FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE                  |
+        FFX_FSR2_ENABLE_AUTO_EXPOSURE                       |
+        FFX_FSR2_ENABLE_DEPTH_INVERTED                      |
+        FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION;
+        // MOTION_VECTORS_JITTER_CANCELLATION: our MVs are computed at pixel
+        // centres (0,0 for a static scene) and do NOT include the jitter
+        // offset. This flag tells FSR2 to internally subtract the jitter
+        // from the reprojection so it does not double-count the shift.
         // No DEPTH_INFINITE: we have a real finite SCENE_ZFAR.
-        // No MOTION_VECTORS_JITTER_CANCELLATION: MVs have no jitter in them.
     fsr2Desc.maxRenderSize    = { RENDER_W,  RENDER_H  };
     fsr2Desc.displaySize      = { DISPLAY_W, DISPLAY_H };
     fsr2Desc.fpMessage        = FfxMsgCallback;
@@ -183,8 +187,8 @@ void RunFsr2Pass(
         dispatchDesc.jitterOffset.x = jX;
         dispatchDesc.jitterOffset.y = jY;
 
-        // MVs are zero (static scene) stored directly in pixel space.
-        // Scale of 1.0 passes them through unchanged to the SDK.
+        // MVs are zero (static scene) in pixel space.
+        // Scale of 1.0 passes them through unchanged.
         dispatchDesc.motionVectorScale.x = 1.0f;
         dispatchDesc.motionVectorScale.y = 1.0f;
 
