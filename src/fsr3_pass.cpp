@@ -137,6 +137,7 @@ static void RunFsr3Sequence(
     fsr3Desc.flags =
         FFX_FSR3UPSCALER_ENABLE_HIGH_DYNAMIC_RANGE  |
         FFX_FSR3UPSCALER_ENABLE_AUTO_EXPOSURE       |
+        FFX_FSR3UPSCALER_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION |
         // No JITTER_CANCELLATION: our MVs do not contain jitter.
         // No DEPTH_INFINITE: our far plane is finite (100 units).
         FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED      |
