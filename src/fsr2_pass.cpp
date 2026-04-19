@@ -183,12 +183,10 @@ void RunFsr2Pass(
         dispatchDesc.jitterOffset.x = jX;
         dispatchDesc.jitterOffset.y = jY;
 
-        // motionVectorScale = (1, 1) because MVs are stored directly in
-        // pixel space (value 0.0 = no motion = 0 pixels of displacement).
-        // Using (RENDER_W, RENDER_H) would only be correct if MVs were
-        // stored as normalized fractions of the render resolution.
-        dispatchDesc.motionVectorScale.x = (float)RENDER_W;
-        dispatchDesc.motionVectorScale.y = (float)RENDER_H;
+        // MVs are zero (static scene) stored directly in pixel space.
+        // Scale of 1.0 passes them through unchanged to the SDK.
+        dispatchDesc.motionVectorScale.x = 1.0f;
+        dispatchDesc.motionVectorScale.y = 1.0f;
 
         dispatchDesc.renderSize          = { RENDER_W, RENDER_H };
         dispatchDesc.enableSharpening    = true;
