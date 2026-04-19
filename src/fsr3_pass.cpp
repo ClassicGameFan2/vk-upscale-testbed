@@ -12,18 +12,16 @@ static void Fsr3MsgCallback(FfxMsgType /*type*/, const wchar_t* message) {
 // ---------------------------------------------------------------------------
 // renderSceneFsr3
 //
-// Identical to renderScene() in common.cpp EXCEPT for two corrections:
+// Same ray-caster as common.cpp renderScene(), with two corrections:
 //
-//  1. Y-jitter sign: AMD's canonical jitter formula is
-//       jitterY_ndc = -2.0 * jY / renderHeight
-//     which is equivalent to subtracting jY from the pixel Y coordinate
-//     before converting to NDC.  The original code added +currJY, which
-//     is the wrong sign for the Y axis and causes vertical smearing in FSR3.
-//     FSR2 tolerates the wrong sign because its JITTER_CANCELLATION flag
-//     and MV path partially compensate, but FSR3 (without that flag) does not.
+//  1. Y-jitter sign: AMD canonical formula is jitterY_ndc = -2*jY/h,
+//     which means we SUBTRACT currJY from the pixel Y coordinate.
+//     Renderer applies: ndcY = base - 2*currJY/h
+//     Dispatch receives: jitterOffset.y = jY (raw SDK value)
+//     FSR3 internally computes: -2*jY/h — these match.
 //
-//  2. Motion vectors are zero for a static scene (no jitter baked in),
-//     consistent with the context NOT having ENABLE_MOTION_VECTORS_JITTER_CANCELLATION.
+//  2. Motion vectors are zero for a static scene (no jitter baked in).
+//     Context has no JITTER_CANCELLATION flag, so MVs must be true motion.
 // ---------------------------------------------------------------------------
 static void renderSceneFsr3(int w, int h,
                              float currJX, float currJY,
@@ -36,10 +34,8 @@ static void renderSceneFsr3(int w, int h,
 
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
-            // BUG B FIX: Subtract currJY (Y axis negated) to match AMD's
-            // canonical jitter convention:
-            //   jitterX_ndc = +2*jX/w  ->  add +currJX to pixel X (unchanged)
-            //   jitterY_ndc = -2*jY/h  ->  subtract currJY from pixel Y
+            // +currJX for X  (jitter_ndc_x = +2*jX/w, same as AMD formula)
+            // -currJY for Y  (jitter_ndc_y = -2*jY/h, same as AMD formula)
             float ndcX = ((x + 0.5f + currJX) / w) * 2.0f - 1.0f;
             float ndcY = ((y + 0.5f - currJY) / h) * 2.0f - 1.0f;
 
@@ -96,7 +92,7 @@ static void renderSceneFsr3(int w, int h,
             depthOut[idx]     = (hitZ > 0.f) ? (zNear / hitZ) : 0.f;
 
             // Static scene: true motion is zero.
-            // No JITTER_CANCELLATION flag, so MVs must NOT contain jitter.
+            // No JITTER_CANCELLATION flag — MVs must NOT contain jitter.
             mvOut[idx*2+0] = 0.f;
             mvOut[idx*2+1] = 0.f;
         }
@@ -137,10 +133,9 @@ static void RunFsr3Sequence(
     fsr3Desc.flags =
         FFX_FSR3UPSCALER_ENABLE_HIGH_DYNAMIC_RANGE  |
         FFX_FSR3UPSCALER_ENABLE_AUTO_EXPOSURE       |
-        FFX_FSR3UPSCALER_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION |
-        // No JITTER_CANCELLATION: our MVs do not contain jitter.
-        // No DEPTH_INFINITE: our far plane is finite (100 units).
-        FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED      |
+        // No JITTER_CANCELLATION: MVs do not contain jitter.
+        // No DEPTH_INFINITE: far plane is finite (100 units).
+        FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED      |   // near=1.0, far~0
         FFX_FSR3UPSCALER_ENABLE_DEBUG_CHECKING;
     fsr3Desc.maxRenderSize    = { RENDER_W,  RENDER_H  };
     fsr3Desc.maxUpscaleSize   = { DISPLAY_W, DISPLAY_H };
@@ -174,33 +169,44 @@ static void RunFsr3Sequence(
     SharedImage siDilMV    = createSharedImage(device, physicalDevice,
                                                sharedDescs.dilatedMotionVectors);
 
-    // Pre-loop: bring all shared images and output to GENERAL layout.
-    // We also do the first-frame clear of reconstructedPrevNearestDepth here
-    // (0xFFFFFFFF = max uint32, correct sentinel for InterlockedMin).
+    // -----------------------------------------------------------------------
+    // KEY: What to clear reconstructedPrevNearestDepth to each frame.
+    //
+    // This resource is written by PrepareInputs using an atomic operation:
+    //
+    //   DEPTH_INVERTED (reversed-Z): near=1.0, far=0.0
+    //     FSR uses InterlockedMax to find nearest (largest) depth per pixel.
+    //     Sentinel must be 0x00000000 (zero) so any real depth value > 0
+    //     wins the atomic max and gets written in.
+    //
+    //   Normal depth: near=0.0, far=1.0
+    //     FSR uses InterlockedMin to find nearest (smallest) depth per pixel.
+    //     Sentinel must be 0xFFFFFFFF (max) so any real depth value < max
+    //     wins the atomic min and gets written in.
+    //
+    // We use DEPTH_INVERTED, therefore the correct sentinel is ZERO.
+    // -----------------------------------------------------------------------
+    VkClearColorValue reconSentinel;
+    reconSentinel.uint32[0] = 0x00000000u;  // InterlockedMax sentinel for reversed-Z
+    reconSentinel.uint32[1] = 0x00000000u;
+    reconSentinel.uint32[2] = 0x00000000u;
+    reconSentinel.uint32[3] = 0x00000000u;
+
+    VkImageSubresourceRange reconRange = {
+        VK_IMAGE_ASPECT_COLOR_BIT, 0, siRecon.info.mipLevels, 0, 1 };
+
+    // Pre-loop: transition all shared images and output to GENERAL,
+    // and perform the first clear of reconstructedPrevNearestDepth.
     {
         vkResetCommandBuffer(cmd, 0);
         vkBeginCommandBuffer(cmd, &beginInfo);
 
-        // Transition siRecon to TRANSFER_DST for the initial clear.
         transition(cmd, siRecon.image, siRecon.layout,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                    VK_IMAGE_ASPECT_COLOR_BIT, siRecon.info.mipLevels);
-
-        // BUG A FIX: Clear to 0xFFFFFFFF (all bits set) so that
-        // InterlockedMin in PrepareInputs can write real depth values in.
-        // Clearing to 0 would make every atomic min keep 0 and depth
-        // reconstruction would never update, breaking all temporal history.
-        VkClearColorValue maxClear;
-        maxClear.uint32[0] = 0xFFFFFFFFu;
-        maxClear.uint32[1] = 0xFFFFFFFFu;
-        maxClear.uint32[2] = 0xFFFFFFFFu;
-        maxClear.uint32[3] = 0xFFFFFFFFu;
-        VkImageSubresourceRange reconRange = {
-            VK_IMAGE_ASPECT_COLOR_BIT, 0, siRecon.info.mipLevels, 0, 1 };
         vkCmdClearColorImage(cmd, siRecon.image,
                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                             &maxClear, 1, &reconRange);
-
+                             &reconSentinel, 1, &reconRange);
         transition(cmd, siRecon.image, siRecon.layout,
                    VK_IMAGE_LAYOUT_GENERAL,
                    VK_IMAGE_ASPECT_COLOR_BIT, siRecon.info.mipLevels);
@@ -251,17 +257,6 @@ static void RunFsr3Sequence(
     VkImageLayout mvLayout     = VK_IMAGE_LAYOUT_UNDEFINED;
     VkImageLayout outputLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-    // siRecon subresource range for per-frame clear.
-    VkImageSubresourceRange reconRange = {
-        VK_IMAGE_ASPECT_COLOR_BIT, 0, siRecon.info.mipLevels, 0, 1 };
-
-    // Sentinel for InterlockedMin: all bits set = largest uint value.
-    VkClearColorValue maxClear;
-    maxClear.uint32[0] = 0xFFFFFFFFu;
-    maxClear.uint32[1] = 0xFFFFFFFFu;
-    maxClear.uint32[2] = 0xFFFFFFFFu;
-    maxClear.uint32[3] = 0xFFFFFFFFu;
-
     int32_t jitterIndex = 0;
     void*   outData     = nullptr;
 
@@ -270,7 +265,6 @@ static void RunFsr3Sequence(
         float jX = 0.f, jY = 0.f;
         ffxFsr3UpscalerGetJitterOffset(&jX, &jY, jitterIndex, phaseCount);
 
-        // Render scene with corrected jitter sign on Y axis.
         std::vector<float> fColor(RENDER_W * RENDER_H * 4);
         std::vector<float> fDepth(RENDER_W * RENDER_H);
         std::vector<float> fMV   (RENDER_W * RENDER_H * 2, 0.f);
@@ -287,32 +281,17 @@ static void RunFsr3Sequence(
         vkResetCommandBuffer(cmd, 0);
         vkBeginCommandBuffer(cmd, &beginInfo);
 
-        // BUG A FIX: Clear reconstructedPrevNearestDepth to 0xFFFFFFFF
-        // EVERY frame before the dispatch.
-        //
-        // WHY every frame and not just frame 0:
-        //   This resource is written by FSR3's PrepareInputs pass using
-        //   InterlockedMin scatter.  After PrepareInputs finishes, it holds
-        //   the nearest depth found at each output pixel for the CURRENT
-        //   frame.  The Accumulate pass then reads it as "reconstructed
-        //   previous nearest depth" (i.e. the value from this same buffer
-        //   that was written in the PREVIOUS frame's PrepareInputs).
-        //   Therefore the lifecycle is:
-        //     Frame N:  cleared to MAX  ->  PrepareInputs writes minimums
-        //               ->  Accumulate reads "previous" = what frame N-1 wrote
-        //     Frame N+1: cleared to MAX -> PrepareInputs writes new minimums
-        //               ->  Accumulate reads "previous" = what frame N wrote
-        //   If we do NOT clear to MAX, any pixel not reached by a scatter
-        //   write will retain the stale value from the previous frame's
-        //   scatter, corrupting disocclusion detection.
-        //   If we clear to 0 (as before), InterlockedMin(0, x) = 0 for all x,
-        //   so no depth is ever written and the buffer stays all-zero forever.
+        // Clear reconstructedPrevNearestDepth to sentinel every frame.
+        // With DEPTH_INVERTED + InterlockedMax, sentinel = 0 (zero).
+        // This allows PrepareInputs to scatter real depth values (>0) in.
+        // Without this clear, stale high values from previous frames prevent
+        // disoccluded pixels from being correctly updated.
         transition(cmd, siRecon.image, siRecon.layout,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                    VK_IMAGE_ASPECT_COLOR_BIT, siRecon.info.mipLevels);
         vkCmdClearColorImage(cmd, siRecon.image,
                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                             &maxClear, 1, &reconRange);
+                             &reconSentinel, 1, &reconRange);
         transition(cmd, siRecon.image, siRecon.layout,
                    VK_IMAGE_LAYOUT_GENERAL,
                    VK_IMAGE_ASPECT_COLOR_BIT, siRecon.info.mipLevels);
@@ -376,16 +355,15 @@ static void RunFsr3Sequence(
         disp.dilatedDepth                  = dilDepthRes;
         disp.dilatedMotionVectors          = dilMVRes;
 
-        // Pass jitter as-is from the SDK: X is in pixel units, Y is in pixel
-        // units.  We applied +jX to pixel X and -jY to pixel Y in the
-        // renderer (matching AMD's canonical formula), so we pass the raw
-        // SDK values here directly.
+        // Jitter: raw SDK values passed directly.
+        // Renderer applies +jX to pixel X  -> ndcX shift = +2*jX/w  (correct)
+        // Renderer applies -jY to pixel Y  -> ndcY shift = -2*jY/h  (correct, matches AMD formula)
+        // FSR3 receives jX and jY and internally uses the same convention.
         disp.jitterOffset.x = jX;
         disp.jitterOffset.y = jY;
 
         // MVs are zero (static scene, no jitter baked in).
-        // Scale is still RENDER_W/H so any future non-zero MVs in
-        // normalised-pixel-fraction space scale correctly to pixels.
+        // Scale RENDER_W/H converts normalised-pixel-fraction MVs to pixels.
         disp.motionVectorScale.x = (float)RENDER_W;
         disp.motionVectorScale.y = (float)RENDER_H;
 
@@ -398,10 +376,13 @@ static void RunFsr3Sequence(
         disp.preExposure             = 1.f;
         disp.reset                   = (i == 0);
 
-        // Depth: zNear/hitZ => 1.0 at near, ~0 at far = reversed-Z.
-        // DEPTH_INVERTED flag is set, so pass near=FLT_MAX, far=zNear.
-        disp.cameraNear              = FLT_MAX;
-        disp.cameraFar               = 0.1f;
+        // Depth: zNear/hitZ => 1.0 at near plane, ~0 at far = reversed-Z.
+        // DEPTH_INVERTED flag is set.
+        // cameraNear/Far: pass actual linear clip distances.
+        // With DEPTH_INVERTED, FSR expects (near=zNear, far=zFar) as the
+        // actual camera distances, and handles the inversion internally.
+        disp.cameraNear              = 0.1f;
+        disp.cameraFar               = 100.0f;
         disp.cameraFovAngleVertical  = 1.04719755f;
         disp.viewSpaceToMetersFactor = 1.f;
         disp.flags                   = 0;
@@ -411,8 +392,6 @@ static void RunFsr3Sequence(
             break;
         }
 
-        // Full barrier to ensure FSR3 compute work is visible to
-        // subsequent transfers and compute.
         VkMemoryBarrier memBarrier = { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
         memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT  |
                                    VK_ACCESS_MEMORY_WRITE_BIT;
@@ -435,7 +414,6 @@ static void RunFsr3Sequence(
         }
         vkQueueWaitIdle(queue);
 
-        // The SDK leaves UAV output in GENERAL after its internal barriers.
         outputLayout = VK_IMAGE_LAYOUT_GENERAL;
 
         int frameNum = i + 1;
