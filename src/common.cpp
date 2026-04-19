@@ -183,27 +183,23 @@ SharedImage createSharedImage(VkDevice device, VkPhysicalDevice physicalDevice,
 // JITTER APPLICATION (matches AMD Cauldron / FSR documentation exactly):
 //   ffxFsr*GetJitterOffset returns (jX, jY) in pixel space, range [-0.5, +0.5].
 //
-//   In a rasterizer Cauldron applies jitter to the projection matrix as:
+//   In a rasterizer, Cauldron applies jitter to the projection matrix as:
 //       ndcOffsetX = +2.0f * jX / renderWidth
 //       ndcOffsetY = -2.0f * jY / renderHeight
-//   This translates the whole image in NDC, so pixel (x,y) captures the
-//   world sample that would normally land at (x + jX, y + jY).
+//   This shifts the projected geometry so that pixel (x,y) captures the world
+//   sample that would normally land at (x + jX, y + jY).
 //
-//   In our ray tracer we replicate this directly:
-//       sampleX = x + 0.5 + jX        (ADD jX — same sign as rasterizer)
-//       sampleY = y + 0.5 + jY        (ADD jY)
-//   Converting to NDC:
-//       ndcX = (sampleX / w) * 2 - 1 = pixelNdcX + 2*jX/w
-//       ndcY = (sampleY / h) * 2 - 1 = pixelNdcY + 2*jY/h
+//   In our ray tracer we replicate this by SUBTRACTING jitter from the sample
+//   position. If jX = +0.5 (geometry shifted half a pixel right), our ray must
+//   sample half a pixel to the LEFT to see the same world point:
+//       sampleX = x + 0.5 - jX
+//       sampleY = y + 0.5 - jY
 //
-//   NOTE: NDC Y is negated when building the ray direction
-//   (rd.y = -ndcY * tanHalfFov) so the Y jitter automatically follows
-//   the Cauldron sign convention (-2*jY/renderHeight in projection space).
+//   This is the inverse of the previous (incorrect) convention that added jitter.
 //
 // MOTION VECTORS:
 //   Static scene + static camera => MVs are always (0, 0) in pixel space.
-//   motionVectorScale = (RENDER_W, RENDER_H) — MVs are normalised fractions
-//   of render resolution, matching Cauldron convention.
+//   motionVectorScale = (1.0, 1.0) — MVs are already in pixel space.
 //   Do NOT set MOTION_VECTORS_JITTER_CANCELLATION (no jitter baked into MVs).
 //
 // DEPTH:
@@ -229,19 +225,20 @@ void renderScene(int w, int h,
 
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
-            // Pixel centre shifted by +jitter, matching the Cauldron projection
-            // matrix convention: pixel (x,y) samples from world position
-            // (x + jX, y + jY).  This is ADD, not subtract.
-            float sampleX = (x + 0.5f + jX);
-            float sampleY = (y + 0.5f + jY);
+            // Pixel centre shifted by -jitter.
+            // In a rasterizer, a jitter of +jX shifts the projected geometry
+            // rightward by jX pixels. To replicate this in a ray tracer the
+            // ray origin must sample from jX pixels to the LEFT, i.e. we
+            // subtract jitter. This matches the Cauldron/FSR convention
+            // exactly: the SDK passes +jX and expects the renderer to move
+            // the sample by -jX relative to the pixel centre.
+            float sampleX = (x + 0.5f - jX);
+            float sampleY = (y + 0.5f - jY);
 
             float ndcX =  (sampleX / w) * 2.0f - 1.0f;
             float ndcY =  (sampleY / h) * 2.0f - 1.0f;
 
             float ro[3] = { 0.f, 1.f, 0.f };
-            // NDC Y is negated for the ray direction (screen-space Y flips
-            // relative to view-space Y), which automatically gives the correct
-            // -2*jY/renderHeight NDC offset in the vertical direction.
             float rd[3] = { ndcX * aspect * tanHalfFov,
                            -ndcY * tanHalfFov,
                             1.f };
@@ -305,9 +302,8 @@ void renderScene(int w, int h,
             depthOut[idx] = (hitZ > 0.f) ? (SCENE_ZNEAR / hitZ) : 0.f;
 
             // Static scene, static camera: zero motion vectors.
-            // Stored as normalised fractions of render resolution so that
-            // motionVectorScale = (RENDER_W, RENDER_H) in the dispatch gives
-            // the correct pixel-space displacement (0 pixels).
+            // Scale is 1.0 in dispatch so these raw pixel-space values
+            // (0 = no motion) are passed through unchanged.
             mvOut[idx*2 + 0] = 0.f;
             mvOut[idx*2 + 1] = 0.f;
         }
