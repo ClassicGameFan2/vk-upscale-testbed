@@ -40,12 +40,19 @@ static void RunFsr3Sequence(
 
     FfxFsr3UpscalerContextDescription fsr3Desc = {};
     fsr3Desc.flags =
-        FFX_FSR3UPSCALER_ENABLE_HIGH_DYNAMIC_RANGE |
-        FFX_FSR3UPSCALER_ENABLE_AUTO_EXPOSURE      |
-        FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED     |
-        FFX_FSR3UPSCALER_ENABLE_DEBUG_CHECKING;
+        FFX_FSR3UPSCALER_ENABLE_HIGH_DYNAMIC_RANGE                  |
+        FFX_FSR3UPSCALER_ENABLE_AUTO_EXPOSURE                       |
+        FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED                      |
+        FFX_FSR3UPSCALER_ENABLE_DEBUG_CHECKING                      |
+        FFX_FSR3UPSCALER_ENABLE_RCAS                                |
+        FFX_FSR3UPSCALER_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION;
+        // ENABLE_RCAS: allocates the sharpening pipeline at context creation
+        //   time; without this flag the RCAS pass is never initialised even
+        //   if enableSharpening=true is set in the dispatch description.
+        // MOTION_VECTORS_JITTER_CANCELLATION: our MVs are jitter-free (0,0
+        //   for a static scene). This flag tells FSR3 to subtract the jitter
+        //   offset internally during reprojection so it is not double-counted.
         // No DEPTH_INFINITE: we have a real finite SCENE_ZFAR.
-        // No MOTION_VECTORS_JITTER_CANCELLATION: MVs have no jitter in them.
     fsr3Desc.maxRenderSize    = { RENDER_W,  RENDER_H  };
     fsr3Desc.maxUpscaleSize   = { DISPLAY_W, DISPLAY_H };
     fsr3Desc.fpMessage        = Fsr3MsgCallback;
@@ -236,8 +243,8 @@ static void RunFsr3Sequence(
         disp.jitterOffset.x = jX;
         disp.jitterOffset.y = jY;
 
-        // MVs are zero (static scene) stored directly in pixel space.
-        // Scale of 1.0 passes them through unchanged to the SDK.
+        // MVs are zero (static scene) in pixel space.
+        // Scale of 1.0 passes them through unchanged.
         disp.motionVectorScale.x = 1.0f;
         disp.motionVectorScale.y = 1.0f;
 
