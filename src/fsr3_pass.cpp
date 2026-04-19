@@ -10,20 +10,20 @@ static void Fsr3MsgCallback(FfxMsgType /*type*/, const wchar_t* message) {
 }
 
 // ---------------------------------------------------------------------------
-// renderSceneFsr3: same ray-caster as renderScene() in common.cpp, but the
-// motion vectors are output WITHOUT the jitter baked in.
+// renderSceneFsr3
 //
-// WHY:  FSR3 context is created WITHOUT the
-//       FFX_FSR3UPSCALER_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION flag,
-//       which means FSR3 expects motion vectors that do NOT contain jitter.
-//       For our fully static scene the true screen-space motion of every
-//       pixel between frames is exactly zero, so we write 0.
+// Identical to renderScene() in common.cpp EXCEPT for two corrections:
 //
-//       FSR2 works because it IS created with the jitter-cancellation flag
-//       and therefore accepts jitter-contaminated MVs.  We keep FSR2 as-is.
+//  1. Y-jitter sign: AMD's canonical jitter formula is
+//       jitterY_ndc = -2.0 * jY / renderHeight
+//     which is equivalent to subtracting jY from the pixel Y coordinate
+//     before converting to NDC.  The original code added +currJY, which
+//     is the wrong sign for the Y axis and causes vertical smearing in FSR3.
+//     FSR2 tolerates the wrong sign because its JITTER_CANCELLATION flag
+//     and MV path partially compensate, but FSR3 (without that flag) does not.
 //
-// NOTE: The colour buffer IS rendered with jitter (ndcX/ndcY offset by
-//       currJX/currJY) exactly as before – that is correct and required.
+//  2. Motion vectors are zero for a static scene (no jitter baked in),
+//     consistent with the context NOT having ENABLE_MOTION_VECTORS_JITTER_CANCELLATION.
 // ---------------------------------------------------------------------------
 static void renderSceneFsr3(int w, int h,
                              float currJX, float currJY,
@@ -36,9 +36,12 @@ static void renderSceneFsr3(int w, int h,
 
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
-            // Apply jitter to the colour/depth sample position (correct).
+            // BUG B FIX: Subtract currJY (Y axis negated) to match AMD's
+            // canonical jitter convention:
+            //   jitterX_ndc = +2*jX/w  ->  add +currJX to pixel X (unchanged)
+            //   jitterY_ndc = -2*jY/h  ->  subtract currJY from pixel Y
             float ndcX = ((x + 0.5f + currJX) / w) * 2.0f - 1.0f;
-            float ndcY = ((y + 0.5f + currJY) / h) * 2.0f - 1.0f;
+            float ndcY = ((y + 0.5f - currJY) / h) * 2.0f - 1.0f;
 
             float ro[3] = { 0.f, 1.f, 0.f };
             float rd[3] = { ndcX * aspect * tanHalfFov, -ndcY * tanHalfFov, 1.f };
@@ -90,13 +93,10 @@ static void renderSceneFsr3(int w, int h,
             colorOut[idx*4+1] = g;
             colorOut[idx*4+2] = b;
             colorOut[idx*4+3] = 1.f;
+            depthOut[idx]     = (hitZ > 0.f) ? (zNear / hitZ) : 0.f;
 
-            depthOut[idx] = (hitZ > 0.f) ? (zNear / hitZ) : 0.f;
-
-            // FIX (Bug 2): Motion vectors are ZERO for a static scene.
-            // FSR3 is created WITHOUT jitter-cancellation flag, so MVs
-            // must NOT contain the jitter delta.  The camera is stationary,
-            // so true screen-space motion is 0 for every pixel.
+            // Static scene: true motion is zero.
+            // No JITTER_CANCELLATION flag, so MVs must NOT contain jitter.
             mvOut[idx*2+0] = 0.f;
             mvOut[idx*2+1] = 0.f;
         }
@@ -133,18 +133,12 @@ static void RunFsr3Sequence(
     ffxGetInterfaceVK(&ffxIface, ffxGetDeviceVK(&vkDevCtx),
                       scratchBuffer, scratchBufferSize, 4);
 
-    // FIX (Bug 2): Remove FFX_FSR3UPSCALER_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION.
-    // Our MVs for FSR3 are now true zero-motion vectors (static scene),
-    // so FSR3 must NOT apply jitter cancellation to them.
-    // Also remove FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED: our depth is
-    // zNear/hitZ which produces 1.0 at the near plane and ~0 at the far
-    // plane — that IS the inverted (reversed-Z) convention, so we KEEP it.
     FfxFsr3UpscalerContextDescription fsr3Desc = {};
     fsr3Desc.flags =
         FFX_FSR3UPSCALER_ENABLE_HIGH_DYNAMIC_RANGE  |
         FFX_FSR3UPSCALER_ENABLE_AUTO_EXPOSURE       |
-        // NOTE: jitter-cancellation flag intentionally OMITTED because our
-        //       motion vectors do NOT contain jitter (see renderSceneFsr3).
+        // No JITTER_CANCELLATION: our MVs do not contain jitter.
+        // No DEPTH_INFINITE: our far plane is finite (100 units).
         FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED      |
         FFX_FSR3UPSCALER_ENABLE_DEBUG_CHECKING;
     fsr3Desc.maxRenderSize    = { RENDER_W,  RENDER_H  };
@@ -179,18 +173,41 @@ static void RunFsr3Sequence(
     SharedImage siDilMV    = createSharedImage(device, physicalDevice,
                                                sharedDescs.dilatedMotionVectors);
 
-    // Pre-loop: bring shared images and output to GENERAL
+    // Pre-loop: bring all shared images and output to GENERAL layout.
+    // We also do the first-frame clear of reconstructedPrevNearestDepth here
+    // (0xFFFFFFFF = max uint32, correct sentinel for InterlockedMin).
     {
         vkResetCommandBuffer(cmd, 0);
         vkBeginCommandBuffer(cmd, &beginInfo);
 
-        transition(cmd, siRecon.image,    siRecon.layout,
-                   VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT,
-                   siRecon.info.mipLevels);
+        // Transition siRecon to TRANSFER_DST for the initial clear.
+        transition(cmd, siRecon.image, siRecon.layout,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   VK_IMAGE_ASPECT_COLOR_BIT, siRecon.info.mipLevels);
+
+        // BUG A FIX: Clear to 0xFFFFFFFF (all bits set) so that
+        // InterlockedMin in PrepareInputs can write real depth values in.
+        // Clearing to 0 would make every atomic min keep 0 and depth
+        // reconstruction would never update, breaking all temporal history.
+        VkClearColorValue maxClear;
+        maxClear.uint32[0] = 0xFFFFFFFFu;
+        maxClear.uint32[1] = 0xFFFFFFFFu;
+        maxClear.uint32[2] = 0xFFFFFFFFu;
+        maxClear.uint32[3] = 0xFFFFFFFFu;
+        VkImageSubresourceRange reconRange = {
+            VK_IMAGE_ASPECT_COLOR_BIT, 0, siRecon.info.mipLevels, 0, 1 };
+        vkCmdClearColorImage(cmd, siRecon.image,
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             &maxClear, 1, &reconRange);
+
+        transition(cmd, siRecon.image, siRecon.layout,
+                   VK_IMAGE_LAYOUT_GENERAL,
+                   VK_IMAGE_ASPECT_COLOR_BIT, siRecon.info.mipLevels);
+
         transition(cmd, siDilDepth.image, siDilDepth.layout,
                    VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT,
                    siDilDepth.info.mipLevels);
-        transition(cmd, siDilMV.image,    siDilMV.layout,
+        transition(cmd, siDilMV.image, siDilMV.layout,
                    VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT,
                    siDilMV.info.mipLevels);
 
@@ -233,20 +250,26 @@ static void RunFsr3Sequence(
     VkImageLayout mvLayout     = VK_IMAGE_LAYOUT_UNDEFINED;
     VkImageLayout outputLayout = VK_IMAGE_LAYOUT_GENERAL;
 
+    // siRecon subresource range for per-frame clear.
     VkImageSubresourceRange reconRange = {
         VK_IMAGE_ASPECT_COLOR_BIT, 0, siRecon.info.mipLevels, 0, 1 };
 
+    // Sentinel for InterlockedMin: all bits set = largest uint value.
+    VkClearColorValue maxClear;
+    maxClear.uint32[0] = 0xFFFFFFFFu;
+    maxClear.uint32[1] = 0xFFFFFFFFu;
+    maxClear.uint32[2] = 0xFFFFFFFFu;
+    maxClear.uint32[3] = 0xFFFFFFFFu;
+
     int32_t jitterIndex = 0;
-    float   prevJX = 0.f, prevJY = 0.f;
-    void*   outData = nullptr;
+    void*   outData     = nullptr;
 
     for (int i = 0; i < totalFrames; i++) {
         ++jitterIndex;
         float jX = 0.f, jY = 0.f;
         ffxFsr3UpscalerGetJitterOffset(&jX, &jY, jitterIndex, phaseCount);
 
-        // FIX (Bug 2): Use renderSceneFsr3 which outputs zero MVs.
-        // The colour is still rendered with jitter applied to the ray direction.
+        // Render scene with corrected jitter sign on Y axis.
         std::vector<float> fColor(RENDER_W * RENDER_H * 4);
         std::vector<float> fDepth(RENDER_W * RENDER_H);
         std::vector<float> fMV   (RENDER_W * RENDER_H * 2, 0.f);
@@ -263,19 +286,37 @@ static void RunFsr3Sequence(
         vkResetCommandBuffer(cmd, 0);
         vkBeginCommandBuffer(cmd, &beginInfo);
 
-        // Clear reconstructedPrevNearestDepth to zero every frame.
+        // BUG A FIX: Clear reconstructedPrevNearestDepth to 0xFFFFFFFF
+        // EVERY frame before the dispatch.
+        //
+        // WHY every frame and not just frame 0:
+        //   This resource is written by FSR3's PrepareInputs pass using
+        //   InterlockedMin scatter.  After PrepareInputs finishes, it holds
+        //   the nearest depth found at each output pixel for the CURRENT
+        //   frame.  The Accumulate pass then reads it as "reconstructed
+        //   previous nearest depth" (i.e. the value from this same buffer
+        //   that was written in the PREVIOUS frame's PrepareInputs).
+        //   Therefore the lifecycle is:
+        //     Frame N:  cleared to MAX  ->  PrepareInputs writes minimums
+        //               ->  Accumulate reads "previous" = what frame N-1 wrote
+        //     Frame N+1: cleared to MAX -> PrepareInputs writes new minimums
+        //               ->  Accumulate reads "previous" = what frame N wrote
+        //   If we do NOT clear to MAX, any pixel not reached by a scatter
+        //   write will retain the stale value from the previous frame's
+        //   scatter, corrupting disocclusion detection.
+        //   If we clear to 0 (as before), InterlockedMin(0, x) = 0 for all x,
+        //   so no depth is ever written and the buffer stays all-zero forever.
         transition(cmd, siRecon.image, siRecon.layout,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                    VK_IMAGE_ASPECT_COLOR_BIT, siRecon.info.mipLevels);
-        VkClearColorValue zeroClear = {};
         vkCmdClearColorImage(cmd, siRecon.image,
                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                             &zeroClear, 1, &reconRange);
+                             &maxClear, 1, &reconRange);
         transition(cmd, siRecon.image, siRecon.layout,
                    VK_IMAGE_LAYOUT_GENERAL,
                    VK_IMAGE_ASPECT_COLOR_BIT, siRecon.info.mipLevels);
 
-        // Upload inputs
+        // Upload colour, depth, motion vectors.
         transition(cmd, colorImage, colorLayout,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
         transition(cmd, depthImage, depthLayout,
@@ -334,24 +375,16 @@ static void RunFsr3Sequence(
         disp.dilatedDepth                  = dilDepthRes;
         disp.dilatedMotionVectors          = dilMVRes;
 
+        // Pass jitter as-is from the SDK: X is in pixel units, Y is in pixel
+        // units.  We applied +jX to pixel X and -jY to pixel Y in the
+        // renderer (matching AMD's canonical formula), so we pass the raw
+        // SDK values here directly.
         disp.jitterOffset.x = jX;
         disp.jitterOffset.y = jY;
 
-        // FIX (Bug 2, part 2): motionVectorScale.
-        // Since our MVs are now in true screen-space pixel coordinates
-        // (which happen to be zero for a static scene), the scale factor
-        // is 1.0 in each axis.  FSR3 expects MVs in [-W..+W, -H..+H] range,
-        // so scale = 1 means we hand FSR pixel-space MVs directly.
-        // 
-        // IMPORTANT: We keep scale at RENDER_W/RENDER_H here because the
-        // motion vectors, while zero now, are conceptually in the same
-        // normalised pixel-fraction space we used for FSR2 (i.e. if we ever
-        // add real object motion we will output it in [-1..+1] space and
-        // scale it to pixels here).  Since fMV is all zeros, the scale
-        // value is irrelevant for a static scene — any non-zero scale
-        // will produce the same (zero) result.  We keep RENDER_W/RENDER_H
-        // for symmetry with FSR2 so that any future non-zero MVs are handled
-        // identically.
+        // MVs are zero (static scene, no jitter baked in).
+        // Scale is still RENDER_W/H so any future non-zero MVs in
+        // normalised-pixel-fraction space scale correctly to pixels.
         disp.motionVectorScale.x = (float)RENDER_W;
         disp.motionVectorScale.y = (float)RENDER_H;
 
@@ -364,12 +397,8 @@ static void RunFsr3Sequence(
         disp.preExposure             = 1.f;
         disp.reset                   = (i == 0);
 
-        // Depth convention: zNear/hitZ produces 1.0 at near, ~0 at far.
-        // This is the inverted (reversed-Z) convention.
-        // cameraNear should be the VALUE at near plane = 1.0 (after inversion),
-        // cameraFar should be the VALUE at far plane  = ~0.
-        // FSR3 with DEPTH_INVERTED: pass near=FLT_MAX (or 1.0), far=near_clip.
-        // We keep the same convention as FSR2 which worked fine.
+        // Depth: zNear/hitZ => 1.0 at near, ~0 at far = reversed-Z.
+        // DEPTH_INVERTED flag is set, so pass near=FLT_MAX, far=zNear.
         disp.cameraNear              = FLT_MAX;
         disp.cameraFar               = 0.1f;
         disp.cameraFovAngleVertical  = 1.04719755f;
@@ -381,7 +410,8 @@ static void RunFsr3Sequence(
             break;
         }
 
-        // Full pipeline barrier after FSR3 compute work.
+        // Full barrier to ensure FSR3 compute work is visible to
+        // subsequent transfers and compute.
         VkMemoryBarrier memBarrier = { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
         memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT  |
                                    VK_ACCESS_MEMORY_WRITE_BIT;
@@ -404,9 +434,7 @@ static void RunFsr3Sequence(
         }
         vkQueueWaitIdle(queue);
 
-        // FIX (Bug 5): After FSR3 dispatch the SDK has internally
-        // transitioned outputImage.  We don't know the exact final layout,
-        // but the SDK leaves UAV resources in GENERAL after its own barriers.
+        // The SDK leaves UAV output in GENERAL after its internal barriers.
         outputLayout = VK_IMAGE_LAYOUT_GENERAL;
 
         int frameNum = i + 1;
@@ -441,12 +469,9 @@ static void RunFsr3Sequence(
 
         if (frameNum % 32 == 0)
             std::cout << "[FSR3] Frame " << frameNum << "/" << totalFrames << "\n";
-
-        prevJX = jX;
-        prevJY = jY;
     }
 
-    // Final readback
+    // Final readback.
     vkResetCommandBuffer(cmd, 0);
     vkBeginCommandBuffer(cmd, &beginInfo);
     transition(cmd, outputImage, outputLayout,
@@ -497,13 +522,10 @@ void RunFsr3Pass(
     std::cout << "  FSR 3.1.4 Temporal Upscaling Test (128 frames)\n";
     std::cout << "============================================\n";
 
-    // Each sequence needs its own scratch buffer because ffxGetInterfaceVK
-    // stores state in the scratch memory for the lifetime of the context.
     size_t scratchSize2 = scratchBufferSize;
     void*  scratch2     = _aligned_malloc(scratchSize2, 64);
     memset(scratch2, 0, scratchSize2);
 
-    // Run with sharpening enabled
     RunFsr3Sequence(
         device, physicalDevice, queue, cmd,
         uploadBuffer, uploadMemory,
@@ -516,7 +538,6 @@ void RunFsr3Pass(
         vkDevCtx, scratchBuffer, scratchBufferSize,
         true,  "FSR_3.1.4_2x.png");
 
-    // Run without sharpening for comparison
     RunFsr3Sequence(
         device, physicalDevice, queue, cmd,
         uploadBuffer, uploadMemory,
