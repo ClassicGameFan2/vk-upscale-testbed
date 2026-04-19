@@ -183,24 +183,27 @@ SharedImage createSharedImage(VkDevice device, VkPhysicalDevice physicalDevice,
 // JITTER APPLICATION (matches AMD Cauldron / FSR documentation exactly):
 //   ffxFsr*GetJitterOffset returns (jX, jY) in pixel space, range [-0.5, +0.5].
 //
-//   In a rasterizer, Cauldron applies jitter to the projection matrix as:
+//   In a rasterizer Cauldron applies jitter to the projection matrix as:
 //       ndcOffsetX = +2.0f * jX / renderWidth
 //       ndcOffsetY = -2.0f * jY / renderHeight
-//   This shifts the projected geometry so that pixel (x,y) captures the world
-//   sample that would normally land at (x + jX, y + jY).
+//   This translates the whole image in NDC so that the rendered pixel (x,y)
+//   captures the world sample at sub-pixel position (x + jX, y + jY).
 //
-//   In our ray tracer we replicate this by SUBTRACTING jitter from the sample
-//   position. If jX = +0.5 (geometry shifted half a pixel right), our ray must
-//   sample half a pixel to the LEFT to see the same world point:
-//       sampleX = x + 0.5 - jX
-//       sampleY = y + 0.5 - jY
+//   In our ray tracer we replicate this by ADDING the jitter to the pixel
+//   centre. A jitter of +jX means "sample jX pixels to the right of centre",
+//   so the ray origin moves right by jX — i.e. we add jX:
+//       sampleX = x + 0.5 + jX
+//       sampleY = y + 0.5 + jY
 //
-//   This is the inverse of the previous (incorrect) convention that added jitter.
+//   Because MOTION_VECTORS_JITTER_CANCELLATION is enabled on the FSR context,
+//   the SDK internally removes the jitter offset from the reprojection, so we
+//   do NOT need to bake jitter into the motion vectors.
 //
 // MOTION VECTORS:
 //   Static scene + static camera => MVs are always (0, 0) in pixel space.
 //   motionVectorScale = (1.0, 1.0) — MVs are already in pixel space.
-//   Do NOT set MOTION_VECTORS_JITTER_CANCELLATION (no jitter baked into MVs).
+//   MOTION_VECTORS_JITTER_CANCELLATION is enabled so the SDK handles the
+//   jitter removal internally.
 //
 // DEPTH:
 //   Reversed-Z, finite far plane.
@@ -225,20 +228,21 @@ void renderScene(int w, int h,
 
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
-            // Pixel centre shifted by -jitter.
-            // In a rasterizer, a jitter of +jX shifts the projected geometry
-            // rightward by jX pixels. To replicate this in a ray tracer the
-            // ray origin must sample from jX pixels to the LEFT, i.e. we
-            // subtract jitter. This matches the Cauldron/FSR convention
-            // exactly: the SDK passes +jX and expects the renderer to move
-            // the sample by -jX relative to the pixel centre.
-            float sampleX = (x + 0.5f - jX);
-            float sampleY = (y + 0.5f - jY);
+            // ADD jitter to the pixel centre, matching Cauldron's projection
+            // matrix convention. A jitter of +jX shifts the sample jX pixels
+            // to the right; the ray direction follows accordingly.
+            // The FSR context flag MOTION_VECTORS_JITTER_CANCELLATION tells
+            // the SDK to compensate for this shift internally during
+            // reprojection, so motion vectors remain jitter-free (0, 0).
+            float sampleX = (x + 0.5f + jX);
+            float sampleY = (y + 0.5f + jY);
 
             float ndcX =  (sampleX / w) * 2.0f - 1.0f;
             float ndcY =  (sampleY / h) * 2.0f - 1.0f;
 
             float ro[3] = { 0.f, 1.f, 0.f };
+            // NDC Y is negated for the ray direction (screen-space Y flips
+            // relative to view-space Y).
             float rd[3] = { ndcX * aspect * tanHalfFov,
                            -ndcY * tanHalfFov,
                             1.f };
@@ -301,9 +305,10 @@ void renderScene(int w, int h,
             // Reversed-Z: 1.0 at near plane, ~0.001 at SCENE_ZFAR, 0.0 sky.
             depthOut[idx] = (hitZ > 0.f) ? (SCENE_ZNEAR / hitZ) : 0.f;
 
-            // Static scene, static camera: zero motion vectors.
-            // Scale is 1.0 in dispatch so these raw pixel-space values
-            // (0 = no motion) are passed through unchanged.
+            // Static scene, static camera: zero motion vectors in pixel space.
+            // motionVectorScale = (1, 1) in dispatch so these pass through
+            // unchanged. MOTION_VECTORS_JITTER_CANCELLATION on the context
+            // handles the jitter correction internally.
             mvOut[idx*2 + 0] = 0.f;
             mvOut[idx*2 + 1] = 0.f;
         }
