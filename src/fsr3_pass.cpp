@@ -44,11 +44,7 @@ static void RunFsr3Sequence(
         FFX_FSR3UPSCALER_ENABLE_AUTO_EXPOSURE                       |
         FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED                      |
         FFX_FSR3UPSCALER_ENABLE_DEBUG_CHECKING                      |
-        FFX_FSR3UPSCALER_ENABLE_RCAS                                |
         FFX_FSR3UPSCALER_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION;
-        // ENABLE_RCAS: allocates the sharpening pipeline at context creation
-        //   time; without this flag the RCAS pass is never initialised even
-        //   if enableSharpening=true is set in the dispatch description.
         // MOTION_VECTORS_JITTER_CANCELLATION: our MVs are jitter-free (0,0
         //   for a static scene). This flag tells FSR3 to subtract the jitter
         //   offset internally during reprojection so it is not double-counted.
