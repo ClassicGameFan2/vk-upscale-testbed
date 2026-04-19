@@ -236,10 +236,10 @@ static void RunFsr3Sequence(
         disp.jitterOffset.x = jX;
         disp.jitterOffset.y = jY;
 
-        // motionVectorScale = (1, 1): MVs are stored in pixel space directly.
-        // (RENDER_W, RENDER_H) would only be correct for normalized MVs.)
-        disp.motionVectorScale.x = (float)RENDER_W;
-        disp.motionVectorScale.y = (float)RENDER_H;
+        // MVs are zero (static scene) stored directly in pixel space.
+        // Scale of 1.0 passes them through unchanged to the SDK.
+        disp.motionVectorScale.x = 1.0f;
+        disp.motionVectorScale.y = 1.0f;
 
         disp.renderSize  = { RENDER_W,  RENDER_H  };
         disp.upscaleSize = { DISPLAY_W, DISPLAY_H };
