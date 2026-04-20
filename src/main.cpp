@@ -1,6 +1,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #define VOLK_IMPLEMENTATION
 #include "common.h"
+#include "settings.h"
 
 //  Forward declarations of pass functions
 void RunFsr1Pass(
@@ -32,6 +33,10 @@ void RunFsr3Pass(
     VkDeviceSize, VkDeviceSize, VkDeviceSize, VkDeviceSize,
     VkDeviceContext&, void*, size_t);
 
+void RunStaticPngPass(
+    VkDevice, VkPhysicalDevice, VkQueue, VkCommandBuffer,
+    VkDeviceContext&, const AppSettings&);
+
 static void AssertCallback(const char* message) {
     std::cout << "\n[AMD SDK ASSERT] " << message << "\n";
     std::cout.flush();
@@ -43,6 +48,9 @@ int main()
     std::cout << "  FSR Vulkan Testbed\n";
     std::cout << "============================================\n";
     std::cout.flush();
+
+    // ── Load settings ─────────────────────────────────────────────────────
+    AppSettings cfg = LoadSettings("settings.txt");
 
     ffxAssertSetPrintingCallback(AssertCallback);
 
@@ -132,26 +140,28 @@ int main()
     vkAllocateCommandBuffers(device, &cmdAlloc, &cmd);
 
     // ── CPU reference renders ─────────────────────────────────────────────
-    std::cout << "\n[CPU] Rendering Native_1x.png...\n";
-    {
-        std::vector<float> c(RENDER_W * RENDER_H * 4);
-        std::vector<float> d(RENDER_W * RENDER_H);
-        std::vector<float> m(RENDER_W * RENDER_H * 2, 0.f);
-        renderScene(RENDER_W, RENDER_H, 0.f, 0.f, 0.f, 0.f,
-                    c.data(), d.data(), m.data());
-        saveFloatImage("Native_1x.png", RENDER_W, RENDER_H, c.data());
-        saveDepthImage("Native_1x_depth.png", RENDER_W, RENDER_H, d.data());
-    }
-    {
-        std::vector<float> c(DISPLAY_W * DISPLAY_H * 4);
-        std::vector<float> d(DISPLAY_W * DISPLAY_H);
-        std::vector<float> m(DISPLAY_W * DISPLAY_H * 2, 0.f);
-        renderScene(DISPLAY_W, DISPLAY_H, 0.f, 0.f, 0.f, 0.f,
-                    c.data(), d.data(), m.data());
-        saveFloatImage("Native_2x.png", DISPLAY_W, DISPLAY_H, c.data());
+    if (cfg.run_fsr1_3d || cfg.run_fsr2_3d || cfg.run_fsr3_3d) {
+        std::cout << "\n[CPU] Rendering Native_1x.png...\n";
+        {
+            std::vector<float> c(RENDER_W * RENDER_H * 4);
+            std::vector<float> d(RENDER_W * RENDER_H);
+            std::vector<float> m(RENDER_W * RENDER_H * 2, 0.f);
+            renderScene(RENDER_W, RENDER_H, 0.f, 0.f, 0.f, 0.f,
+                        c.data(), d.data(), m.data());
+            saveFloatImage("Native_1x.png", RENDER_W, RENDER_H, c.data());
+            saveDepthImage("Native_1x_depth.png", RENDER_W, RENDER_H, d.data());
+        }
+        {
+            std::vector<float> c(DISPLAY_W * DISPLAY_H * 4);
+            std::vector<float> d(DISPLAY_W * DISPLAY_H);
+            std::vector<float> m(DISPLAY_W * DISPLAY_H * 2, 0.f);
+            renderScene(DISPLAY_W, DISPLAY_H, 0.f, 0.f, 0.f, 0.f,
+                        c.data(), d.data(), m.data());
+            saveFloatImage("Native_2x.png", DISPLAY_W, DISPLAY_H, c.data());
+        }
     }
 
-    // ── Shared Vulkan resources ───────────────────────────────────────────
+    // ── Shared Vulkan resources (3-D scene passes) ────────────────────────
     VkDeviceSize colorUploadSize = RENDER_W * RENDER_H * 4 * sizeof(float);
     VkDeviceSize depthUploadSize = RENDER_W * RENDER_H * 1 * sizeof(float);
     VkDeviceSize mvUploadSize    = RENDER_W * RENDER_H * 2 * sizeof(float);
@@ -201,7 +211,6 @@ int main()
         VK_IMAGE_USAGE_STORAGE_BIT      | VK_IMAGE_USAGE_SAMPLED_BIT,
         outputImage, outputMem);
 
-    // expImage is used by FSR2 only
     VkImageCreateInfo expInfo = createImage(device, physDev,
         1, 1, VK_FORMAT_R32_SFLOAT,
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
@@ -217,39 +226,58 @@ int main()
     void* scratch3 = _aligned_malloc(scratchSize, 64);
 
     // ── FSR 1.2 ───────────────────────────────────────────────────────────
-    RunFsr1Pass(
-        device, physDev, queue, cmd,
-        uploadBuffer, uploadMemory,
-        downloadBuffer, downloadMemory,
-        colorImage,  colorInfo,
-        outputImage, outputInfo,
-        colorUploadSize, outSize,
-        vkDevCtx, scratch1, scratchSize);
+    if (cfg.run_fsr1_3d) {
+        RunFsr1Pass(
+            device, physDev, queue, cmd,
+            uploadBuffer, uploadMemory,
+            downloadBuffer, downloadMemory,
+            colorImage,  colorInfo,
+            outputImage, outputInfo,
+            colorUploadSize, outSize,
+            vkDevCtx, scratch1, scratchSize);
+    } else {
+        std::cout << "\n[Skip] FSR1 3D scene pass disabled by settings.\n";
+    }
 
     // ── FSR 2.3.3 ─────────────────────────────────────────────────────────
-    RunFsr2Pass(
-        device, physDev, queue, cmd,
-        uploadBuffer, uploadMemory,
-        downloadBuffer, downloadMemory,
-        colorImage, colorInfo,
-        depthImage, depthInfo,
-        mvImage,    mvInfo,
-        outputImage, outputInfo,
-        expImage,
-        colorUploadSize, depthUploadSize, mvUploadSize, outSize,
-        vkDevCtx, scratch2, scratchSize);
+    if (cfg.run_fsr2_3d) {
+        RunFsr2Pass(
+            device, physDev, queue, cmd,
+            uploadBuffer, uploadMemory,
+            downloadBuffer, downloadMemory,
+            colorImage, colorInfo,
+            depthImage, depthInfo,
+            mvImage,    mvInfo,
+            outputImage, outputInfo,
+            expImage,
+            colorUploadSize, depthUploadSize, mvUploadSize, outSize,
+            vkDevCtx, scratch2, scratchSize);
+    } else {
+        std::cout << "\n[Skip] FSR2 3D scene pass disabled by settings.\n";
+    }
 
     // ── FSR 3.1.4 ─────────────────────────────────────────────────────────
-    RunFsr3Pass(
-        device, physDev, queue, cmd,
-        uploadBuffer, uploadMemory,
-        downloadBuffer, downloadMemory,
-        colorImage, colorInfo,
-        depthImage, depthInfo,
-        mvImage,    mvInfo,
-        outputImage, outputInfo,
-        colorUploadSize, depthUploadSize, mvUploadSize, outSize,
-        vkDevCtx, scratch3, scratchSize);
+    if (cfg.run_fsr3_3d) {
+        RunFsr3Pass(
+            device, physDev, queue, cmd,
+            uploadBuffer, uploadMemory,
+            downloadBuffer, downloadMemory,
+            colorImage, colorInfo,
+            depthImage, depthInfo,
+            mvImage,    mvInfo,
+            outputImage, outputInfo,
+            colorUploadSize, depthUploadSize, mvUploadSize, outSize,
+            vkDevCtx, scratch3, scratchSize);
+    } else {
+        std::cout << "\n[Skip] FSR3 3D scene pass disabled by settings.\n";
+    }
+
+    // ── Static PNG pass ───────────────────────────────────────────────────
+    if (cfg.run_static) {
+        RunStaticPngPass(device, physDev, queue, cmd, vkDevCtx, cfg);
+    } else {
+        std::cout << "\n[Skip] Static PNG pass disabled by settings.\n";
+    }
 
     // ── Cleanup ───────────────────────────────────────────────────────────
     vkDestroyImage  (device, colorImage,    nullptr);
