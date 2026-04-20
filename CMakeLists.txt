@@ -308,6 +308,8 @@ endif()
 
 file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/stb_impl.cpp "
 #define _CRT_SECURE_NO_WARNINGS
+#define STB_IMAGE_IMPLEMENTATION
+#include \"stb_image.h\"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include \"stb_image_write.h\"
 ")
@@ -318,6 +320,9 @@ add_executable(vk-upscale-testbed
     src/fsr1_pass.cpp
     src/fsr2_pass.cpp
     src/fsr3_pass.cpp
+    src/settings.cpp
+    src/jitter_resample.cpp
+    src/static_pass.cpp
     ${CMAKE_CURRENT_BINARY_DIR}/stb_impl.cpp
 )
 
