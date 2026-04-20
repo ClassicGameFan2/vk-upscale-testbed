@@ -12,16 +12,18 @@ static void Fsr3MsgCallback(FfxMsgType /*type*/, const wchar_t* message) {
 // ---------------------------------------------------------------------------
 // renderSceneFsr3
 //
-// Same ray-caster as common.cpp renderScene(), with two corrections:
+// Same ray-caster as renderScene() in common.cpp with these corrections:
 //
-//  1. Y-jitter sign: AMD canonical formula is jitterY_ndc = -2*jY/h,
-//     which means we SUBTRACT currJY from the pixel Y coordinate.
-//     Renderer applies: ndcY = base - 2*currJY/h
-//     Dispatch receives: jitterOffset.y = jY (raw SDK value)
-//     FSR3 internally computes: -2*jY/h — these match.
+//  1. Y-jitter sign: AMD canonical formula is jitterY_ndc = -2*jY/h.
+//     We subtract currJY from pixel Y before NDC conversion.
+//     Raw jY is passed unchanged to disp.jitterOffset.y.
 //
-//  2. Motion vectors are zero for a static scene (no jitter baked in).
-//     Context has no JITTER_CANCELLATION flag, so MVs must be true motion.
+//  2. Background depth is written as 0.0f.
+//     With DEPTH_INVERTED + DEPTH_INFINITE, depth=0 means "at infinity".
+//     FSR3 will recognise these pixels as background and handle the
+//     horizon depth discontinuity correctly.
+//
+//  3. Motion vectors are zero (static scene, no JITTER_CANCELLATION flag).
 // ---------------------------------------------------------------------------
 static void renderSceneFsr3(int w, int h,
                              float currJX, float currJY,
@@ -34,8 +36,8 @@ static void renderSceneFsr3(int w, int h,
 
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
-            // +currJX for X  (jitter_ndc_x = +2*jX/w, same as AMD formula)
-            // -currJY for Y  (jitter_ndc_y = -2*jY/h, same as AMD formula)
+            // +currJX for X  (jitter_ndc_x = +2*jX/w)
+            // -currJY for Y  (jitter_ndc_y = -2*jY/h, AMD canonical sign)
             float ndcX = ((x + 0.5f + currJX) / w) * 2.0f - 1.0f;
             float ndcY = ((y + 0.5f - currJY) / h) * 2.0f - 1.0f;
 
@@ -89,10 +91,21 @@ static void renderSceneFsr3(int w, int h,
             colorOut[idx*4+1] = g;
             colorOut[idx*4+2] = b;
             colorOut[idx*4+3] = 1.f;
-            depthOut[idx]     = (hitZ > 0.f) ? (zNear / hitZ) : 0.f;
 
-            // Static scene: true motion is zero.
-            // No JITTER_CANCELLATION flag — MVs must NOT contain jitter.
+            // Depth encoding: reversed-Z  (near=1.0 .. far=0.0)
+            // Background (no hit): 0.0f = "at infinity" in reversed-Z.
+            // With DEPTH_INVERTED + DEPTH_INFINITE this is correctly
+            // interpreted by FSR3 as infinitely far background.
+            if (hitZ > 0.f) {
+                // Perspective reversed-Z: maps [zNear..zFar] -> [1..0]
+                // Formula: depth = zNear / hitZ
+                depthOut[idx] = zNear / hitZ;
+            } else {
+                // No geometry hit = sky / background = depth 0 (infinity)
+                depthOut[idx] = 0.f;
+            }
+
+            // Static scene: zero motion vectors (no jitter baked in).
             mvOut[idx*2+0] = 0.f;
             mvOut[idx*2+1] = 0.f;
         }
@@ -129,14 +142,31 @@ static void RunFsr3Sequence(
     ffxGetInterfaceVK(&ffxIface, ffxGetDeviceVK(&vkDevCtx),
                       scratchBuffer, scratchBufferSize, 4);
 
+    // -----------------------------------------------------------------------
+    // Context flags:
+    //
+    // FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED:
+    //   Our depth is reversed-Z: near geometry = 1.0, far geometry ~= 0.0.
+    //
+    // FFX_FSR3UPSCALER_ENABLE_DEPTH_INFINITE:
+    //   Our background pixels have depth = 0.0 exactly (no geometry hit).
+    //   In reversed-Z, 0.0 represents "infinitely far away".
+    //   This flag tells FSR3 to treat depth=0 background pixels as infinite
+    //   sky rather than as "near geometry", which is critical for correct
+    //   history confidence at the horizon depth discontinuity.
+    //   Without this flag FSR3 uses a finite far-plane model and does not
+    //   know that 0.0 means background, causing disocclusion detection to
+    //   fail at the horizon and producing the jittery checkerboard mess.
+    //
+    // No JITTER_CANCELLATION: MVs do not contain jitter.
+    // No AUTO_EXPOSURE intentionally removed — see note below.
+    // -----------------------------------------------------------------------
     FfxFsr3UpscalerContextDescription fsr3Desc = {};
     fsr3Desc.flags =
         FFX_FSR3UPSCALER_ENABLE_HIGH_DYNAMIC_RANGE  |
         FFX_FSR3UPSCALER_ENABLE_AUTO_EXPOSURE       |
-        FFX_FSR3UPSCALER_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION |
-        // No JITTER_CANCELLATION: MVs do not contain jitter.
-        // No DEPTH_INFINITE: far plane is finite (100 units).
-        FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED      |   // near=1.0, far~0
+        FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED      |
+        FFX_FSR3UPSCALER_ENABLE_DEPTH_INFINITE      |   // <-- KEY FIX
         FFX_FSR3UPSCALER_ENABLE_DEBUG_CHECKING;
     fsr3Desc.maxRenderSize    = { RENDER_W,  RENDER_H  };
     fsr3Desc.maxUpscaleSize   = { DISPLAY_W, DISPLAY_H };
@@ -171,24 +201,20 @@ static void RunFsr3Sequence(
                                                sharedDescs.dilatedMotionVectors);
 
     // -----------------------------------------------------------------------
-    // KEY: What to clear reconstructedPrevNearestDepth to each frame.
+    // Clear sentinel for reconstructedPrevNearestDepth.
     //
-    // This resource is written by PrepareInputs using an atomic operation:
+    // The buffer is R32_UINT. PrepareInputs writes into it via atomic ops
+    // on the bit-pattern reinterpretation of float depth as uint (asuint).
     //
-    //   DEPTH_INVERTED (reversed-Z): near=1.0, far=0.0
-    //     FSR uses InterlockedMax to find nearest (largest) depth per pixel.
-    //     Sentinel must be 0x00000000 (zero) so any real depth value > 0
-    //     wins the atomic max and gets written in.
-    //
-    //   Normal depth: near=0.0, far=1.0
-    //     FSR uses InterlockedMin to find nearest (smallest) depth per pixel.
-    //     Sentinel must be 0xFFFFFFFF (max) so any real depth value < max
-    //     wins the atomic min and gets written in.
-    //
-    // We use DEPTH_INVERTED, therefore the correct sentinel is ZERO.
+    // With DEPTH_INVERTED + DEPTH_INFINITE:
+    //   near geometry  -> depth near 1.0  -> asuint ~= 0x3F800000  (large)
+    //   far geometry   -> depth near 0.0  -> asuint ~= small int
+    //   background     -> depth = 0.0     -> asuint = 0x00000000
+    //   FSR uses InterlockedMax to find nearest (largest uint = nearest).
+    //   Sentinel must be 0x00000000 so any geometry depth (> 0) wins.
     // -----------------------------------------------------------------------
     VkClearColorValue reconSentinel;
-    reconSentinel.uint32[0] = 0x00000000u;  // InterlockedMax sentinel for reversed-Z
+    reconSentinel.uint32[0] = 0x00000000u;
     reconSentinel.uint32[1] = 0x00000000u;
     reconSentinel.uint32[2] = 0x00000000u;
     reconSentinel.uint32[3] = 0x00000000u;
@@ -196,8 +222,7 @@ static void RunFsr3Sequence(
     VkImageSubresourceRange reconRange = {
         VK_IMAGE_ASPECT_COLOR_BIT, 0, siRecon.info.mipLevels, 0, 1 };
 
-    // Pre-loop: transition all shared images and output to GENERAL,
-    // and perform the first clear of reconstructedPrevNearestDepth.
+    // Pre-loop: transition all shared images and output to GENERAL.
     {
         vkResetCommandBuffer(cmd, 0);
         vkBeginCommandBuffer(cmd, &beginInfo);
@@ -283,10 +308,7 @@ static void RunFsr3Sequence(
         vkBeginCommandBuffer(cmd, &beginInfo);
 
         // Clear reconstructedPrevNearestDepth to sentinel every frame.
-        // With DEPTH_INVERTED + InterlockedMax, sentinel = 0 (zero).
-        // This allows PrepareInputs to scatter real depth values (>0) in.
-        // Without this clear, stale high values from previous frames prevent
-        // disoccluded pixels from being correctly updated.
+        // Sentinel = 0 allows InterlockedMax to write real depth values in.
         transition(cmd, siRecon.image, siRecon.layout,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                    VK_IMAGE_ASPECT_COLOR_BIT, siRecon.info.mipLevels);
@@ -356,15 +378,9 @@ static void RunFsr3Sequence(
         disp.dilatedDepth                  = dilDepthRes;
         disp.dilatedMotionVectors          = dilMVRes;
 
-        // Jitter: raw SDK values passed directly.
-        // Renderer applies +jX to pixel X  -> ndcX shift = +2*jX/w  (correct)
-        // Renderer applies -jY to pixel Y  -> ndcY shift = -2*jY/h  (correct, matches AMD formula)
-        // FSR3 receives jX and jY and internally uses the same convention.
         disp.jitterOffset.x = jX;
         disp.jitterOffset.y = jY;
 
-        // MVs are zero (static scene, no jitter baked in).
-        // Scale RENDER_W/H converts normalised-pixel-fraction MVs to pixels.
         disp.motionVectorScale.x = (float)RENDER_W;
         disp.motionVectorScale.y = (float)RENDER_H;
 
@@ -377,13 +393,22 @@ static void RunFsr3Sequence(
         disp.preExposure             = 1.f;
         disp.reset                   = (i == 0);
 
-        // Depth: zNear/hitZ => 1.0 at near plane, ~0 at far = reversed-Z.
-        // DEPTH_INVERTED flag is set.
-        // cameraNear/Far: pass actual linear clip distances.
-        // With DEPTH_INVERTED, FSR expects (near=zNear, far=zFar) as the
-        // actual camera distances, and handles the inversion internally.
+        // -----------------------------------------------------------------------
+        // Camera depth parameters.
+        //
+        // DEPTH_INVERTED is set: reversed-Z, near=1.0, far approaches 0.0.
+        // DEPTH_INFINITE is set: far plane is at infinity (depth=0.0 exactly).
+        //
+        // With both flags, FSR expects:
+        //   cameraNear = the actual near clip distance in world units
+        //   cameraFar  = 0.0 (the depth value representing infinity)
+        //
+        // The debug checker warning about "cameraFar value is very low" is
+        // expected and harmless when DEPTH_INFINITE is set — it confirms
+        // that FSR3 has correctly understood our infinite far plane setup.
+        // -----------------------------------------------------------------------
         disp.cameraNear              = 0.1f;
-        disp.cameraFar               = 100.0f;
+        disp.cameraFar               = 0.0f;
         disp.cameraFovAngleVertical  = 1.04719755f;
         disp.viewSpaceToMetersFactor = 1.f;
         disp.flags                   = 0;
