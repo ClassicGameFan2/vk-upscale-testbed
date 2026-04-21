@@ -10,15 +10,10 @@
 //    3.  Resample the PNG with the jitter offset to produce a per-frame input
 //        (bilinear / bicubic / lanczos3).
 //    4.  Fill a flat depth buffer (uniform Static_Depth value) for FSR2/FSR3.
-//    5.  Fill zero motion-vectors.  FSR2 handles sub-pixel reprojection
-//        internally using the jitterOffset field; the MVs only need to
-//        represent true scene motion (zero for a static image).
-//        NOTE: We do NOT use FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION.
-//        With that flag FSR2 internally adds (prevJitter-currJitter) to the MVs.
-//        We were previously also providing that same delta as the MV value,
-//        which doubled the correction and caused a central smear artifact.
-//        Correct approach: clean zero MVs, no cancellation flag, pass jitterOffset
-//        in the dispatch description so FSR2 knows the sub-pixel shift.
+//    5.  Fill motion-vectors encoding the jitter delta (prevJitter - currJitter)
+//        so that FSR2/3 can remove the sub-pixel camera shift via its
+//        JITTER_CANCELLATION path.  For a static scene with no camera movement
+//        this is the correct per-frame MV: purely the inter-frame jitter change.
 //    6.  Upload colour / depth / MV to Vulkan images.
 //    7.  Dispatch FSR.
 //    8.  On the final frame, readback and save the result PNG.
@@ -28,13 +23,6 @@
 //    - Only 1 frame is dispatched regardless of Static_Jitter_Frames.
 //    - enableSharpening controls RCAS.
 //
-//  For FSR2/FSR3 with jitter OFF:
-//    - Only 1 frame is dispatched.
-//    - Running multiple non-jittered frames causes FSR2/3 to accumulate the
-//      same pixel-grid input, producing temporal noise / shimmer in the output.
-//      FSR2 explicitly warns that jitter offsets should never be the null vector
-//      across multiple frames.
-//
 //  Depth convention used here (static pass ONLY):
 //    Standard (NON-inverted) depth: 0 = camera / near, 1 = far / background.
 //    Static_Depth default is 0.5 (mid-range, physically neutral).
@@ -42,6 +30,8 @@
 //
 //  Camera near/far used here (static pass ONLY):
 //    cameraNear = 0.1   cameraFar = 100.0  (standard perspective range).
+//    These values match what the old single-file version used and give FSR2/3
+//    a sensible motion-vector / depth scale without any depth inversion.
 // =============================================================================
 
 #define _CRT_SECURE_NO_WARNINGS
@@ -317,24 +307,10 @@ static void RunStaticFsr2(
     int outW, int outH,
     const std::string& outPath)
 {
-    // -----------------------------------------------------------------------
-    // Determine actual number of frames to run.
-    //
-    // When jitter is OFF we MUST run only 1 frame.
-    // FSR2 is a temporal upscaler that requires varying sub-pixel jitter each
-    // frame.  Feeding it zero jitter offset across multiple frames causes it
-    // to accumulate the same non-shifted input repeatedly, producing temporal
-    // noise / shimmer in the output.  The AMD documentation explicitly warns
-    // that the jitter sequence should never generate a null vector {0,0}.
-    // The 1-frame reset-only dispatch is clean and matches the single-frame
-    // case that already gives sharp results.
-    // -----------------------------------------------------------------------
-    const int numFrames = cfg.static_jitter ? cfg.static_jitter_frames : 1;
-
     std::cout << "\n[StaticFSR2] -------- FSR 2.3.3 Static PNG Pass --------\n";
     std::cout << "[StaticFSR2] Input:  " << inW  << "x" << inH  << "\n";
     std::cout << "[StaticFSR2] Output: " << outW << "x" << outH << "\n";
-    std::cout << "[StaticFSR2] Frames: " << numFrames
+    std::cout << "[StaticFSR2] Frames: " << cfg.static_jitter_frames
               << "  Jitter: " << (cfg.static_jitter ? "ON" : "OFF")
               << "  RCAS: "   << (cfg.static_rcas   ? "ON" : "OFF") << "\n";
     std::cout << "[StaticFSR2] Depth:  " << cfg.static_depth
@@ -377,21 +353,8 @@ static void RunStaticFsr2(
     // Constant depth buffer — filled once, reused every frame.
     std::vector<float> depthData(inW * inH, cfg.static_depth);
 
-    // Motion vectors are always zero.
-    //
-    // We do NOT use FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION.
-    //
-    // With that flag, FSR2 internally computes (prevJitter - currJitter) and
-    // ADDS it to every MV.  Previously we were also providing (prevJX - jX)
-    // as the MV value, so FSR2 ended up applying 2*(prevJitter-currJitter) as
-    // the effective reprojection — exactly double — causing the visible smear
-    // artifact in the centre of the image.
-    //
-    // The correct approach: supply clean zero MVs (no true scene motion) and
-    // set NO cancellation flag.  FSR2 receives the per-frame jitterOffset in
-    // the dispatch description and uses it internally to handle sub-pixel
-    // reprojection.  Zero MVs + jitterOffset declared = correct static scene.
-    const std::vector<float> mvData(inW * inH * 2, 0.0f);
+    // MV buffer — allocated here, filled per-frame inside the loop.
+    std::vector<float> mvData(inW * inH * 2, 0.0f);
 
     size_t scratchSize = ffxGetScratchMemorySizeVK(physDev, 4);
     void*  scratch     = _aligned_malloc(scratchSize, 64);
@@ -405,15 +368,36 @@ static void RunStaticFsr2(
     // Context flags for the STATIC pass:
     //
     //  - NO DEPTH_INVERTED: we use standard depth (0=near, 1=far).
-    //  - NO MOTION_VECTORS_JITTER_CANCELLATION: see MV comment above.
-    //  - AUTO_EXPOSURE: kept ON (same as 3D pass; safest default).
+    //    The 3D scene pass uses inverted depth; static PNG does not.
+    //
+    //  - MOTION_VECTORS_JITTER_CANCELLATION (when jitter is on):
+    //    We bake the inter-frame jitter delta into the MVs
+    //    (mv = prevJitter - currJitter), then tell FSR2 to cancel it.
+    //    This is exactly what the original working single-file version did.
+    //    With cancellation OFF and zero MVs, FSR2 cannot reconstruct the
+    //    sub-pixel shifts and blurs history frames together.
     // -----------------------------------------------------------------------
     uint32_t fsr2Flags =
         FFX_FSR2_ENABLE_DEBUG_CHECKING     |
         FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE |
         FFX_FSR2_ENABLE_AUTO_EXPOSURE;
+    // Note: deliberately NO FFX_FSR2_ENABLE_DEPTH_INVERTED here.
 
-    std::cout << "[StaticFSR2] JitterCancellationFlag=OFF (always; zero MVs used)\n";
+    // Decide whether to use the jitter-cancellation path.
+    // APP_CONTROLLED: auto-select based on whether jitter is enabled.
+    bool useJitterCancel = false;
+    if (cfg.static_jitter_cancel == JitterCancel::ON)
+        useJitterCancel = true;
+    else if (cfg.static_jitter_cancel == JitterCancel::OFF)
+        useJitterCancel = false;
+    else // APP_CONTROLLED: use cancellation when jitter is on
+        useJitterCancel = cfg.static_jitter;
+
+    if (useJitterCancel)
+        fsr2Flags |= FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION;
+
+    std::cout << "[StaticFSR2] JitterCancellationFlag="
+              << (useJitterCancel ? "ON" : "OFF") << "\n";
 
     FfxFsr2ContextDescription fsr2Desc = {};
     fsr2Desc.flags            = fsr2Flags;
@@ -474,8 +458,9 @@ static void RunStaticFsr2(
         std::vector<float> jitteredColor(inW * inH * 4);
 
         int32_t jitterIndex = 0;
+        float   prevJX = 0.f, prevJY = 0.f;
 
-        for (int frame = 0; frame < numFrames; frame++) {
+        for (int frame = 0; frame < cfg.static_jitter_frames; frame++) {
             ++jitterIndex;
             float jX = 0.f, jY = 0.f;
 
@@ -487,14 +472,23 @@ static void RunStaticFsr2(
                 // sub-pixel-shifted version of the source each frame.
                 ResampleWithShift(inputLinear.data(), inW, inH,
                                   jX, jY, jitteredColor.data(), resMode);
-            } else {
-                // No jitter: pass the original image unshifted.
-                // jX = jY = 0 (already set above).
-                jitteredColor = inputLinear;
-            }
 
-            // MVs are always zero — see the large comment at the top of this
-            // function for why we do not use JITTER_CANCELLATION.
+                // Motion vectors = inter-frame jitter delta (in render pixels).
+                // With JITTER_CANCELLATION enabled, FSR2 subtracts the jitter
+                // shift from these MVs, yielding true scene motion = 0.
+                // This is the correct encoding for a static scene.
+                float mvX = prevJX - jX;
+                float mvY = prevJY - jY;
+                for (int p = 0; p < inW * inH; p++) {
+                    mvData[p * 2 + 0] = mvX;
+                    mvData[p * 2 + 1] = mvY;
+                }
+            } else {
+                // No jitter: pass the original image unshifted, zero MVs.
+                jX = 0.f; jY = 0.f;
+                jitteredColor = inputLinear;
+                std::fill(mvData.begin(), mvData.end(), 0.f);
+            }
 
             void* mp;
             vkMapMemory(device, uploadMem, 0, uploadSize, 0, &mp);
@@ -557,7 +551,7 @@ static void RunStaticFsr2(
             disp.frameTimeDelta      = 16.6f;
             disp.preExposure         = 1.f;
             disp.reset               = (frame == 0);
-            // Standard (non-inverted) depth range.
+            // Standard (non-inverted) depth range matching the old working version.
             disp.cameraNear              = 0.1f;
             disp.cameraFar               = 100.0f;
             disp.cameraFovAngleVertical  = 1.04719755f;
@@ -576,9 +570,12 @@ static void RunStaticFsr2(
 
             outImg.layout = VK_IMAGE_LAYOUT_GENERAL;
 
-            if ((frame + 1) % 32 == 0 || frame == numFrames - 1)
+            if ((frame + 1) % 32 == 0 || frame == cfg.static_jitter_frames - 1)
                 std::cout << "[StaticFSR2] Frame " << (frame + 1)
-                          << "/" << numFrames << "\n";
+                          << "/" << cfg.static_jitter_frames << "\n";
+
+            prevJX = jX;
+            prevJY = jY;
         }
     }
 
@@ -608,7 +605,7 @@ cleanup_fsr2:
 }
 
 // ===========================================================================
-//  FSR-3 static pass   (UNCHANGED)
+//  FSR-3 static pass
 // ===========================================================================
 
 static void RunStaticFsr3(
@@ -981,7 +978,7 @@ cleanup_fsr3:
 }
 
 // ===========================================================================
-//  Public entry point   (UNCHANGED)
+//  Public entry point
 // ===========================================================================
 
 void RunStaticPngPass(
