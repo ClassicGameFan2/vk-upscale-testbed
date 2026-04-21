@@ -37,7 +37,9 @@ struct AppSettings
     int             static_jitter_frames = 32;
     JitterInterp    static_jitter_interp = JitterInterp::BILINEAR;
 
-    float           static_depth      = 0.0f;   // 0=background, 1=nearest
+    // 0=far/background  1=nearest  (standard non-inverted depth space)
+    // 0.5 is a safe mid-range default for static images with no real depth.
+    float           static_depth      = 0.5f;
 
     JitterCancel    static_jitter_cancel = JitterCancel::APP_CONTROLLED;
 };
