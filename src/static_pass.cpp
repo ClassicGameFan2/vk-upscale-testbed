@@ -5,12 +5,15 @@
 //
 //  Pipeline per frame:
 //    1.  Load the input PNG (once, at the start).
-//    2.  Compute the jitter offset for this frame (Halton(2,3) base, clamped
-//        to the FSR-API jitter sequence values).
+//    2.  Compute the jitter offset for this frame using the FSR-API jitter
+//        sequence.
 //    3.  Resample the PNG with the jitter offset to produce a per-frame input
 //        (bilinear / bicubic / lanczos3).
 //    4.  Fill a flat depth buffer (uniform Static_Depth value) for FSR2/FSR3.
-//    5.  Fill zero motion-vectors (static image, no camera motion).
+//    5.  Fill motion-vectors encoding the jitter delta (prevJitter - currJitter)
+//        so that FSR2/3 can remove the sub-pixel camera shift via its
+//        JITTER_CANCELLATION path.  For a static scene with no camera movement
+//        this is the correct per-frame MV: purely the inter-frame jitter change.
 //    6.  Upload colour / depth / MV to Vulkan images.
 //    7.  Dispatch FSR.
 //    8.  On the final frame, readback and save the result PNG.
@@ -19,14 +22,22 @@
 //    - Jitter and temporal accumulation do not apply.
 //    - Only 1 frame is dispatched regardless of Static_Jitter_Frames.
 //    - enableSharpening controls RCAS.
+//
+//  Depth convention used here (static pass ONLY):
+//    Standard (NON-inverted) depth: 0 = camera / near, 1 = far / background.
+//    Static_Depth default is 0.5 (mid-range, physically neutral).
+//    No DEPTH_INVERTED flag is set for FSR2/FSR3 in this pass.
+//
+//  Camera near/far used here (static pass ONLY):
+//    cameraNear = 0.1   cameraFar = 100.0  (standard perspective range).
+//    These values match what the old single-file version used and give FSR2/3
+//    a sensible motion-vector / depth scale without any depth inversion.
 // =============================================================================
 
 #define _CRT_SECURE_NO_WARNINGS
 #include "static_pass.h"
 #include "jitter_resample.h"
 
-// stb_image for loading (implementation is in stb_impl.cpp already for write;
-// we add the read implementation there too via CMakeLists).
 #include "stb_image.h"
 
 #include <vector>
@@ -35,32 +46,6 @@
 #include <cmath>
 #include <cfloat>
 #include <malloc.h>
-
-// ---------------------------------------------------------------------------
-// Halton sequence base-b, index i (1-based).
-// Returns a value in (0, 1).
-// ---------------------------------------------------------------------------
-static float halton(int index, int base)
-{
-    float f = 1.0f, r = 0.0f;
-    int   i = index;
-    while (i > 0) {
-        f = f / (float)base;
-        r = r + f * (float)(i % base);
-        i = i / base;
-    }
-    return r;
-}
-
-// ---------------------------------------------------------------------------
-// Halton(2,3) jitter offset in NDC-pixel space [-0.5, +0.5).
-// index is 1-based.
-// ---------------------------------------------------------------------------
-static void haltonJitter(int index, float& jX, float& jY)
-{
-    jX = halton(index, 2) - 0.5f;
-    jY = halton(index, 3) - 0.5f;
-}
 
 // ---------------------------------------------------------------------------
 // Message callback shared by FSR2/FSR3 in this pass
@@ -101,49 +86,6 @@ static void freeTempImage(VkDevice device, TempImage& ti)
 {
     if (ti.image  != VK_NULL_HANDLE) { vkDestroyImage(device, ti.image, nullptr);  ti.image  = VK_NULL_HANDLE; }
     if (ti.memory != VK_NULL_HANDLE) { vkFreeMemory  (device, ti.memory, nullptr); ti.memory = VK_NULL_HANDLE; }
-}
-
-// ===========================================================================
-// Upload a float RGBA buffer into a VkImage
-// ===========================================================================
-
-static void uploadRGBA(
-    VkDevice device,
-    VkQueue queue, VkCommandBuffer cmd,
-    VkBuffer stagingBuf, VkDeviceMemory stagingMem,
-    const float* data, VkDeviceSize dataSize,
-    VkImage dstImage, VkImageLayout& dstLayout,
-    uint32_t w, uint32_t h)
-{
-    // Copy to staging
-    void* mp;
-    vkMapMemory(device, stagingMem, 0, dataSize, 0, &mp);
-    memcpy(mp, data, dataSize);
-    vkUnmapMemory(device, stagingMem);
-
-    VkCommandBufferBeginInfo bi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-    VkSubmitInfo             si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
-    si.commandBufferCount = 1;
-    si.pCommandBuffers    = &cmd;
-
-    vkResetCommandBuffer(cmd, 0);
-    vkBeginCommandBuffer(cmd, &bi);
-
-    transition(cmd, dstImage, dstLayout,
-               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-
-    VkBufferImageCopy cr = {};
-    cr.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-    cr.imageExtent = { w, h, 1 };
-    vkCmdCopyBufferToImage(cmd, stagingBuf, dstImage,
-                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cr);
-
-    transition(cmd, dstImage, dstLayout,
-               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-
-    vkEndCommandBuffer(cmd);
-    vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE);
-    vkQueueWaitIdle(queue);
 }
 
 // ===========================================================================
@@ -195,7 +137,7 @@ static void RunStaticFsr1(
     VkQueue queue, VkCommandBuffer cmd,
     VkDeviceContext& vkDevCtx,
     const AppSettings& cfg,
-    const std::vector<float>& inputLinear, // original PNG in linear RGBA float
+    const std::vector<float>& inputLinear,
     int inW, int inH,
     int outW, int outH,
     const std::string& outPath)
@@ -210,21 +152,18 @@ static void RunStaticFsr1(
     VkDeviceSize colorUploadSize = (VkDeviceSize)(inW  * inH  * 4 * sizeof(float));
     VkDeviceSize outSize         = (VkDeviceSize)(outW * outH * 4 * sizeof(float));
 
-    // Staging upload buffer
     VkBuffer      uploadBuf; VkDeviceMemory uploadMem;
     createBuffer(device, physDev, colorUploadSize,
                  VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                  uploadBuf, uploadMem);
 
-    // Download buffer
     VkBuffer      dlBuf; VkDeviceMemory dlMem;
     createBuffer(device, physDev, outSize,
                  VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                  dlBuf, dlMem);
 
-    // Input / output images
     TempImage colorImg = makeTempImage(device, physDev, (uint32_t)inW, (uint32_t)inH,
         VK_FORMAT_R32G32B32A32_SFLOAT,
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
@@ -233,12 +172,10 @@ static void RunStaticFsr1(
         VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
         VK_IMAGE_USAGE_STORAGE_BIT      | VK_IMAGE_USAGE_SAMPLED_BIT);
 
-    // Scratch
     size_t scratchSize = ffxGetScratchMemorySizeVK(physDev, 4);
     void*  scratch     = _aligned_malloc(scratchSize, 64);
     memset(scratch, 0, scratchSize);
 
-    // Build FFX interface + context
     FfxInterface ffxIface = {};
     ffxGetInterfaceVK(&ffxIface, ffxGetDeviceVK(&vkDevCtx),
                       scratch, scratchSize, 4);
@@ -376,6 +313,8 @@ static void RunStaticFsr2(
     std::cout << "[StaticFSR2] Frames: " << cfg.static_jitter_frames
               << "  Jitter: " << (cfg.static_jitter ? "ON" : "OFF")
               << "  RCAS: "   << (cfg.static_rcas   ? "ON" : "OFF") << "\n";
+    std::cout << "[StaticFSR2] Depth:  " << cfg.static_depth
+              << "  (standard non-inverted, 0=near 1=far)\n";
 
     VkDeviceSize colorUploadSize = (VkDeviceSize)(inW  * inH  * 4 * sizeof(float));
     VkDeviceSize depthUploadSize = (VkDeviceSize)(inW  * inH  * 1 * sizeof(float));
@@ -383,7 +322,6 @@ static void RunStaticFsr2(
     VkDeviceSize uploadSize      = colorUploadSize + depthUploadSize + mvUploadSize;
     VkDeviceSize outSize         = (VkDeviceSize)(outW * outH * 4 * sizeof(float));
 
-    // Buffers
     VkBuffer uploadBuf; VkDeviceMemory uploadMem;
     createBuffer(device, physDev, uploadSize,
                  VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
@@ -395,7 +333,6 @@ static void RunStaticFsr2(
                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                  dlBuf, dlMem);
 
-    // Images
     TempImage colorImg = makeTempImage(device, physDev, (uint32_t)inW, (uint32_t)inH,
         VK_FORMAT_R32G32B32A32_SFLOAT,
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
@@ -409,16 +346,16 @@ static void RunStaticFsr2(
         VK_FORMAT_R32G32B32A32_SFLOAT,
         VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
         VK_IMAGE_USAGE_STORAGE_BIT      | VK_IMAGE_USAGE_SAMPLED_BIT);
-    // 1×1 exposure (cleared to 1.0, AUTO_EXPOSURE handles the rest)
     TempImage expImg   = makeTempImage(device, physDev, 1, 1,
         VK_FORMAT_R32_SFLOAT,
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
 
-    // Pre-fill depth + MV (constant throughout all frames)
+    // Constant depth buffer — filled once, reused every frame.
     std::vector<float> depthData(inW * inH, cfg.static_depth);
-    std::vector<float> mvData   (inW * inH * 2, 0.0f);
 
-    // Scratch
+    // MV buffer — allocated here, filled per-frame inside the loop.
+    std::vector<float> mvData(inW * inH * 2, 0.0f);
+
     size_t scratchSize = ffxGetScratchMemorySizeVK(physDev, 4);
     void*  scratch     = _aligned_malloc(scratchSize, 64);
     memset(scratch, 0, scratchSize);
@@ -427,25 +364,40 @@ static void RunStaticFsr2(
     ffxGetInterfaceVK(&ffxIface, ffxGetDeviceVK(&vkDevCtx),
                       scratch, scratchSize, 4);
 
-    // Decide jitter-cancel flag
+    // -----------------------------------------------------------------------
+    // Context flags for the STATIC pass:
+    //
+    //  - NO DEPTH_INVERTED: we use standard depth (0=near, 1=far).
+    //    The 3D scene pass uses inverted depth; static PNG does not.
+    //
+    //  - MOTION_VECTORS_JITTER_CANCELLATION (when jitter is on):
+    //    We bake the inter-frame jitter delta into the MVs
+    //    (mv = prevJitter - currJitter), then tell FSR2 to cancel it.
+    //    This is exactly what the original working single-file version did.
+    //    With cancellation OFF and zero MVs, FSR2 cannot reconstruct the
+    //    sub-pixel shifts and blurs history frames together.
+    // -----------------------------------------------------------------------
     uint32_t fsr2Flags =
-        FFX_FSR2_ENABLE_DEBUG_CHECKING         |
-        FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE     |
-        FFX_FSR2_ENABLE_AUTO_EXPOSURE          |
-        FFX_FSR2_ENABLE_DEPTH_INVERTED;
-    {
-        bool useJitterCancel = false;
-        if (cfg.static_jitter_cancel == JitterCancel::ON)
-            useJitterCancel = true;
-        else if (cfg.static_jitter_cancel == JitterCancel::APP_CONTROLLED)
-            useJitterCancel = false;  // our MVs do not encode jitter
-        else
-            useJitterCancel = false;  // OFF
-        if (useJitterCancel)
-            fsr2Flags |= FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION;
-        std::cout << "[StaticFSR2] JitterCancellationFlag="
-                  << (useJitterCancel ? "ON" : "OFF") << "\n";
-    }
+        FFX_FSR2_ENABLE_DEBUG_CHECKING     |
+        FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE |
+        FFX_FSR2_ENABLE_AUTO_EXPOSURE;
+    // Note: deliberately NO FFX_FSR2_ENABLE_DEPTH_INVERTED here.
+
+    // Decide whether to use the jitter-cancellation path.
+    // APP_CONTROLLED: auto-select based on whether jitter is enabled.
+    bool useJitterCancel = false;
+    if (cfg.static_jitter_cancel == JitterCancel::ON)
+        useJitterCancel = true;
+    else if (cfg.static_jitter_cancel == JitterCancel::OFF)
+        useJitterCancel = false;
+    else // APP_CONTROLLED: use cancellation when jitter is on
+        useJitterCancel = cfg.static_jitter;
+
+    if (useJitterCancel)
+        fsr2Flags |= FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION;
+
+    std::cout << "[StaticFSR2] JitterCancellationFlag="
+              << (useJitterCancel ? "ON" : "OFF") << "\n";
 
     FfxFsr2ContextDescription fsr2Desc = {};
     fsr2Desc.flags            = fsr2Flags;
@@ -496,7 +448,6 @@ static void RunStaticFsr2(
         int32_t phaseCount = ffxFsr2GetJitterPhaseCount((int32_t)inW, (int32_t)outW);
         std::cout << "[StaticFSR2] Jitter phase count = " << phaseCount << "\n";
 
-        // Determine jitter interpolation mode
         ResampleMode resMode = ResampleMode::BILINEAR;
         switch (cfg.static_jitter_interp) {
         case JitterInterp::BICUBIC:  resMode = ResampleMode::BICUBIC;  break;
@@ -507,23 +458,38 @@ static void RunStaticFsr2(
         std::vector<float> jitteredColor(inW * inH * 4);
 
         int32_t jitterIndex = 0;
+        float   prevJX = 0.f, prevJY = 0.f;
+
         for (int frame = 0; frame < cfg.static_jitter_frames; frame++) {
             ++jitterIndex;
             float jX = 0.f, jY = 0.f;
 
             if (cfg.static_jitter) {
-                // Use FSR2's own jitter function for the offsets fed to the
-                // dispatch, but also apply the same shift to the image data.
+                // Use the FSR2 jitter sequence for the offset.
                 ffxFsr2GetJitterOffset(&jX, &jY, jitterIndex, phaseCount);
-                // Apply jitter as a sub-pixel image shift
+
+                // Shift the image by the jitter offset so FSR2 sees a
+                // sub-pixel-shifted version of the source each frame.
                 ResampleWithShift(inputLinear.data(), inW, inH,
                                   jX, jY, jitteredColor.data(), resMode);
+
+                // Motion vectors = inter-frame jitter delta (in render pixels).
+                // With JITTER_CANCELLATION enabled, FSR2 subtracts the jitter
+                // shift from these MVs, yielding true scene motion = 0.
+                // This is the correct encoding for a static scene.
+                float mvX = prevJX - jX;
+                float mvY = prevJY - jY;
+                for (int p = 0; p < inW * inH; p++) {
+                    mvData[p * 2 + 0] = mvX;
+                    mvData[p * 2 + 1] = mvY;
+                }
             } else {
+                // No jitter: pass the original image unshifted, zero MVs.
                 jX = 0.f; jY = 0.f;
                 jitteredColor = inputLinear;
+                std::fill(mvData.begin(), mvData.end(), 0.f);
             }
 
-            // Upload colour
             void* mp;
             vkMapMemory(device, uploadMem, 0, uploadSize, 0, &mp);
             memcpy((uint8_t*)mp,                                     jitteredColor.data(), colorUploadSize);
@@ -534,7 +500,6 @@ static void RunStaticFsr2(
             vkResetCommandBuffer(cmd, 0);
             vkBeginCommandBuffer(cmd, &bi);
 
-            // Upload colour / depth / MV
             transition(cmd, colorImg.image, colorImg.layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
             transition(cmd, depthImg.image, depthImg.layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
             transition(cmd, mvImg.image,    mvImg.layout,    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
@@ -586,8 +551,9 @@ static void RunStaticFsr2(
             disp.frameTimeDelta      = 16.6f;
             disp.preExposure         = 1.f;
             disp.reset               = (frame == 0);
-            disp.cameraNear          = FLT_MAX;
-            disp.cameraFar           = 0.1f;
+            // Standard (non-inverted) depth range matching the old working version.
+            disp.cameraNear              = 0.1f;
+            disp.cameraFar               = 100.0f;
             disp.cameraFovAngleVertical  = 1.04719755f;
             disp.viewSpaceToMetersFactor = 1.f;
 
@@ -602,12 +568,14 @@ static void RunStaticFsr2(
             vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE);
             vkQueueWaitIdle(queue);
 
-            // Reset output layout (FSR2 leaves it in GENERAL after dispatch)
             outImg.layout = VK_IMAGE_LAYOUT_GENERAL;
 
             if ((frame + 1) % 32 == 0 || frame == cfg.static_jitter_frames - 1)
                 std::cout << "[StaticFSR2] Frame " << (frame + 1)
                           << "/" << cfg.static_jitter_frames << "\n";
+
+            prevJX = jX;
+            prevJY = jY;
         }
     }
 
@@ -656,6 +624,8 @@ static void RunStaticFsr3(
     std::cout << "[StaticFSR3] Frames: " << cfg.static_jitter_frames
               << "  Jitter: " << (cfg.static_jitter ? "ON" : "OFF")
               << "  RCAS: "   << (cfg.static_rcas   ? "ON" : "OFF") << "\n";
+    std::cout << "[StaticFSR3] Depth:  " << cfg.static_depth
+              << "  (standard non-inverted, 0=near 1=far)\n";
 
     VkDeviceSize colorUploadSize = (VkDeviceSize)(inW * inH * 4 * sizeof(float));
     VkDeviceSize depthUploadSize = (VkDeviceSize)(inW * inH * 1 * sizeof(float));
@@ -688,8 +658,11 @@ static void RunStaticFsr3(
         VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
         VK_IMAGE_USAGE_STORAGE_BIT      | VK_IMAGE_USAGE_SAMPLED_BIT);
 
+    // Constant depth buffer.
     std::vector<float> depthData(inW * inH, cfg.static_depth);
-    std::vector<float> mvData   (inW * inH * 2, 0.0f);
+
+    // MV buffer — filled per-frame inside the loop.
+    std::vector<float> mvData(inW * inH * 2, 0.0f);
 
     size_t scratchSize = ffxGetScratchMemorySizeVK(physDev, 4);
     void*  scratch     = _aligned_malloc(scratchSize, 64);
@@ -699,25 +672,36 @@ static void RunStaticFsr3(
     ffxGetInterfaceVK(&ffxIface, ffxGetDeviceVK(&vkDevCtx),
                       scratch, scratchSize, 4);
 
+    // -----------------------------------------------------------------------
+    // Context flags for the STATIC pass:
+    //
+    //  - NO DEPTH_INVERTED and NO DEPTH_INFINITE.
+    //    Those flags are correct for the 3D scene pass (reversed-Z with an
+    //    infinite far plane) but completely wrong here.  The static PNG pass
+    //    uses a constant depth value in standard [0=near .. 1=far] space.
+    //
+    //  - MOTION_VECTORS_JITTER_CANCELLATION (when jitter is on):
+    //    Same reasoning as for the FSR2 static pass above.
+    // -----------------------------------------------------------------------
     uint32_t fsr3Flags =
-        FFX_FSR3UPSCALER_ENABLE_HIGH_DYNAMIC_RANGE  |
-        FFX_FSR3UPSCALER_ENABLE_AUTO_EXPOSURE        |
-        FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED       |
-        FFX_FSR3UPSCALER_ENABLE_DEPTH_INFINITE       |
+        FFX_FSR3UPSCALER_ENABLE_HIGH_DYNAMIC_RANGE |
+        FFX_FSR3UPSCALER_ENABLE_AUTO_EXPOSURE      |
         FFX_FSR3UPSCALER_ENABLE_DEBUG_CHECKING;
-    {
-        bool useJitterCancel = false;
-        if (cfg.static_jitter_cancel == JitterCancel::ON)
-            useJitterCancel = true;
-        else if (cfg.static_jitter_cancel == JitterCancel::APP_CONTROLLED)
-            useJitterCancel = false;  // MVs don't encode jitter
-        else
-            useJitterCancel = false;
-        if (useJitterCancel)
-            fsr3Flags |= FFX_FSR3UPSCALER_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION;
-        std::cout << "[StaticFSR3] JitterCancellationFlag="
-                  << (useJitterCancel ? "ON" : "OFF") << "\n";
-    }
+    // Note: deliberately NO DEPTH_INVERTED and NO DEPTH_INFINITE here.
+
+    bool useJitterCancel = false;
+    if (cfg.static_jitter_cancel == JitterCancel::ON)
+        useJitterCancel = true;
+    else if (cfg.static_jitter_cancel == JitterCancel::OFF)
+        useJitterCancel = false;
+    else // APP_CONTROLLED: use cancellation when jitter is on
+        useJitterCancel = cfg.static_jitter;
+
+    if (useJitterCancel)
+        fsr3Flags |= FFX_FSR3UPSCALER_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION;
+
+    std::cout << "[StaticFSR3] JitterCancellationFlag="
+              << (useJitterCancel ? "ON" : "OFF") << "\n";
 
     FfxFsr3UpscalerContextDescription fsr3Desc = {};
     fsr3Desc.flags            = fsr3Flags;
@@ -747,8 +731,21 @@ static void RunStaticFsr3(
         SharedImage siDilDepth = createSharedImage(device, physDev, sharedDescs.dilatedDepth);
         SharedImage siDilMV    = createSharedImage(device, physDev, sharedDescs.dilatedMotionVectors);
 
+        // -----------------------------------------------------------------------
+        // Sentinel for reconstructedPrevNearestDepth.
+        //
+        // With STANDARD (non-inverted) depth:
+        //   depth values are in [0..1] where 0=near, 1=far.
+        //   FSR3 uses InterlockedMin to find the nearest (smallest) depth.
+        //   So the sentinel must be 0xFFFFFFFF (asuint(+INF) ~ max uint)
+        //   so any real depth value (< 1.0) wins the min comparison.
+        // -----------------------------------------------------------------------
         VkClearColorValue reconSentinel = {};
-        reconSentinel.uint32[0] = 0x00000000u;
+        reconSentinel.uint32[0] = 0xFFFFFFFFu;
+        reconSentinel.uint32[1] = 0xFFFFFFFFu;
+        reconSentinel.uint32[2] = 0xFFFFFFFFu;
+        reconSentinel.uint32[3] = 0xFFFFFFFFu;
+
         VkImageSubresourceRange reconRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, siRecon.info.mipLevels, 0, 1 };
 
         // Pre-loop transitions
@@ -814,17 +811,29 @@ static void RunStaticFsr3(
         si.commandBufferCount = 1; si.pCommandBuffers = &cmd;
 
         int32_t jitterIndex = 0;
+        float   prevJX = 0.f, prevJY = 0.f;
+
         for (int frame = 0; frame < cfg.static_jitter_frames; frame++) {
             ++jitterIndex;
             float jX = 0.f, jY = 0.f;
 
             if (cfg.static_jitter) {
                 ffxFsr3UpscalerGetJitterOffset(&jX, &jY, jitterIndex, phaseCount);
+
                 ResampleWithShift(inputLinear.data(), inW, inH,
                                   jX, jY, jitteredColor.data(), resMode);
+
+                // Same jitter-delta MV encoding as the FSR2 static pass.
+                float mvX = prevJX - jX;
+                float mvY = prevJY - jY;
+                for (int p = 0; p < inW * inH; p++) {
+                    mvData[p * 2 + 0] = mvX;
+                    mvData[p * 2 + 1] = mvY;
+                }
             } else {
                 jX = 0.f; jY = 0.f;
                 jitteredColor = inputLinear;
+                std::fill(mvData.begin(), mvData.end(), 0.f);
             }
 
             void* mp;
@@ -837,7 +846,7 @@ static void RunStaticFsr3(
             vkResetCommandBuffer(cmd, 0);
             vkBeginCommandBuffer(cmd, &bi);
 
-            // Clear recon sentinel each frame
+            // Clear recon sentinel each frame.
             transition(cmd, siRecon.image, siRecon.layout,
                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                        VK_IMAGE_ASPECT_COLOR_BIT, siRecon.info.mipLevels);
@@ -900,8 +909,9 @@ static void RunStaticFsr3(
             disp.frameTimeDelta          = 16.6f;
             disp.preExposure             = 1.f;
             disp.reset                   = (frame == 0);
+            // Standard (non-inverted) depth range.
             disp.cameraNear              = 0.1f;
-            disp.cameraFar               = 0.0f;
+            disp.cameraFar               = 100.0f;
             disp.cameraFovAngleVertical  = 1.04719755f;
             disp.viewSpaceToMetersFactor = 1.f;
             disp.flags                   = 0;
@@ -910,14 +920,12 @@ static void RunStaticFsr3(
                 std::cout << "[StaticFSR3] FATAL: dispatch failed frame "
                           << frame << "\n";
                 vkEndCommandBuffer(cmd);
-                // free shared images before goto
                 vkDestroyImage(device, siRecon.image,     nullptr); vkFreeMemory(device, siRecon.memory,    nullptr);
                 vkDestroyImage(device, siDilDepth.image,  nullptr); vkFreeMemory(device, siDilDepth.memory, nullptr);
                 vkDestroyImage(device, siDilMV.image,     nullptr); vkFreeMemory(device, siDilMV.memory,    nullptr);
                 goto cleanup_fsr3_ctx;
             }
 
-            // Memory barrier
             VkMemoryBarrier memBarrier = { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
             memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
             memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT  | VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
@@ -935,6 +943,9 @@ static void RunStaticFsr3(
             if ((frame + 1) % 32 == 0 || frame == cfg.static_jitter_frames - 1)
                 std::cout << "[StaticFSR3] Frame " << (frame + 1)
                           << "/" << cfg.static_jitter_frames << "\n";
+
+            prevJX = jX;
+            prevJY = jY;
         }
 
         // Readback
@@ -947,7 +958,6 @@ static void RunStaticFsr3(
             std::cout << "[StaticFSR3] Saved -> " << outPath << "\n";
         }
 
-        // Free shared resources
         vkDestroyImage(device, siRecon.image,     nullptr); vkFreeMemory(device, siRecon.memory,    nullptr);
         vkDestroyImage(device, siDilDepth.image,  nullptr); vkFreeMemory(device, siDilDepth.memory, nullptr);
         vkDestroyImage(device, siDilMV.image,     nullptr); vkFreeMemory(device, siDilMV.memory,    nullptr);
@@ -997,14 +1007,11 @@ void RunStaticPngPass(
               << "' -> " << inW << "x" << inH
               << "  channels=" << inChannels << "\n";
 
-    // Convert uint8 RGBA → float linear RGBA
-    // PNG is sRGB gamma-encoded; linearise by applying gamma 2.2 decode.
-    // For SDR input we treat it as sRGB: linearise to feed FSR.
+    // Convert uint8 RGBA → float linear RGBA (sRGB gamma 2.2 decode)
     const int npixels = inW * inH;
     std::vector<float> inputLinear(npixels * 4);
     for (int i = 0; i < npixels * 4; i++) {
         float srgb = rawPixels[i] / 255.0f;
-        // Apply sRGB-to-linear (simple gamma-2.2 approximation)
         inputLinear[i] = powf(srgb, 2.2f);
     }
     stbi_image_free(rawPixels);
@@ -1014,22 +1021,18 @@ void RunStaticPngPass(
     if (cfg.static_upscaling && cfg.static_scale > 1.0f) {
         outW = (int)std::round((float)inW * cfg.static_scale);
         outH = (int)std::round((float)inH * cfg.static_scale);
-        // Align to 2 (some FSR internals prefer even dimensions)
         outW = (outW + 1) & ~1;
         outH = (outH + 1) & ~1;
     } else {
-        // No upscaling (scale=1.0 after override or user set to 1.0)
         outW = inW;
         outH = inH;
     }
     std::cout << "[StaticPass] Render resolution : " << inW  << "x" << inH  << "\n";
     std::cout << "[StaticPass] Display resolution: " << outW << "x" << outH << "\n";
 
-    // Build output filename — insert algo and frame count into the name
-    // e.g. "output.png" -> "output_FSR2_32frames.png"
+    // Build output filename
     std::string algoStr = (cfg.static_algo == StaticAlgorithm::FSR1) ? "FSR1" :
                           (cfg.static_algo == StaticAlgorithm::FSR2) ? "FSR2" : "FSR3";
-    // Inject suffix before the file extension
     std::string outName = cfg.static_output_name;
     {
         size_t dot = outName.rfind('.');
